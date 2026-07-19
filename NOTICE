@@ -1,0 +1,36 @@
+TI-AAA
+Copyright (c) 2026 TI-AAA contributors
+
+This project is distributed under the GNU Affero General Public License,
+version 3. See LICENSE.
+
+ApplyPilot attribution
+----------------------
+
+TI-AAA is an internship-focused adaptation informed by ApplyPilot:
+
+  https://github.com/Pickle-Pixel/ApplyPilot
+
+ApplyPilot was created by Pickle-Pixel and is distributed under the GNU
+Affero General Public License, version 3. TI-AAA retains the same license.
+The original project established the open-source pipeline concept and
+application workflow patterns that inspired TI-AAA, including staged SQLite
+tracking and Claude Code / Playwright browser-worker orchestration.
+
+TI-AAA is a separate project. It replaces broad job-board discovery with
+polling of explicitly configured community GitHub repositories and adds a
+persistent internship tracker and local analytics dashboard.
+
+Internship data sources
+-----------------------
+
+At runtime, TI-AAA can read public listing documents from:
+
+  https://github.com/sndsh404/summer-2027-internships
+  https://github.com/vanshb03/Summer2027-Internships
+  https://github.com/SimplifyJobs/Summer2026-Internships
+
+Those repositories, their names, and their listing content belong to their
+respective maintainers and contributors. TI-AAA does not redistribute their
+listing databases in its source distribution and is not affiliated with or
+endorsed by those maintainers.

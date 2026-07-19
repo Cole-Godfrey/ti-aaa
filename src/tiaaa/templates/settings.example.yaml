@@ -1,0 +1,28 @@
+poll_interval_seconds: 300
+minimum_fit_score: 5
+initial_sync: baseline
+
+filters:
+  # Empty means accept all roles in the tech-internship repositories.
+  include_role_keywords: []
+  exclude_keywords: []
+  allowed_locations: []
+  remote_only: false
+
+preparation:
+  use_llm: false
+  generate_cover_letters: true
+
+automation:
+  # Submission requires BOTH this setting and the CLI --submit flag.
+  allow_submission: false
+  max_applications_per_cycle: 5
+  max_applications_per_day: 25
+  max_attempts: 3
+  claude_model: sonnet
+  headless: false
+  timeout_seconds: 600
+
+dashboard:
+  host: 127.0.0.1
+  port: 8787

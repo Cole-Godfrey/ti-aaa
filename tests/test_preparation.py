@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import json
+
+from tiaaa.config import SOURCE_DOCUMENTS, AppPaths
+from tiaaa.database import get_connection, ingest_listings, init_db
+from tiaaa.models import InternshipListing
+from tiaaa.preparation import prepare_jobs, score_jobs_with_llm
+
+
+class FakeClient:
+    def __init__(self, response: dict) -> None:
+        self.response = response
+        self.closed = False
+
+    def ask(self, *_args, **_kwargs) -> str:
+        return json.dumps(self.response)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def seed_job(path, profile, settings) -> None:
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    job = InternshipListing(
+        company="Acme",
+        role="Software Engineer Intern",
+        location="Remote",
+        application_url="https://jobs.test/1",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+    )
+    ingest_listings(
+        connection, source, [job], profile=profile, settings=settings, include_existing=True
+    )
+
+
+def make_paths(tmp_path) -> AppPaths:
+    paths = AppPaths(tmp_path)
+    paths.packets.mkdir()
+    paths.resume_text.write_text("Built a Python API for a university project.", encoding="utf-8")
+    paths.resume_pdf.write_bytes(b"%PDF-1.4")
+    return paths
+
+
+def test_prepare_without_llm_attaches_base_resume(tmp_path, profile, settings) -> None:
+    paths = make_paths(tmp_path)
+    seed_job(paths.database, profile, settings)
+
+    result = prepare_jobs(
+        paths=paths,
+        profile=profile,
+        settings=settings,
+        db_path=paths.database,
+    )
+
+    row = get_connection(paths.database).execute("SELECT * FROM jobs").fetchone()
+    assert result == {"prepared": 1, "errors": 0}
+    assert row["pipeline_status"] == "ready"
+    assert row["resume_path"] == str(paths.resume_pdf.resolve())
+    assert row["cover_letter_path"] is None
+
+
+def test_prepare_with_llm_writes_fact_packet(tmp_path, profile, settings, monkeypatch) -> None:
+    paths = make_paths(tmp_path)
+    seed_job(paths.database, profile, settings)
+    settings["preparation"]["use_llm"] = True
+    fake = FakeClient(
+        {
+            "cover_letter": "Dear Acme, my Python university project is relevant.",
+            "talking_points": ["Built a Python API for a university project."],
+        }
+    )
+    monkeypatch.setattr("tiaaa.preparation.get_client", lambda: fake)
+
+    result = prepare_jobs(
+        paths=paths,
+        profile=profile,
+        settings=settings,
+        db_path=paths.database,
+    )
+
+    row = get_connection(paths.database).execute("SELECT * FROM jobs").fetchone()
+    cover_path = tmp_path / row["cover_letter_path"]
+    assert result["prepared"] == 1
+    assert fake.closed
+    assert "Dear Acme" in cover_path.read_text()
+    assert "Built a Python API" in row["preparation_notes"]
+
+
+def test_optional_llm_score_updates_queued_job(tmp_path, profile, settings, monkeypatch) -> None:
+    paths = make_paths(tmp_path)
+    seed_job(paths.database, profile, settings)
+    fake = FakeClient({"score": 8, "reasoning": "Python experience matches the role."})
+    monkeypatch.setattr("tiaaa.preparation.get_client", lambda: fake)
+
+    result = score_jobs_with_llm(paths=paths, db_path=paths.database)
+
+    row = get_connection(paths.database).execute(
+        "SELECT fit_score, score_reasoning FROM jobs"
+    ).fetchone()
+    assert result == {"scored": 1, "errors": 0}
+    assert tuple(row) == (8, "Python experience matches the role.")
+    assert fake.closed

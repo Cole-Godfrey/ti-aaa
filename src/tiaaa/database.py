@@ -1,0 +1,830 @@
+"""SQLite persistence for discovery, application state, and tracker analytics."""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from collections.abc import Iterable
+from contextlib import suppress
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from tiaaa.config import get_paths
+from tiaaa.discovery.parser import canonicalize_url, listing_fingerprint
+from tiaaa.eligibility import evaluate_listing
+from tiaaa.models import InternshipListing, SourceDocument
+
+_local = threading.local()
+
+PIPELINE_STATUSES = {
+    "discovered",
+    "queued",
+    "ready",
+    "applying",
+    "manual_review",
+    "applied",
+    "failed",
+    "skipped",
+    "expired",
+    "withdrawn",
+}
+OUTCOME_STATUSES = {"none", "oa", "interview", "offer", "rejected", "withdrawn"}
+TERMINAL_PIPELINE_STATUSES = {"applied", "withdrawn"}
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
+    path = str(Path(db_path or get_paths().database).expanduser().resolve())
+    if not hasattr(_local, "connections"):
+        _local.connections = {}
+    connection = _local.connections.get(path)
+    if connection is not None:
+        try:
+            connection.execute("SELECT 1")
+            return connection
+        except sqlite3.ProgrammingError:
+            pass
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=10000")
+    connection.execute("PRAGMA foreign_keys=ON")
+    with suppress(OSError):
+        Path(path).chmod(0o600)
+    _local.connections[path] = connection
+    return connection
+
+
+def close_connection(db_path: Path | str | None = None) -> None:
+    path = str(Path(db_path or get_paths().database).expanduser().resolve())
+    if hasattr(_local, "connections"):
+        connection = _local.connections.pop(path, None)
+        if connection is not None:
+            connection.close()
+
+
+def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
+    connection = get_connection(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS sources (
+            document_key       TEXT PRIMARY KEY,
+            source_key         TEXT NOT NULL,
+            label              TEXT NOT NULL,
+            repo_url           TEXT NOT NULL,
+            branch             TEXT NOT NULL,
+            path               TEXT NOT NULL,
+            raw_url            TEXT NOT NULL,
+            etag               TEXT,
+            last_modified      TEXT,
+            content_sha256     TEXT,
+            initialized        INTEGER NOT NULL DEFAULT 0,
+            last_polled_at     TEXT,
+            last_success_at    TEXT,
+            last_error         TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS jobs (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            fingerprint           TEXT NOT NULL,
+            canonical_url         TEXT NOT NULL UNIQUE,
+            application_url       TEXT NOT NULL,
+            company               TEXT NOT NULL,
+            role                  TEXT NOT NULL,
+            location              TEXT NOT NULL DEFAULT '',
+            category              TEXT NOT NULL DEFAULT 'Tech',
+            posting_date          TEXT,
+            first_seen_at         TEXT NOT NULL,
+            last_seen_at          TEXT NOT NULL,
+            is_active             INTEGER NOT NULL DEFAULT 1,
+            no_sponsorship        INTEGER NOT NULL DEFAULT 0,
+            citizenship_required  INTEGER NOT NULL DEFAULT 0,
+            eligibility           TEXT NOT NULL DEFAULT 'eligible',
+            eligibility_reason    TEXT,
+            fit_score             INTEGER,
+            score_reasoning       TEXT,
+            scored_at             TEXT,
+            pipeline_status       TEXT NOT NULL DEFAULT 'discovered',
+            discovered_as_new     INTEGER NOT NULL DEFAULT 0,
+            resume_path           TEXT,
+            cover_letter_path     TEXT,
+            preparation_notes     TEXT,
+            prepared_at           TEXT,
+            apply_attempts        INTEGER NOT NULL DEFAULT 0,
+            applied_at            TEXT,
+            apply_error           TEXT,
+            last_attempted_at      TEXT,
+            worker_id             TEXT,
+            oa_at                 TEXT,
+            interview_at          TEXT,
+            offer_at              TEXT,
+            rejected_at           TEXT,
+            withdrawn_at          TEXT,
+            outcome_status        TEXT NOT NULL DEFAULT 'none',
+            notes                 TEXT NOT NULL DEFAULT '',
+            created_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_jobs_pipeline ON jobs(pipeline_status, fit_score);
+        CREATE INDEX IF NOT EXISTS idx_jobs_fingerprint ON jobs(fingerprint);
+        CREATE INDEX IF NOT EXISTS idx_jobs_applied ON jobs(applied_at);
+        CREATE INDEX IF NOT EXISTS idx_jobs_last_seen ON jobs(last_seen_at);
+
+        CREATE TABLE IF NOT EXISTS job_sources (
+            job_id              INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            document_key        TEXT NOT NULL REFERENCES sources(document_key) ON DELETE CASCADE,
+            source_key          TEXT NOT NULL,
+            source_label        TEXT NOT NULL,
+            source_repo_url     TEXT NOT NULL,
+            source_path         TEXT NOT NULL,
+            raw_date            TEXT,
+            first_seen_at       TEXT NOT NULL,
+            last_seen_at        TEXT NOT NULL,
+            active              INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (job_id, document_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_job_sources_document ON job_sources(document_key, active);
+
+        CREATE TABLE IF NOT EXISTS events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id      INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+            event_type  TEXT NOT NULL,
+            detail      TEXT,
+            created_at  TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, created_at DESC);
+        """
+    )
+    connection.commit()
+    return connection
+
+
+def _as_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+def add_event(
+    connection: sqlite3.Connection,
+    job_id: int | None,
+    event_type: str,
+    detail: str | None = None,
+) -> None:
+    connection.execute(
+        "INSERT INTO events (job_id, event_type, detail, created_at) VALUES (?, ?, ?, ?)",
+        (job_id, event_type, detail, utc_now()),
+    )
+
+
+def ensure_source(connection: sqlite3.Connection, source: SourceDocument) -> dict[str, Any]:
+    connection.execute(
+        """
+        INSERT INTO sources (
+            document_key, source_key, label, repo_url, branch, path, raw_url
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(document_key) DO UPDATE SET
+            source_key = excluded.source_key,
+            label = excluded.label,
+            repo_url = excluded.repo_url,
+            branch = excluded.branch,
+            path = excluded.path,
+            raw_url = excluded.raw_url
+        """,
+        (
+            source.document_key,
+            source.key,
+            source.label,
+            source.repo_url,
+            source.branch,
+            source.path,
+            source.raw_url,
+        ),
+    )
+    connection.commit()
+    row = connection.execute(
+        "SELECT * FROM sources WHERE document_key = ?", (source.document_key,)
+    ).fetchone()
+    return dict(row)
+
+
+def source_headers(connection: sqlite3.Connection, source: SourceDocument) -> dict[str, str]:
+    state = ensure_source(connection, source)
+    headers: dict[str, str] = {}
+    if state.get("etag"):
+        headers["If-None-Match"] = state["etag"]
+    if state.get("last_modified"):
+        headers["If-Modified-Since"] = state["last_modified"]
+    return headers
+
+
+def mark_source_polled(
+    connection: sqlite3.Connection,
+    source: SourceDocument,
+    *,
+    etag: str | None = None,
+    last_modified: str | None = None,
+    content_sha256: str | None = None,
+    success: bool = True,
+    error: str | None = None,
+) -> None:
+    now = utc_now()
+    ensure_source(connection, source)
+    connection.execute(
+        """
+        UPDATE sources SET
+            etag = COALESCE(?, etag),
+            last_modified = COALESCE(?, last_modified),
+            content_sha256 = COALESCE(?, content_sha256),
+            last_polled_at = ?,
+            last_success_at = CASE WHEN ? THEN ? ELSE last_success_at END,
+            last_error = ?
+        WHERE document_key = ?
+        """,
+        (
+            etag,
+            last_modified,
+            content_sha256,
+            now,
+            int(success),
+            now,
+            None if success else (error or "unknown source error"),
+            source.document_key,
+        ),
+    )
+    connection.commit()
+
+
+def _find_job(
+    connection: sqlite3.Connection,
+    canonical_url: str,
+    fingerprint: str,
+    source_key: str,
+) -> sqlite3.Row | None:
+    exact = connection.execute(
+        "SELECT * FROM jobs WHERE canonical_url = ? LIMIT 1", (canonical_url,)
+    ).fetchone()
+    if exact is not None:
+        return exact
+    return connection.execute(
+        """
+        SELECT j.* FROM jobs j
+        WHERE j.fingerprint = ?
+          AND EXISTS (
+              SELECT 1 FROM job_sources other
+              WHERE other.job_id = j.id AND other.source_key != ?
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM job_sources same
+              WHERE same.job_id = j.id AND same.source_key = ?
+          )
+        ORDER BY j.first_seen_at LIMIT 1
+        """,
+        (fingerprint, source_key, source_key),
+    ).fetchone()
+
+
+def ingest_listings(
+    connection: sqlite3.Connection,
+    source: SourceDocument,
+    listings: Iterable[InternshipListing],
+    *,
+    profile: dict[str, Any],
+    settings: dict[str, Any],
+    include_existing: bool = False,
+) -> dict[str, int | bool]:
+    """Atomically reconcile one fetched source document with the local queue."""
+
+    source_state = ensure_source(connection, source)
+    baseline = not bool(source_state["initialized"]) and not include_existing
+    now = utc_now()
+    stats: dict[str, int | bool] = {
+        "parsed": 0,
+        "new": 0,
+        "existing": 0,
+        "queued": 0,
+        "skipped": 0,
+        "expired": 0,
+        "baseline": baseline,
+    }
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            "UPDATE job_sources SET active = 0 WHERE document_key = ?", (source.document_key,)
+        )
+        for listing in listings:
+            stats["parsed"] = int(stats["parsed"]) + 1
+            canonical_url = canonicalize_url(listing.application_url)
+            if not canonical_url:
+                continue
+            fingerprint = listing_fingerprint(listing.company, listing.role, listing.location)
+            row = _find_job(connection, canonical_url, fingerprint, source.key)
+            eligibility_listing = listing
+            if row is not None:
+                eligibility_listing = replace(
+                    listing,
+                    no_sponsorship=bool(listing.no_sponsorship or row["no_sponsorship"]),
+                    citizenship_required=bool(
+                        listing.citizenship_required or row["citizenship_required"]
+                    ),
+                )
+            eligibility = evaluate_listing(eligibility_listing, profile, settings)
+
+            if row is None:
+                is_new = not baseline
+                if not eligibility.eligible:
+                    status = "skipped"
+                    stats["skipped"] = int(stats["skipped"]) + 1
+                elif is_new:
+                    status = "queued"
+                    stats["queued"] = int(stats["queued"]) + 1
+                else:
+                    status = "discovered"
+                cursor = connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        fingerprint, canonical_url, application_url, company, role, location,
+                        category, posting_date, first_seen_at, last_seen_at, is_active,
+                        no_sponsorship, citizenship_required, eligibility, eligibility_reason,
+                        fit_score, score_reasoning, scored_at, pipeline_status, discovered_as_new,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        fingerprint,
+                        canonical_url,
+                        listing.application_url,
+                        listing.company,
+                        listing.role,
+                        listing.location,
+                        listing.category,
+                        listing.posting_date,
+                        now,
+                        now,
+                        int(listing.no_sponsorship),
+                        int(listing.citizenship_required),
+                        "eligible" if eligibility.eligible else "ineligible",
+                        eligibility.reason,
+                        eligibility.score,
+                        eligibility.score_reasoning,
+                        now,
+                        status,
+                        int(is_new),
+                        now,
+                        now,
+                    ),
+                )
+                job_id = int(cursor.lastrowid)
+                stats["new"] = int(stats["new"]) + 1
+                add_event(connection, job_id, "discovered", f"Imported from {source.label}")
+                if status == "queued":
+                    add_event(connection, job_id, "queued", "New eligible internship")
+            else:
+                job_id = int(row["id"])
+                stats["existing"] = int(stats["existing"]) + 1
+                next_status = row["pipeline_status"]
+                if not eligibility.eligible and next_status in {
+                    "discovered",
+                    "queued",
+                    "ready",
+                    "failed",
+                }:
+                    next_status = "skipped"
+                    add_event(connection, job_id, "ineligible", eligibility.reason)
+                elif (
+                    eligibility.eligible
+                    and row["eligibility"] == "ineligible"
+                    and next_status == "skipped"
+                ):
+                    if baseline:
+                        next_status = "discovered"
+                        add_event(connection, job_id, "eligible", "Active in baseline source")
+                    else:
+                        next_status = "queued"
+                        stats["queued"] = int(stats["queued"]) + 1
+                        add_event(connection, job_id, "queued", "Listing became eligible")
+                elif next_status == "expired" and eligibility.eligible:
+                    if baseline:
+                        next_status = "discovered"
+                        add_event(connection, job_id, "reopened", "Active in baseline source")
+                    else:
+                        next_status = "queued"
+                        stats["queued"] = int(stats["queued"]) + 1
+                        add_event(connection, job_id, "reopened", f"Reappeared in {source.label}")
+                connection.execute(
+                    """
+                    UPDATE jobs SET
+                        application_url = ?, company = ?, role = ?, location = ?, category = ?,
+                        posting_date = COALESCE(?, posting_date), last_seen_at = ?, is_active = 1,
+                        no_sponsorship = no_sponsorship OR ?,
+                        citizenship_required = citizenship_required OR ?,
+                        eligibility = ?, eligibility_reason = ?,
+                        fit_score = COALESCE(fit_score, ?),
+                        score_reasoning = COALESCE(score_reasoning, ?),
+                        pipeline_status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        listing.application_url,
+                        listing.company,
+                        listing.role,
+                        listing.location,
+                        listing.category,
+                        listing.posting_date,
+                        now,
+                        int(listing.no_sponsorship),
+                        int(listing.citizenship_required),
+                        "eligible" if eligibility.eligible else "ineligible",
+                        eligibility.reason,
+                        eligibility.score,
+                        eligibility.score_reasoning,
+                        next_status,
+                        now,
+                        job_id,
+                    ),
+                )
+
+            connection.execute(
+                """
+                INSERT INTO job_sources (
+                    job_id, document_key, source_key, source_label, source_repo_url,
+                    source_path, raw_date, first_seen_at, last_seen_at, active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(job_id, document_key) DO UPDATE SET
+                    source_label = excluded.source_label,
+                    source_repo_url = excluded.source_repo_url,
+                    source_path = excluded.source_path,
+                    raw_date = excluded.raw_date,
+                    last_seen_at = excluded.last_seen_at,
+                    active = 1
+                """,
+                (
+                    job_id,
+                    source.document_key,
+                    source.key,
+                    source.label,
+                    source.repo_url,
+                    source.path,
+                    listing.raw_date,
+                    now,
+                    now,
+                ),
+            )
+
+        inactive = connection.execute(
+            """
+            SELECT j.id, j.pipeline_status
+            FROM jobs j
+            WHERE j.is_active = 1
+              AND NOT EXISTS (SELECT 1 FROM job_sources js WHERE js.job_id = j.id AND js.active = 1)
+            """
+        ).fetchall()
+        for row in inactive:
+            status = row["pipeline_status"]
+            next_status = status if status in TERMINAL_PIPELINE_STATUSES else "expired"
+            connection.execute(
+                "UPDATE jobs SET is_active = 0, pipeline_status = ?, updated_at = ? WHERE id = ?",
+                (next_status, now, row["id"]),
+            )
+            add_event(connection, int(row["id"]), "expired", "Removed from all active source documents")
+        stats["expired"] = len(inactive)
+
+        if include_existing:
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET pipeline_status = 'queued', discovered_as_new = 1, updated_at = ?
+                WHERE pipeline_status = 'discovered' AND eligibility = 'eligible' AND is_active = 1
+                """,
+                (now,),
+            )
+            stats["queued"] = int(stats["queued"]) + cursor.rowcount
+
+        connection.execute(
+            """
+            UPDATE sources SET initialized = 1, last_success_at = ?, last_polled_at = ?, last_error = NULL
+            WHERE document_key = ?
+            """,
+            (now, now, source.document_key),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return stats
+
+
+def get_job(connection: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
+    return _as_dict(connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())
+
+
+def list_jobs(
+    connection: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    clauses = ["1 = 1"]
+    parameters: list[Any] = []
+    if status and status != "all":
+        if status in OUTCOME_STATUSES - {"none"}:
+            clauses.append("j.outcome_status = ?")
+        else:
+            clauses.append("j.pipeline_status = ?")
+        parameters.append(status)
+    if search:
+        clauses.append("(j.company LIKE ? OR j.role LIKE ? OR j.location LIKE ?)")
+        token = f"%{search}%"
+        parameters.extend((token, token, token))
+    parameters.extend((max(1, min(limit, 500)), max(0, offset)))
+    rows = connection.execute(
+        f"""
+        SELECT j.*,
+               GROUP_CONCAT(DISTINCT js.source_label) AS source_labels,
+               GROUP_CONCAT(DISTINCT js.source_repo_url) AS source_repo_urls
+        FROM jobs j
+        LEFT JOIN job_sources js ON js.job_id = j.id AND js.active = 1
+        WHERE {' AND '.join(clauses)}
+        GROUP BY j.id
+        ORDER BY (j.applied_at IS NOT NULL) DESC, COALESCE(j.applied_at, j.last_seen_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        parameters,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_stats(connection: sqlite3.Connection) -> dict[str, Any]:
+    aggregate = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS total_discovered,
+            SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active,
+            SUM(CASE WHEN eligibility = 'eligible' AND is_active = 1 THEN 1 ELSE 0 END) AS eligible,
+            SUM(CASE WHEN pipeline_status = 'queued' THEN 1 ELSE 0 END) AS queued,
+            SUM(CASE WHEN pipeline_status = 'ready' THEN 1 ELSE 0 END) AS ready,
+            SUM(CASE WHEN applied_at IS NOT NULL THEN 1 ELSE 0 END) AS applications,
+            SUM(CASE WHEN applied_at IS NOT NULL AND oa_at IS NOT NULL THEN 1 ELSE 0 END) AS oas,
+            SUM(CASE WHEN applied_at IS NOT NULL AND interview_at IS NOT NULL
+                     THEN 1 ELSE 0 END) AS interviews,
+            SUM(CASE WHEN applied_at IS NOT NULL AND offer_at IS NOT NULL THEN 1 ELSE 0 END) AS offers,
+            SUM(CASE WHEN applied_at IS NOT NULL AND rejected_at IS NOT NULL THEN 1 ELSE 0 END) AS rejected
+        FROM jobs
+        """
+    ).fetchone()
+    data = {key: int(value or 0) for key, value in dict(aggregate).items()}
+    applications = data["applications"]
+    data["oa_rate"] = round(data["oas"] / applications * 100, 1) if applications else 0.0
+    data["interview_rate"] = (
+        round(data["interviews"] / applications * 100, 1) if applications else 0.0
+    )
+
+    status_rows = connection.execute(
+        "SELECT pipeline_status, COUNT(*) AS count FROM jobs GROUP BY pipeline_status"
+    ).fetchall()
+    data["status_counts"] = {row["pipeline_status"]: row["count"] for row in status_rows}
+    source_rows = connection.execute(
+        """
+        SELECT source_label, COUNT(DISTINCT job_id) AS count
+        FROM job_sources WHERE active = 1 GROUP BY source_label ORDER BY count DESC
+        """
+    ).fetchall()
+    data["source_counts"] = [dict(row) for row in source_rows]
+    recent = connection.execute(
+        """
+        SELECT id, company, role, location, application_url, applied_at, outcome_status
+        FROM jobs WHERE applied_at IS NOT NULL ORDER BY applied_at DESC LIMIT 8
+        """
+    ).fetchall()
+    data["recent_applications"] = [dict(row) for row in recent]
+    return data
+
+
+def update_tracker(
+    connection: sqlite3.Connection,
+    job_id: int,
+    *,
+    pipeline_status: str | None = None,
+    outcome_status: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any] | None:
+    row = get_job(connection, job_id)
+    if row is None:
+        return None
+    if pipeline_status is not None and pipeline_status not in PIPELINE_STATUSES:
+        raise ValueError(f"Unknown pipeline status: {pipeline_status}")
+    if outcome_status is not None and outcome_status not in OUTCOME_STATUSES:
+        raise ValueError(f"Unknown outcome status: {outcome_status}")
+
+    updates: list[str] = []
+    values: list[Any] = []
+    now = utc_now()
+    if pipeline_status is not None:
+        updates.append("pipeline_status = ?")
+        values.append(pipeline_status)
+        if pipeline_status == "applied" and not row.get("applied_at"):
+            updates.append("applied_at = ?")
+            values.append(now)
+        add_event(connection, job_id, "status", pipeline_status)
+    if outcome_status is not None:
+        updates.append("outcome_status = ?")
+        values.append(outcome_status)
+        milestone_columns = {
+            "oa": "oa_at",
+            "interview": "interview_at",
+            "offer": "offer_at",
+            "rejected": "rejected_at",
+            "withdrawn": "withdrawn_at",
+        }
+        if column := milestone_columns.get(outcome_status):
+            updates.append(f"{column} = COALESCE({column}, ?)")
+            values.append(now)
+        add_event(connection, job_id, "outcome", outcome_status)
+    if notes is not None:
+        updates.append("notes = ?")
+        values.append(notes)
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(now)
+        values.append(job_id)
+        connection.execute(f"UPDATE jobs SET {', '.join(updates)} WHERE id = ?", values)
+        connection.commit()
+    return get_job(connection, job_id)
+
+
+def pending_preparation(
+    connection: sqlite3.Connection, minimum_score: int, limit: int = 0
+) -> list[dict[str, Any]]:
+    query = """
+        SELECT * FROM jobs
+        WHERE pipeline_status = 'queued' AND eligibility = 'eligible' AND is_active = 1
+          AND COALESCE(fit_score, 0) >= ?
+        ORDER BY posting_date DESC, first_seen_at DESC
+    """
+    parameters: list[Any] = [minimum_score]
+    if limit > 0:
+        query += " LIMIT ?"
+        parameters.append(limit)
+    return [dict(row) for row in connection.execute(query, parameters).fetchall()]
+
+
+def mark_prepared(
+    connection: sqlite3.Connection,
+    job_id: int,
+    *,
+    resume_path: str,
+    cover_letter_path: str | None,
+    notes: str,
+) -> None:
+    now = utc_now()
+    connection.execute(
+        """
+        UPDATE jobs SET resume_path = ?, cover_letter_path = ?, preparation_notes = ?,
+                        prepared_at = ?, pipeline_status = 'ready', updated_at = ?
+        WHERE id = ?
+        """,
+        (resume_path, cover_letter_path, notes, now, now, job_id),
+    )
+    add_event(connection, job_id, "prepared", notes)
+    connection.commit()
+
+
+def claim_next_job(
+    connection: sqlite3.Connection,
+    *,
+    worker_id: str,
+    max_attempts: int,
+    target_job_id: int | None = None,
+) -> dict[str, Any] | None:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        clauses = [
+            "pipeline_status IN ('ready', 'failed')",
+            "eligibility = 'eligible'",
+            "is_active = 1",
+            "apply_attempts < ?",
+        ]
+        parameters: list[Any] = [max_attempts]
+        if target_job_id is not None:
+            clauses.append("id = ?")
+            parameters.append(target_job_id)
+        row = connection.execute(
+            f"""
+            SELECT * FROM jobs WHERE {' AND '.join(clauses)}
+            ORDER BY (pipeline_status = 'ready') DESC, fit_score DESC,
+                     posting_date DESC, first_seen_at ASC LIMIT 1
+            """,
+            parameters,
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            return None
+        now = utc_now()
+        connection.execute(
+            """
+            UPDATE jobs SET pipeline_status = 'applying', worker_id = ?,
+                            last_attempted_at = ?, apply_attempts = apply_attempts + 1,
+                            updated_at = ? WHERE id = ?
+            """,
+            (worker_id, now, now, row["id"]),
+        )
+        add_event(connection, int(row["id"]), "applying", worker_id)
+        connection.commit()
+        return get_job(connection, int(row["id"]))
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def claimable_application_count(
+    connection: sqlite3.Connection,
+    *,
+    max_attempts: int,
+    target_job_id: int | None = None,
+) -> int:
+    """Count jobs that an application worker could atomically claim."""
+
+    clauses = [
+        "pipeline_status IN ('ready', 'failed')",
+        "eligibility = 'eligible'",
+        "is_active = 1",
+        "apply_attempts < ?",
+    ]
+    parameters: list[Any] = [max_attempts]
+    if target_job_id is not None:
+        clauses.append("id = ?")
+        parameters.append(target_job_id)
+    row = connection.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE {' AND '.join(clauses)}",
+        parameters,
+    ).fetchone()
+    return int(row[0])
+
+
+def mark_apply_result(
+    connection: sqlite3.Connection,
+    job_id: int,
+    result: str,
+    detail: str | None = None,
+) -> None:
+    now = utc_now()
+    status_map = {
+        "applied": "applied",
+        "review_ready": "manual_review",
+        "expired": "expired",
+        "needs_review": "manual_review",
+        "captcha": "manual_review",
+        "failed": "failed",
+    }
+    status = status_map.get(result, "failed")
+    applied_at = now if result == "applied" else None
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = ?,
+                        applied_at = COALESCE(?, applied_at),
+                        apply_error = ?, worker_id = NULL, updated_at = ?
+        WHERE id = ?
+        """,
+        (status, applied_at, None if result == "applied" else detail, now, job_id),
+    )
+    add_event(connection, job_id, result, detail)
+    connection.commit()
+
+
+def release_claim(connection: sqlite3.Connection, job_id: int, detail: str = "released") -> None:
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'ready', worker_id = NULL, updated_at = ?
+        WHERE id = ? AND pipeline_status = 'applying'
+        """,
+        (utc_now(), job_id),
+    )
+    add_event(connection, job_id, "claim_released", detail)
+    connection.commit()
+
+
+def applications_today(connection: sqlite3.Connection) -> int:
+    return int(
+        connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL AND date(applied_at) = date('now')"
+        ).fetchone()[0]
+    )
+
+
+def source_status(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in connection.execute(
+            "SELECT * FROM sources ORDER BY source_key, path"
+        ).fetchall()
+    ]

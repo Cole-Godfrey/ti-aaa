@@ -1,0 +1,53 @@
+{
+  "personal": {
+    "full_name": "YOUR LEGAL NAME",
+    "preferred_name": "",
+    "email": "you@example.com",
+    "phone": "+1 555 123 4567",
+    "address": "",
+    "city": "",
+    "state": "",
+    "country": "United States",
+    "postal_code": "",
+    "linkedin_url": "",
+    "github_url": "",
+    "portfolio_url": ""
+  },
+  "education": {
+    "school": "YOUR UNIVERSITY",
+    "degree": "Bachelor of Science",
+    "major": "Computer Science",
+    "graduation_date": "May 2028",
+    "gpa": "",
+    "current_year": "sophomore"
+  },
+  "work_authorization": {
+    "legally_authorized_to_work_us": true,
+    "requires_sponsorship": false,
+    "us_citizen": false,
+    "work_permit_type": ""
+  },
+  "preferences": {
+    "roles": ["software", "backend", "full stack", "machine learning", "data"],
+    "locations": ["Remote", "San Francisco", "Seattle", "New York"],
+    "terms": ["Summer 2027", "Fall 2026", "Winter 2027", "Spring 2027"],
+    "willing_to_relocate": true
+  },
+  "skills": {
+    "languages": ["Python", "Java", "JavaScript"],
+    "frameworks": ["React", "FastAPI"],
+    "tools": ["Git", "Docker"]
+  },
+  "answers": {
+    "age_18_or_older": true,
+    "available_start_date": "May 2027",
+    "previously_worked_here": false,
+    "how_heard": "Community GitHub internship list"
+  },
+  "eeo_voluntary": {
+    "gender": "Decline to self-identify",
+    "race_ethnicity": "Decline to self-identify",
+    "veteran_status": "Decline to self-identify",
+    "disability_status": "Decline to self-identify"
+  }
+}

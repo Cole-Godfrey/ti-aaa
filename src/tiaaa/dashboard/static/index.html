@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="TI-AAA technology internship application tracker">
+  <title>TI-AAA · Internship command center</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2216%22 fill=%22%23c9f26a%22/><text x=%2232%22 y=%2240%22 text-anchor=%22middle%22 font-family=%22Arial%22 font-size=%2224%22 font-weight=%22900%22 fill=%22%2314241f%22>TI</text></svg>">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#top" aria-label="TI-AAA home">
+        <span class="brand-mark" aria-hidden="true">TI</span>
+        <span><strong>TI-AAA</strong><small>Application agent</small></span>
+      </a>
+
+      <nav class="nav" aria-label="Primary navigation">
+        <a class="nav-link active" href="#overview">
+          <span class="nav-icon">⌂</span><span>Overview</span>
+        </a>
+        <a class="nav-link" href="#tracker">
+          <span class="nav-icon">▤</span><span>Applications</span>
+        </a>
+        <a class="nav-link" href="#sources">
+          <span class="nav-icon">⌘</span><span>Sources</span>
+        </a>
+      </nav>
+
+      <div class="source-note">
+        <span class="live-dot"></span>
+        <p><strong>GitHub-only discovery</strong><br>Three community internship lists</p>
+      </div>
+
+      <div class="sidebar-footer">
+        <span>Local dashboard</span>
+        <code>127.0.0.1</code>
+      </div>
+    </aside>
+
+    <main id="top" class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">INTERNSHIP COMMAND CENTER</p>
+          <h1>Good morning<span class="accent-dot">.</span></h1>
+          <p class="subtitle">Your applications, signals, and next moves in one place.</p>
+        </div>
+        <div class="topbar-actions">
+          <span id="lastUpdated" class="last-updated">Syncing…</span>
+          <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh dashboard">↻</button>
+        </div>
+      </header>
+
+      <section id="overview" class="stats-grid" aria-label="Application statistics">
+        <article class="stat-card primary">
+          <div class="stat-label"><span>Total applications</span><span class="trend neutral">ALL TIME</span></div>
+          <div id="applicationsValue" class="stat-value">—</div>
+          <p id="applicationsHint" class="stat-hint">Waiting for your first application</p>
+          <div class="mini-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        </article>
+
+        <article class="stat-card">
+          <div class="stat-label"><span>Online assessment rate</span><span class="signal signal-oa">OA</span></div>
+          <div id="oaRateValue" class="stat-value">—</div>
+          <p id="oaHint" class="stat-hint">0 assessments recorded</p>
+          <div class="progress-track"><span id="oaProgress"></span></div>
+        </article>
+
+        <article class="stat-card">
+          <div class="stat-label"><span>Interview rate</span><span class="signal signal-interview">INT</span></div>
+          <div id="interviewRateValue" class="stat-value">—</div>
+          <p id="interviewHint" class="stat-hint">0 interviews recorded</p>
+          <div class="progress-track coral"><span id="interviewProgress"></span></div>
+        </article>
+
+        <article class="stat-card compact-card">
+          <div class="compact-stat"><span>Active roles</span><strong id="activeValue">—</strong></div>
+          <div class="compact-stat"><span>Ready to apply</span><strong id="readyValue">—</strong></div>
+          <div class="compact-stat"><span>Offers</span><strong id="offersValue">—</strong></div>
+        </article>
+      </section>
+
+      <section class="dashboard-grid">
+        <div class="panel pipeline-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">LIVE PIPELINE</p><h2>Application funnel</h2></div>
+            <span id="eligibleBadge" class="outline-badge">— eligible</span>
+          </div>
+          <div id="funnel" class="funnel" aria-label="Application funnel"></div>
+        </div>
+
+        <div class="panel recent-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">LATEST ACTIVITY</p><h2>Recently applied</h2></div>
+            <a href="#tracker" class="text-link">View all →</a>
+          </div>
+          <div id="recentApplications" class="recent-list">
+            <div class="empty-state compact"><span>↗</span><p>No applications yet.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tracker" class="panel tracker-panel">
+        <div class="panel-heading tracker-heading">
+          <div><p class="eyebrow">APPLICATION TRACKER</p><h2>Every opportunity, accounted for</h2></div>
+          <div class="tracker-tools">
+            <label class="search-box">
+              <span aria-hidden="true">⌕</span>
+              <input id="searchInput" type="search" placeholder="Search company, role, location" autocomplete="off">
+            </label>
+            <select id="statusFilter" aria-label="Filter by status">
+              <option value="all">All statuses</option>
+              <option value="queued">Queued</option>
+              <option value="ready">Ready</option>
+              <option value="manual_review">Needs review</option>
+              <option value="applied">Applied</option>
+              <option value="oa">OA received</option>
+              <option value="interview">Interviewing</option>
+              <option value="offer">Offer</option>
+              <option value="rejected">Rejected</option>
+              <option value="failed">Failed</option>
+              <option value="expired">Expired</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Company & role</th><th>Location</th><th>Pipeline</th><th>Outcome</th><th>Discovered</th><th><span class="sr-only">Open</span></th>
+            </tr></thead>
+            <tbody id="jobsTableBody">
+              <tr><td colspan="6" class="loading-cell">Loading internships…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="tableSummary" class="table-summary">Loading…</div>
+      </section>
+
+      <section id="sources" class="panel sources-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">DISCOVERY INPUTS</p><h2>Repository health</h2></div>
+          <span class="outline-badge">No job-board scraping</span>
+        </div>
+        <div id="sourceCards" class="source-cards"></div>
+      </section>
+
+      <footer>
+        <span>TI-AAA · Tech Internship Autonomous Application Agent</span>
+        <span>Data stays on this machine</span>
+      </footer>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
