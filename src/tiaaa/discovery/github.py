@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from tiaaa import __version__
 from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.database import (
     ingest_listings,
@@ -67,7 +68,7 @@ class GitHubPoller:
         self.connection = init_db(db_path)
         headers = {
             "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.1",
-            "User-Agent": "TI-AAA/0.1",
+            "User-Agent": f"TI-AAA/{__version__}",
         }
         if token := os.environ.get("GITHUB_TOKEN"):
             headers["Authorization"] = f"Bearer {token}"
@@ -90,7 +91,6 @@ class GitHubPoller:
         *,
         profile: dict[str, Any],
         settings: dict[str, Any],
-        include_existing: bool = False,
         force: bool = False,
     ) -> SyncResult:
         headers = {} if force else source_headers(self.connection, source)
@@ -137,7 +137,7 @@ class GitHubPoller:
                 listings,
                 profile=profile,
                 settings=settings,
-                include_existing=include_existing,
+                include_existing=False,
             )
             mark_source_polled(
                 self.connection,
@@ -170,7 +170,6 @@ class GitHubPoller:
         *,
         profile: dict[str, Any],
         settings: dict[str, Any],
-        include_existing: bool = False,
         force: bool = False,
         source_key: str | None = None,
     ) -> list[SyncResult]:
@@ -182,7 +181,6 @@ class GitHubPoller:
                 source,
                 profile=profile,
                 settings=settings,
-                include_existing=include_existing,
                 force=force,
             )
             for source in documents
@@ -193,7 +191,6 @@ def sync_repositories(
     *,
     profile: dict[str, Any],
     settings: dict[str, Any],
-    include_existing: bool = False,
     force: bool = False,
     source_key: str | None = None,
     db_path: str | None = None,
@@ -202,7 +199,6 @@ def sync_repositories(
         return poller.sync_all(
             profile=profile,
             settings=settings,
-            include_existing=include_existing,
             force=force,
             source_key=source_key,
         )

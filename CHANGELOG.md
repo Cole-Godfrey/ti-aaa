@@ -4,6 +4,25 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-19
+
+### Added
+
+- always-on background service integrated with the local FastAPI app
+- Docker image and Compose service with restart policy, Chromium, Claude Code, and persistent volume
+- browser-based onboarding and complete profile/settings/API-key configuration
+- multiple resume uploads, deterministic selection, and fact-preserving tailored PDFs
+- selected and submitted resume attribution on every tracker row
+- live browser-worker states and loopback-only screenshot previews
+- public `TIAAA` Python facade and `tiaaa serve` command
+- beginner Docker, native website, terminal, and package setup guides
+
+### Changed
+
+- initial repository contents are now an invariant protected baseline with no CLI opt-in escape hatch
+- dashboard redesign uses a simple editorial interface and five app sections
+- browser automation can run headlessly inside Docker while the dashboard is closed
+
 ## [0.1.0] - 2026-07-18
 
 ### Added

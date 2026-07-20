@@ -14,7 +14,7 @@
 ## Release checklist
 
 ```bash
-ruff check .
+ruff check src tests
 pytest --cov=tiaaa --cov-report=term-missing
 python -m build
 python -m twine check dist/*
@@ -25,7 +25,7 @@ Then:
 1. Update `CHANGELOG.md`.
 2. Set the same version in `pyproject.toml` and `src/tiaaa/__init__.py`.
 3. Commit the release.
-4. Create and push an annotated tag such as `v0.1.0`.
+4. Create and push an annotated tag such as `v0.2.0`.
 5. Verify the Publish workflow and install the artifact in a clean environment.
 
 The publish workflow uses PyPI trusted publishing and stores no long-lived PyPI token.

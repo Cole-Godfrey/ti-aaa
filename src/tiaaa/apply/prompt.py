@@ -33,7 +33,11 @@ def build_prompt(
     submit: bool,
 ) -> str:
     resume_pdf = _copy_resume(job, profile, worker_dir)
-    resume_text = paths.resume_text.read_text(encoding="utf-8")
+    fact_path_value = job.get("base_resume_text_path")
+    fact_path = Path(str(fact_path_value)) if fact_path_value else paths.resume_text
+    if not fact_path.is_file():
+        raise FileNotFoundError(f"Selected resume fact text does not exist: {fact_path}")
+    resume_text = fact_path.read_text(encoding="utf-8")
     cover_letter = ""
     if job.get("cover_letter_path"):
         cover_path = Path(str(job["cover_letter_path"]))

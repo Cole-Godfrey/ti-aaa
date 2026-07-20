@@ -1,0 +1,29 @@
+services:
+  tiaaa:
+    image: tiaaa:local
+    build:
+      context: .
+      args:
+        CLAUDE_CODE_VERSION: "2.1.215"
+        PLAYWRIGHT_MCP_VERSION: "0.0.78"
+    container_name: tiaaa
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - tiaaa-data:/data
+    shm_size: "1gb"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TIAAA_HOME: /data
+      TIAAA_FORCE_HEADLESS: "1"
+      TIAAA_CHROME_NO_SANDBOX: "1"
+      TIAAA_PLAYWRIGHT_MCP_COMMAND: playwright-mcp
+
+volumes:
+  tiaaa-data:
+    name: tiaaa-data

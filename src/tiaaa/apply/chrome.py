@@ -85,6 +85,9 @@ def launch_chrome(
     ]
     if headless:
         command.insert(-1, "--headless=new")
+    if os.environ.get("TIAAA_CHROME_NO_SANDBOX") == "1":
+        command.insert(-1, "--no-sandbox")
+        command.insert(-1, "--disable-dev-shm-usage")
     kwargs: dict[str, object] = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,

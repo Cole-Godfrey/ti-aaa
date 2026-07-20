@@ -60,7 +60,10 @@ def test_prepare_without_llm_attaches_base_resume(tmp_path, profile, settings) -
     row = get_connection(paths.database).execute("SELECT * FROM jobs").fetchone()
     assert result == {"prepared": 1, "errors": 0}
     assert row["pipeline_status"] == "ready"
-    assert row["resume_path"] == str(paths.resume_pdf.resolve())
+    assert row["base_resume_id"] is not None
+    assert row["resume_path"].endswith("tailored-resume.pdf")
+    assert (tmp_path / row["resume_path"]).is_file()
+    assert "verbatim lines" in row["tailoring_reason"]
     assert row["cover_letter_path"] is None
 
 

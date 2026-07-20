@@ -27,7 +27,16 @@ from tiaaa.config import (
     load_settings,
 )
 from tiaaa.dashboard.app import create_app
-from tiaaa.database import get_connection, get_stats, init_db, list_jobs, source_status, update_tracker
+from tiaaa.database import (
+    get_connection,
+    get_stats,
+    init_db,
+    list_jobs,
+    list_resumes,
+    source_status,
+    update_tracker,
+)
+from tiaaa.resumes import import_legacy_resume
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,6 +74,7 @@ def main(
 
 def _bootstrap() -> tuple[AppPaths, dict, dict]:
     paths = ensure_dirs(get_paths())
+    initialize_user_files(paths)
     load_environment(paths)
     init_db(paths.database)
     return paths, load_profile(paths), load_settings(paths)
@@ -128,17 +138,14 @@ def _run_sync(
     paths: AppPaths,
     profile: dict,
     settings: dict,
-    include_existing: bool,
     force: bool,
     source: str | None,
 ) -> list:
     from tiaaa.discovery.github import sync_repositories
 
-    include_existing = include_existing or settings.get("initial_sync") == "include_existing"
     results = sync_repositories(
         profile=profile,
         settings=settings,
-        include_existing=include_existing,
         force=force,
         source_key=source,
         db_path=str(paths.database),
@@ -174,10 +181,6 @@ def _run_sync(
 
 @app.command()
 def sync(
-    include_existing: Annotated[
-        bool,
-        typer.Option(help="Queue eligible listings already present during the first sync."),
-    ] = False,
     force: Annotated[bool, typer.Option(help="Ignore ETags and reparse every source document.")] = False,
     source: Annotated[
         str | None,
@@ -194,7 +197,6 @@ def sync(
         paths=paths,
         profile=profile,
         settings=settings,
-        include_existing=include_existing,
         force=force,
         source=source,
     )
@@ -320,7 +322,6 @@ def apply(
 
 @app.command()
 def run(
-    include_existing: Annotated[bool, typer.Option(help="Queue the initial baseline too.")] = False,
     llm_score: Annotated[bool, typer.Option(help="Refine new jobs with the configured LLM.")] = False,
     apply_now: Annotated[
         bool,
@@ -341,7 +342,6 @@ def run(
         paths=paths,
         profile=profile,
         settings=settings,
-        include_existing=include_existing,
         force=False,
         source=None,
     )
@@ -399,7 +399,6 @@ def watch(
                 paths=paths,
                 profile=profile,
                 settings=settings,
-                include_existing=False,
                 force=False,
                 source=None,
             )
@@ -533,17 +532,13 @@ def sources() -> None:
     console.print(table)
 
 
-@app.command()
-def dashboard(
-    host: Annotated[str | None, typer.Option(help="Bind host; defaults to settings.yaml.")] = None,
-    port: Annotated[int | None, typer.Option(min=1, max=65535, help="Bind port.")] = None,
-    open_browser: Annotated[
-        bool,
-        typer.Option("--open/--no-open", help="Open the dashboard in a browser."),
-    ] = True,
+def _serve_dashboard(
+    *,
+    host: str | None,
+    port: int | None,
+    open_browser: bool,
+    background: bool,
 ) -> None:
-    """Serve the local web application tracker and analytics dashboard."""
-
     paths, _, settings = _bootstrap()
     dashboard_settings = settings.get("dashboard", {})
     bind_host = host or str(dashboard_settings.get("host", "127.0.0.1"))
@@ -552,10 +547,53 @@ def dashboard(
         console.print("[yellow]Warning:[/yellow] the dashboard has no authentication; use a firewall.")
     url_host = "127.0.0.1" if bind_host in {"0.0.0.0", "::"} else bind_host
     url = f"http://{url_host}:{bind_port}"
-    console.print(f"[green]Dashboard:[/green] {url}")
+    mode = "dashboard + background agent" if background else "dashboard only"
+    console.print(f"[green]TI-AAA ({mode}):[/green] {url}")
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    uvicorn.run(create_app(paths.database), host=bind_host, port=bind_port, log_level="info")
+    uvicorn.run(
+        create_app(paths.database, paths=paths, start_service=background),
+        host=bind_host,
+        port=bind_port,
+        log_level="info",
+    )
+
+
+@app.command()
+def serve(
+    host: Annotated[str | None, typer.Option(help="Bind host; defaults to settings.yaml.")] = None,
+    port: Annotated[int | None, typer.Option(min=1, max=65535, help="Bind port.")] = None,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open/--no-open", help="Open the web app in a browser."),
+    ] = True,
+) -> None:
+    """Run the local web app and always-on internship agent together."""
+
+    _serve_dashboard(host=host, port=port, open_browser=open_browser, background=True)
+
+
+@app.command()
+def dashboard(
+    host: Annotated[str | None, typer.Option(help="Bind host; defaults to settings.yaml.")] = None,
+    port: Annotated[int | None, typer.Option(min=1, max=65535, help="Bind port.")] = None,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open/--no-open", help="Open the dashboard in a browser."),
+    ] = True,
+    background: Annotated[
+        bool,
+        typer.Option("--background/--no-background", help="Run repository polling too."),
+    ] = True,
+) -> None:
+    """Serve the web dashboard; background polling is enabled by default."""
+
+    _serve_dashboard(
+        host=host,
+        port=port,
+        open_browser=open_browser,
+        background=background,
+    )
 
 
 @app.command()
@@ -578,8 +616,15 @@ def doctor() -> None:
         )
     except Exception as exc:
         checks.append(("profile.json", False, str(exc)))
-    checks.append(("resume.txt", paths.resume_text.is_file(), str(paths.resume_text)))
-    checks.append(("resume.pdf", paths.resume_pdf.is_file(), str(paths.resume_pdf)))
+    import_legacy_resume(paths=paths, db_path=paths.database)
+    resume_count = len(list_resumes(get_connection(paths.database)))
+    checks.append(
+        (
+            "Resumes",
+            resume_count > 0,
+            f"{resume_count} active resume(s)" if resume_count else "upload one in the web app",
+        )
+    )
     checks.append(("settings.yaml", paths.settings.is_file(), str(paths.settings)))
     checks.append(
         (
@@ -605,6 +650,6 @@ def doctor() -> None:
     for label, ok, detail in checks:
         table.add_row(label, "[green]OK[/green]" if ok else "[yellow]MISSING[/yellow]", detail)
     console.print(table)
-    required_ok = all(ok for _, ok, _ in checks[:5])
+    required_ok = all(ok for _, ok, _ in checks[:4])
     if not required_ok:
         raise typer.Exit(code=1)

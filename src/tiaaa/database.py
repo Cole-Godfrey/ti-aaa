@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from collections.abc import Iterable
@@ -31,7 +32,7 @@ PIPELINE_STATUSES = {
     "withdrawn",
 }
 OUTCOME_STATUSES = {"none", "oa", "interview", "offer", "rejected", "withdrawn"}
-TERMINAL_PIPELINE_STATUSES = {"applied", "withdrawn"}
+TERMINAL_PIPELINE_STATUSES = {"applied", "skipped", "withdrawn"}
 
 
 def utc_now() -> str:
@@ -70,6 +71,14 @@ def close_connection(db_path: Path | str | None = None) -> None:
             connection.close()
 
 
+def _ensure_column(
+    connection: sqlite3.Connection, table: str, column: str, declaration: str
+) -> None:
+    columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
 def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     connection = get_connection(db_path)
     connection.executescript(
@@ -89,6 +98,19 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             last_polled_at     TEXT,
             last_success_at    TEXT,
             last_error         TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS resumes (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            name              TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            pdf_path          TEXT NOT NULL UNIQUE,
+            text_path         TEXT NOT NULL,
+            tags              TEXT NOT NULL DEFAULT '',
+            notes             TEXT NOT NULL DEFAULT '',
+            is_active         INTEGER NOT NULL DEFAULT 1,
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS jobs (
@@ -113,7 +135,11 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             scored_at             TEXT,
             pipeline_status       TEXT NOT NULL DEFAULT 'discovered',
             discovered_as_new     INTEGER NOT NULL DEFAULT 0,
+            base_resume_id        INTEGER REFERENCES resumes(id),
+            submitted_resume_id   INTEGER REFERENCES resumes(id),
             resume_path           TEXT,
+            submitted_resume_path TEXT,
+            tailoring_reason      TEXT,
             cover_letter_path     TEXT,
             preparation_notes     TEXT,
             prepared_at           TEXT,
@@ -163,14 +189,230 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS app_state (
+            key         TEXT PRIMARY KEY,
+            value       TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS worker_state (
+            worker_id       TEXT PRIMARY KEY,
+            status          TEXT NOT NULL,
+            job_id          INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+            company         TEXT,
+            role            TEXT,
+            message         TEXT,
+            screenshot_path TEXT,
+            started_at      TEXT,
+            updated_at      TEXT NOT NULL
+        );
         """
     )
+    _ensure_column(connection, "jobs", "base_resume_id", "INTEGER REFERENCES resumes(id)")
+    _ensure_column(connection, "jobs", "submitted_resume_id", "INTEGER REFERENCES resumes(id)")
+    _ensure_column(connection, "jobs", "submitted_resume_path", "TEXT")
+    _ensure_column(connection, "jobs", "tailoring_reason", "TEXT")
+    now = utc_now()
+    for key, value in (
+        ("onboarding_complete", "false"),
+        ("service_paused", "false"),
+        ("service_status", "starting"),
+        ("service_message", "Waiting for the background service"),
+    ):
+        connection.execute(
+            "INSERT OR IGNORE INTO app_state (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, now),
+        )
     connection.commit()
     return connection
 
 
 def _as_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
+
+
+def set_app_state(connection: sqlite3.Connection, key: str, value: Any) -> None:
+    connection.execute(
+        """
+        INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (key, json.dumps(value), utc_now()),
+    )
+    connection.commit()
+
+
+def get_app_state(connection: sqlite3.Connection) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for row in connection.execute("SELECT key, value FROM app_state").fetchall():
+        try:
+            result[row["key"]] = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError):
+            result[row["key"]] = row["value"]
+    return result
+
+
+def source_baseline_complete(connection: sqlite3.Connection, expected_documents: int = 5) -> bool:
+    row = connection.execute(
+        "SELECT COUNT(*) FROM sources WHERE initialized = 1"
+    ).fetchone()
+    return int(row[0]) >= expected_documents
+
+
+def add_resume_record(
+    connection: sqlite3.Connection,
+    *,
+    name: str,
+    original_filename: str,
+    pdf_path: str,
+    text_path: str,
+    tags: list[str] | None = None,
+    notes: str = "",
+) -> dict[str, Any]:
+    now = utc_now()
+    cursor = connection.execute(
+        """
+        INSERT INTO resumes (
+            name, original_filename, pdf_path, text_path, tags, notes,
+            is_active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """,
+        (
+            name.strip(),
+            original_filename,
+            pdf_path,
+            text_path,
+            json.dumps(tags or []),
+            notes.strip(),
+            now,
+            now,
+        ),
+    )
+    connection.commit()
+    return get_resume(connection, int(cursor.lastrowid)) or {}
+
+
+def get_resume(connection: sqlite3.Connection, resume_id: int) -> dict[str, Any] | None:
+    row = connection.execute("SELECT * FROM resumes WHERE id = ?", (resume_id,)).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    try:
+        result["tags"] = json.loads(result.get("tags") or "[]")
+    except json.JSONDecodeError:
+        result["tags"] = []
+    return result
+
+
+def list_resumes(connection: sqlite3.Connection, *, active_only: bool = True) -> list[dict[str, Any]]:
+    clause = "WHERE r.is_active = 1" if active_only else ""
+    rows = connection.execute(
+        f"""
+        SELECT r.*,
+               COUNT(DISTINCT CASE WHEN j.base_resume_id = r.id THEN j.id END) AS selected_count,
+               COUNT(DISTINCT CASE WHEN j.submitted_resume_id = r.id THEN j.id END) AS submitted_count
+        FROM resumes r
+        LEFT JOIN jobs j ON j.base_resume_id = r.id OR j.submitted_resume_id = r.id
+        {clause}
+        GROUP BY r.id ORDER BY r.created_at DESC
+        """
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["tags"] = json.loads(item.get("tags") or "[]")
+        except json.JSONDecodeError:
+            item["tags"] = []
+        result.append(item)
+    return result
+
+
+def archive_resume(connection: sqlite3.Connection, resume_id: int) -> bool:
+    cursor = connection.execute(
+        "UPDATE resumes SET is_active = 0, updated_at = ? WHERE id = ? AND is_active = 1",
+        (utc_now(), resume_id),
+    )
+    connection.commit()
+    return cursor.rowcount > 0
+
+
+def update_worker_state(
+    connection: sqlite3.Connection,
+    worker_id: str,
+    *,
+    status: str,
+    job: dict[str, Any] | None = None,
+    message: str | None = None,
+    screenshot_path: str | None = None,
+) -> None:
+    now = utc_now()
+    current = connection.execute(
+        "SELECT started_at, screenshot_path FROM worker_state WHERE worker_id = ?", (worker_id,)
+    ).fetchone()
+    started_at = (
+        current["started_at"]
+        if current and current["started_at"] and status not in {"starting", "applying"}
+        else now
+    )
+    retained_screenshot = screenshot_path or (current["screenshot_path"] if current else None)
+    connection.execute(
+        """
+        INSERT INTO worker_state (
+            worker_id, status, job_id, company, role, message,
+            screenshot_path, started_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(worker_id) DO UPDATE SET
+            status = excluded.status,
+            job_id = excluded.job_id,
+            company = excluded.company,
+            role = excluded.role,
+            message = excluded.message,
+            screenshot_path = excluded.screenshot_path,
+            started_at = excluded.started_at,
+            updated_at = excluded.updated_at
+        """,
+        (
+            worker_id,
+            status,
+            job.get("id") if job else None,
+            job.get("company") if job else None,
+            job.get("role") if job else None,
+            message,
+            retained_screenshot,
+            started_at,
+            now,
+        ),
+    )
+    connection.commit()
+
+
+def get_worker_states(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in connection.execute(
+            "SELECT * FROM worker_state ORDER BY worker_id"
+        ).fetchall()
+    ]
+
+
+def recover_stale_work(connection: sqlite3.Connection) -> int:
+    now = utc_now()
+    cursor = connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'ready', worker_id = NULL,
+                        apply_error = 'Recovered after service restart', updated_at = ?
+        WHERE pipeline_status = 'applying'
+        """,
+        (now,),
+    )
+    connection.execute(
+        "UPDATE worker_state SET status = 'stopped', message = 'Service restarted', updated_at = ?",
+        (now,),
+    )
+    connection.commit()
+    return cursor.rowcount
 
 
 def add_event(
@@ -405,9 +647,9 @@ def ingest_listings(
                     and row["eligibility"] == "ineligible"
                     and next_status == "skipped"
                 ):
-                    if baseline:
+                    if baseline or not bool(row["discovered_as_new"]):
                         next_status = "discovered"
-                        add_event(connection, job_id, "eligible", "Active in baseline source")
+                        add_event(connection, job_id, "eligible", "Eligible baseline listing")
                     else:
                         next_status = "queued"
                         stats["queued"] = int(stats["queued"]) + 1
@@ -523,7 +765,20 @@ def ingest_listings(
 
 
 def get_job(connection: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
-    return _as_dict(connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())
+    return _as_dict(
+        connection.execute(
+            """
+            SELECT j.*, br.name AS base_resume_name,
+                   br.text_path AS base_resume_text_path,
+                   sr.name AS submitted_resume_name
+            FROM jobs j
+            LEFT JOIN resumes br ON br.id = j.base_resume_id
+            LEFT JOIN resumes sr ON sr.id = j.submitted_resume_id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    )
 
 
 def list_jobs(
@@ -551,9 +806,13 @@ def list_jobs(
         f"""
         SELECT j.*,
                GROUP_CONCAT(DISTINCT js.source_label) AS source_labels,
-               GROUP_CONCAT(DISTINCT js.source_repo_url) AS source_repo_urls
+               GROUP_CONCAT(DISTINCT js.source_repo_url) AS source_repo_urls,
+               br.name AS base_resume_name,
+               sr.name AS submitted_resume_name
         FROM jobs j
         LEFT JOIN job_sources js ON js.job_id = j.id AND js.active = 1
+        LEFT JOIN resumes br ON br.id = j.base_resume_id
+        LEFT JOIN resumes sr ON sr.id = j.submitted_resume_id
         WHERE {' AND '.join(clauses)}
         GROUP BY j.id
         ORDER BY (j.applied_at IS NOT NULL) DESC, COALESCE(j.applied_at, j.last_seen_at) DESC
@@ -602,8 +861,11 @@ def get_stats(connection: sqlite3.Connection) -> dict[str, Any]:
     data["source_counts"] = [dict(row) for row in source_rows]
     recent = connection.execute(
         """
-        SELECT id, company, role, location, application_url, applied_at, outcome_status
-        FROM jobs WHERE applied_at IS NOT NULL ORDER BY applied_at DESC LIMIT 8
+        SELECT j.id, j.company, j.role, j.location, j.application_url,
+               j.applied_at, j.outcome_status, r.name AS submitted_resume_name
+        FROM jobs j
+        LEFT JOIN resumes r ON r.id = j.submitted_resume_id
+        WHERE j.applied_at IS NOT NULL ORDER BY j.applied_at DESC LIMIT 8
         """
     ).fetchall()
     data["recent_applications"] = [dict(row) for row in recent]
@@ -623,6 +885,11 @@ def update_tracker(
         return None
     if pipeline_status is not None and pipeline_status not in PIPELINE_STATUSES:
         raise ValueError(f"Unknown pipeline status: {pipeline_status}")
+    if (
+        pipeline_status in {"queued", "ready", "applying", "failed"}
+        and not bool(row.get("discovered_as_new"))
+    ):
+        raise ValueError("Protected baseline listings cannot enter the automatic application queue")
     if outcome_status is not None and outcome_status not in OUTCOME_STATUSES:
         raise ValueError(f"Unknown outcome status: {outcome_status}")
 
@@ -635,6 +902,9 @@ def update_tracker(
         if pipeline_status == "applied" and not row.get("applied_at"):
             updates.append("applied_at = ?")
             values.append(now)
+        if pipeline_status == "applied":
+            updates.append("submitted_resume_id = COALESCE(submitted_resume_id, base_resume_id)")
+            updates.append("submitted_resume_path = COALESCE(submitted_resume_path, resume_path)")
         add_event(connection, job_id, "status", pipeline_status)
     if outcome_status is not None:
         updates.append("outcome_status = ?")
@@ -668,6 +938,7 @@ def pending_preparation(
     query = """
         SELECT * FROM jobs
         WHERE pipeline_status = 'queued' AND eligibility = 'eligible' AND is_active = 1
+          AND discovered_as_new = 1
           AND COALESCE(fit_score, 0) >= ?
         ORDER BY posting_date DESC, first_seen_at DESC
     """
@@ -682,18 +953,30 @@ def mark_prepared(
     connection: sqlite3.Connection,
     job_id: int,
     *,
+    base_resume_id: int | None,
     resume_path: str,
     cover_letter_path: str | None,
+    tailoring_reason: str,
     notes: str,
 ) -> None:
     now = utc_now()
     connection.execute(
         """
-        UPDATE jobs SET resume_path = ?, cover_letter_path = ?, preparation_notes = ?,
-                        prepared_at = ?, pipeline_status = 'ready', updated_at = ?
+        UPDATE jobs SET base_resume_id = ?, resume_path = ?, cover_letter_path = ?,
+                        tailoring_reason = ?, preparation_notes = ?, prepared_at = ?,
+                        pipeline_status = 'ready', updated_at = ?
         WHERE id = ?
         """,
-        (resume_path, cover_letter_path, notes, now, now, job_id),
+        (
+            base_resume_id,
+            resume_path,
+            cover_letter_path,
+            tailoring_reason,
+            notes,
+            now,
+            now,
+            job_id,
+        ),
     )
     add_event(connection, job_id, "prepared", notes)
     connection.commit()
@@ -712,6 +995,7 @@ def claim_next_job(
             "pipeline_status IN ('ready', 'failed')",
             "eligibility = 'eligible'",
             "is_active = 1",
+            "discovered_as_new = 1",
             "apply_attempts < ?",
         ]
         parameters: list[Any] = [max_attempts]
@@ -758,6 +1042,7 @@ def claimable_application_count(
         "pipeline_status IN ('ready', 'failed')",
         "eligibility = 'eligible'",
         "is_active = 1",
+        "discovered_as_new = 1",
         "apply_attempts < ?",
     ]
     parameters: list[Any] = [max_attempts]
@@ -792,10 +1077,24 @@ def mark_apply_result(
         """
         UPDATE jobs SET pipeline_status = ?,
                         applied_at = COALESCE(?, applied_at),
+                        submitted_resume_id = CASE WHEN ? = 'applied'
+                            THEN COALESCE(submitted_resume_id, base_resume_id)
+                            ELSE submitted_resume_id END,
+                        submitted_resume_path = CASE WHEN ? = 'applied'
+                            THEN COALESCE(submitted_resume_path, resume_path)
+                            ELSE submitted_resume_path END,
                         apply_error = ?, worker_id = NULL, updated_at = ?
         WHERE id = ?
         """,
-        (status, applied_at, None if result == "applied" else detail, now, job_id),
+        (
+            status,
+            applied_at,
+            result,
+            result,
+            None if result == "applied" else detail,
+            now,
+            job_id,
+        ),
     )
     add_event(connection, job_id, result, detail)
     connection.commit()

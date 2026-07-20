@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.database import (
     claim_next_job,
@@ -49,6 +51,24 @@ def test_first_sync_is_baseline_and_later_addition_is_queued(tmp_path, profile, 
     rows = {row["company"]: row for row in list_jobs(connection)}
     assert rows["Acme"]["pipeline_status"] == "discovered"
     assert rows["Beta"]["pipeline_status"] == "queued"
+    close_connection(path)
+
+
+def test_baseline_cannot_be_manually_routed_into_automation(tmp_path, profile, settings) -> None:
+    path = tmp_path / "protected-baseline.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    baseline_job = make_listing(
+        source, "Acme", "Software Engineer Intern", "https://jobs.test/protected"
+    )
+    ingest_listings(connection, source, [baseline_job], profile=profile, settings=settings)
+
+    with pytest.raises(ValueError, match="Protected baseline"):
+        update_tracker(connection, 1, pipeline_status="ready")
+    connection.execute("UPDATE jobs SET pipeline_status = 'ready' WHERE id = 1")
+    connection.commit()
+    assert claimable_application_count(connection, max_attempts=3) == 0
+    assert claim_next_job(connection, worker_id="worker-0", max_attempts=3) is None
     close_connection(path)
 
 
@@ -115,6 +135,44 @@ def test_cross_source_eligibility_change_does_not_escape_baseline(
     assert second["baseline"] is True
     assert second["queued"] == 0
     assert row["pipeline_status"] == "discovered"
+    close_connection(path)
+
+
+def test_filter_change_cannot_promote_a_baseline_listing_to_queue(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "filter-baseline.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(
+        source,
+        "Acme",
+        "Software Engineer Intern",
+        "https://jobs.test/filter-baseline",
+    )
+    blocked_settings = {**settings, "filters": {**settings["filters"]}}
+    blocked_settings["filters"]["exclude_keywords"] = ["software"]
+
+    first = ingest_listings(
+        connection,
+        source,
+        [listing],
+        profile=profile,
+        settings=blocked_settings,
+    )
+    second = ingest_listings(
+        connection,
+        source,
+        [listing],
+        profile=profile,
+        settings=settings,
+    )
+
+    row = list_jobs(connection)[0]
+    assert first["baseline"] is True
+    assert second["queued"] == 0
+    assert row["pipeline_status"] == "discovered"
+    assert row["discovered_as_new"] == 0
     close_connection(path)
 
 

@@ -3,155 +3,306 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="TI-AAA technology internship application tracker">
-  <title>TI-AAA · Internship command center</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2216%22 fill=%22%23c9f26a%22/><text x=%2232%22 y=%2240%22 text-anchor=%22middle%22 font-family=%22Arial%22 font-size=%2224%22 font-weight=%22900%22 fill=%22%2314241f%22>TI</text></svg>">
+  <meta name="description" content="TI-AAA local tech internship application agent">
+  <title>TI-AAA · Internship desk</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%2341365a%22/><path d=%22M14 19h36v7H36v24h-8V26H14z%22 fill=%22%23f0b49e%22/></svg>">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <a class="brand" href="#top" aria-label="TI-AAA home">
-        <span class="brand-mark" aria-hidden="true">TI</span>
-        <span><strong>TI-AAA</strong><small>Application agent</small></span>
-      </a>
+  <div class="shell">
+    <aside class="rail">
+      <button class="brand" data-view-target="overview" aria-label="TI-AAA overview">
+        <span class="brand-seal">TI</span>
+        <span><strong>TI—AAA</strong><small>internship desk</small></span>
+      </button>
 
-      <nav class="nav" aria-label="Primary navigation">
-        <a class="nav-link active" href="#overview">
-          <span class="nav-icon">⌂</span><span>Overview</span>
-        </a>
-        <a class="nav-link" href="#tracker">
-          <span class="nav-icon">▤</span><span>Applications</span>
-        </a>
-        <a class="nav-link" href="#sources">
-          <span class="nav-icon">⌘</span><span>Sources</span>
-        </a>
+      <nav class="nav" aria-label="App sections">
+        <button class="nav-item active" data-view-target="overview"><span>01</span>Overview</button>
+        <button class="nav-item" data-view-target="applications"><span>02</span>Applications</button>
+        <button class="nav-item" data-view-target="live"><span>03</span>Live agent</button>
+        <button class="nav-item" data-view-target="resumes"><span>04</span>Resumes</button>
+        <button class="nav-item" data-view-target="settings"><span>05</span>Settings</button>
       </nav>
 
-      <div class="source-note">
-        <span class="live-dot"></span>
-        <p><strong>GitHub-only discovery</strong><br>Three community internship lists</p>
+      <div class="rail-card">
+        <div class="rail-status"><i id="railStatusDot"></i><span id="railStatus">Starting…</span></div>
+        <p>Checks GitHub in the background. Closing this tab does not stop it.</p>
       </div>
-
-      <div class="sidebar-footer">
-        <span>Local dashboard</span>
-        <code>127.0.0.1</code>
-      </div>
+      <p class="rail-foot">local-first · GitHub-only<br><span id="appVersion">TI-AAA</span></p>
     </aside>
 
-    <main id="top" class="main-content">
-      <header class="topbar">
+    <main>
+      <header class="masthead">
         <div>
-          <p class="eyebrow">INTERNSHIP COMMAND CENTER</p>
-          <h1>Good morning<span class="accent-dot">.</span></h1>
-          <p class="subtitle">Your applications, signals, and next moves in one place.</p>
+          <p class="kicker" id="viewKicker">THE DAILY BRIEF</p>
+          <h1 id="viewTitle">Your internship desk</h1>
+          <p id="viewSubtitle">A quiet view of what the agent found, prepared, and submitted.</p>
         </div>
-        <div class="topbar-actions">
-          <span id="lastUpdated" class="last-updated">Syncing…</span>
-          <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh dashboard">↻</button>
+        <div class="mast-actions">
+          <span id="lastUpdated" class="updated">Loading local state…</span>
+          <button id="pauseButton" class="button ghost" type="button">Pause</button>
+          <button id="runButton" class="button ink" type="button">Check now</button>
         </div>
       </header>
 
-      <section id="overview" class="stats-grid" aria-label="Application statistics">
-        <article class="stat-card primary">
-          <div class="stat-label"><span>Total applications</span><span class="trend neutral">ALL TIME</span></div>
-          <div id="applicationsValue" class="stat-value">—</div>
-          <p id="applicationsHint" class="stat-hint">Waiting for your first application</p>
-          <div class="mini-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-        </article>
+      <div id="serviceBanner" class="service-banner">
+        <span class="pulse"></span>
+        <div><strong id="serviceStatus">Starting</strong><p id="serviceMessage">Preparing the background service.</p></div>
+        <span id="nextCycle" class="service-time"></span>
+      </div>
 
-        <article class="stat-card">
-          <div class="stat-label"><span>Online assessment rate</span><span class="signal signal-oa">OA</span></div>
-          <div id="oaRateValue" class="stat-value">—</div>
-          <p id="oaHint" class="stat-hint">0 assessments recorded</p>
-          <div class="progress-track"><span id="oaProgress"></span></div>
-        </article>
+      <section class="view active" data-view="overview">
+        <div class="metric-grid">
+          <article class="metric hero-metric">
+            <p>Applications sent</p><strong id="applicationsValue">—</strong>
+            <span id="applicationsHint">No submissions recorded yet</span>
+          </article>
+          <article class="metric"><p>OA rate</p><strong id="oaRateValue">—</strong><span id="oaHint">0 assessments</span></article>
+          <article class="metric"><p>Interview rate</p><strong id="interviewRateValue">—</strong><span id="interviewHint">0 interviews</span></article>
+          <article class="metric small-metrics">
+            <div><span>Queued</span><strong id="queuedValue">—</strong></div>
+            <div><span>Ready</span><strong id="readyValue">—</strong></div>
+            <div><span>Offers</span><strong id="offersValue">—</strong></div>
+          </article>
+        </div>
 
-        <article class="stat-card">
-          <div class="stat-label"><span>Interview rate</span><span class="signal signal-interview">INT</span></div>
-          <div id="interviewRateValue" class="stat-value">—</div>
-          <p id="interviewHint" class="stat-hint">0 interviews recorded</p>
-          <div class="progress-track coral"><span id="interviewProgress"></span></div>
-        </article>
+        <div class="two-column">
+          <article class="panel">
+            <div class="panel-head"><div><p class="kicker">PIPELINE</p><h2>From listing to interview</h2></div><span id="eligibleBadge" class="tag">— eligible</span></div>
+            <div id="funnel" class="funnel"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="kicker">RECENT</p><h2>Latest applications</h2></div><button class="text-button" data-view-target="applications">See tracker →</button></div>
+            <div id="recentApplications" class="recent-list"></div>
+          </article>
+        </div>
 
-        <article class="stat-card compact-card">
-          <div class="compact-stat"><span>Active roles</span><strong id="activeValue">—</strong></div>
-          <div class="compact-stat"><span>Ready to apply</span><strong id="readyValue">—</strong></div>
-          <div class="compact-stat"><span>Offers</span><strong id="offersValue">—</strong></div>
+        <article class="panel sources-panel">
+          <div class="panel-head"><div><p class="kicker">WATCHLIST</p><h2>Repository health</h2></div><span class="tag accent">No job-board scraping</span></div>
+          <div id="sourceCards" class="source-cards"></div>
         </article>
       </section>
 
-      <section class="dashboard-grid">
-        <div class="panel pipeline-panel">
-          <div class="panel-heading">
-            <div><p class="eyebrow">LIVE PIPELINE</p><h2>Application funnel</h2></div>
-            <span id="eligibleBadge" class="outline-badge">— eligible</span>
-          </div>
-          <div id="funnel" class="funnel" aria-label="Application funnel"></div>
-        </div>
-
-        <div class="panel recent-panel">
-          <div class="panel-heading">
-            <div><p class="eyebrow">LATEST ACTIVITY</p><h2>Recently applied</h2></div>
-            <a href="#tracker" class="text-link">View all →</a>
-          </div>
-          <div id="recentApplications" class="recent-list">
-            <div class="empty-state compact"><span>↗</span><p>No applications yet.</p></div>
-          </div>
-        </div>
-      </section>
-
-      <section id="tracker" class="panel tracker-panel">
-        <div class="panel-heading tracker-heading">
-          <div><p class="eyebrow">APPLICATION TRACKER</p><h2>Every opportunity, accounted for</h2></div>
-          <div class="tracker-tools">
-            <label class="search-box">
-              <span aria-hidden="true">⌕</span>
+      <section class="view" data-view="applications">
+        <article class="panel table-panel">
+          <div class="panel-head tracker-head">
+            <div><p class="kicker">APPLICATION LEDGER</p><h2>Every role, resume, and outcome</h2></div>
+            <div class="filters">
               <input id="searchInput" type="search" placeholder="Search company, role, location" autocomplete="off">
-            </label>
-            <select id="statusFilter" aria-label="Filter by status">
-              <option value="all">All statuses</option>
-              <option value="queued">Queued</option>
-              <option value="ready">Ready</option>
-              <option value="manual_review">Needs review</option>
-              <option value="applied">Applied</option>
-              <option value="oa">OA received</option>
-              <option value="interview">Interviewing</option>
-              <option value="offer">Offer</option>
-              <option value="rejected">Rejected</option>
-              <option value="failed">Failed</option>
-              <option value="expired">Expired</option>
-            </select>
+              <select id="statusFilter" aria-label="Filter applications by status">
+                <option value="all">All statuses</option><option value="queued">Queued</option>
+                <option value="ready">Ready</option><option value="applying">Applying</option>
+                <option value="manual_review">Needs review</option><option value="applied">Applied</option>
+                <option value="oa">OA received</option><option value="interview">Interviewing</option>
+                <option value="offer">Offer</option><option value="rejected">Rejected</option>
+                <option value="failed">Failed</option><option value="expired">Expired</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Company / role</th><th>Pipeline</th><th>Resume</th><th>Outcome</th><th>Added</th><th></th></tr></thead>
+              <tbody id="jobsTableBody"><tr><td colspan="6" class="loading">Loading the ledger…</td></tr></tbody>
+            </table>
+          </div>
+          <p id="tableSummary" class="table-summary"></p>
+        </article>
+      </section>
+
+      <section class="view" data-view="live">
+        <div class="live-intro">
+          <div><p class="kicker">BROWSER WORKERS</p><h2>Watch the agent work</h2><p>Local snapshots refresh while a form is being filled. They can contain personal information, so they never leave this machine.</p></div>
+          <span class="tag">~1.5 second snapshots</span>
+        </div>
+        <div id="workerGrid" class="worker-grid"></div>
+        <article class="panel activity-panel">
+          <div class="panel-head"><div><p class="kicker">EVENT LOG</p><h2>What just happened</h2></div></div>
+          <div id="eventList" class="event-list"></div>
+        </article>
+      </section>
+
+      <section class="view" data-view="resumes">
+        <div class="two-column resumes-layout">
+          <article class="panel upload-panel">
+            <p class="kicker">ADD A VERSION</p><h2>Upload a resume</h2>
+            <p class="fine-print">TI-AAA compares role words with factual text in each PDF. Tailoring only reprioritizes verbatim lines—it does not invent or rewrite claims.</p>
+            <form id="resumeForm" class="form-stack">
+              <label>Label<input name="name" required maxlength="100" placeholder="Backend / systems"></label>
+              <label>PDF<input name="file" type="file" accept="application/pdf,.pdf" required></label>
+              <label>Tags<input name="tags" placeholder="backend, distributed systems, python"></label>
+              <label>Resume text <span>optional if PDF text is selectable</span><textarea name="text" rows="5" placeholder="Paste plain text for scanned or design-heavy PDFs"></textarea></label>
+              <label>Private note<textarea name="notes" rows="2" maxlength="1000" placeholder="When I prefer this version"></textarea></label>
+              <button class="button terracotta" type="submit">Store resume locally</button>
+            </form>
+          </article>
+          <div>
+            <div class="section-heading"><div><p class="kicker">RESUME LIBRARY</p><h2>Your active versions</h2></div><span id="resumeCount" class="tag">0 resumes</span></div>
+            <div id="resumeGrid" class="resume-grid"></div>
           </div>
         </div>
-
-        <div class="table-wrap">
-          <table>
-            <thead><tr>
-              <th>Company & role</th><th>Location</th><th>Pipeline</th><th>Outcome</th><th>Discovered</th><th><span class="sr-only">Open</span></th>
-            </tr></thead>
-            <tbody id="jobsTableBody">
-              <tr><td colspan="6" class="loading-cell">Loading internships…</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div id="tableSummary" class="table-summary">Loading…</div>
       </section>
 
-      <section id="sources" class="panel sources-panel">
-        <div class="panel-heading">
-          <div><p class="eyebrow">DISCOVERY INPUTS</p><h2>Repository health</h2></div>
-          <span class="outline-badge">No job-board scraping</span>
-        </div>
-        <div id="sourceCards" class="source-cards"></div>
+      <section class="view" data-view="settings">
+        <form id="settingsForm" class="settings-grid">
+          <article class="panel settings-card">
+            <p class="kicker">PROFILE</p><h2>About you</h2>
+            <div class="field-grid">
+              <label>Legal name<input id="fullName" required></label><label>Preferred name<input id="preferredName"></label>
+              <label>Email<input id="email" type="email"></label>
+              <label>Phone<input id="phone"></label><label>City<input id="city"></label>
+              <label>State / region<input id="state"></label><label>Country<input id="country"></label>
+              <label>Street address<input id="address"></label><label>Postal code<input id="postalCode"></label>
+              <label>LinkedIn<input id="linkedin"></label><label>GitHub<input id="github"></label>
+              <label>Portfolio<input id="portfolio"></label>
+            </div>
+          </article>
+          <article class="panel settings-card">
+            <p class="kicker">EDUCATION & ELIGIBILITY</p><h2>Application facts</h2>
+            <div class="field-grid">
+              <label>School<input id="school"></label><label>Degree<input id="degree"></label>
+              <label>Major<input id="major"></label><label>Graduation<input id="graduation"></label>
+              <label>Current year<input id="currentYear"></label><label>GPA <span>optional</span><input id="gpa"></label>
+              <label>Work permit type <span>if applicable</span><input id="workPermitType"></label>
+            </div>
+            <div class="toggle-list">
+              <label><input id="authorized" type="checkbox"><span>Legally authorized to work in the U.S.</span></label>
+              <label><input id="sponsorship" type="checkbox"><span>Will require employment sponsorship</span></label>
+              <label><input id="citizen" type="checkbox"><span>U.S. citizen</span></label>
+              <label><input id="relocate" type="checkbox"><span>Willing to relocate</span></label>
+            </div>
+          </article>
+          <article class="panel settings-card">
+            <p class="kicker">TARGETING</p><h2>Internship preferences</h2>
+            <div class="form-stack compact-form">
+              <label>Preferred roles<input id="roles" placeholder="software, backend, machine learning"></label>
+              <label>Locations<input id="locations" placeholder="Remote, Seattle, New York"></label>
+              <label>Terms<input id="terms" placeholder="Summer 2027, Fall 2026"></label>
+              <label>Skills / keywords<input id="skills" placeholder="Python, React, Docker, Java"></label>
+              <label>Required role words <span>blank accepts the curated repo scope</span><input id="includeKeywords" placeholder="software, data, machine learning"></label>
+              <label>Exclude keywords<input id="excludeKeywords" placeholder="senior, principal"></label>
+              <label>Allowed locations <span>blank accepts all</span><input id="allowedLocations" placeholder="Remote, Seattle"></label>
+            </div>
+            <div class="toggle-list"><label><input id="remoteOnly" type="checkbox"><span>Only accept listings marked remote</span></label></div>
+          </article>
+          <article class="panel settings-card">
+            <p class="kicker">AUTOMATION</p><h2>Background behavior</h2>
+            <div class="field-grid">
+              <label>Poll every (seconds)<input id="pollInterval" type="number" min="30"></label>
+              <label>Minimum fit (1–10)<input id="minimumFit" type="number" min="1" max="10"></label>
+              <label>Workers<input id="workerCount" type="number" min="1" max="8"></label>
+              <label>Daily application cap<input id="dayCap" type="number" min="1" max="200"></label>
+              <label>Per-cycle cap<input id="cycleCap" type="number" min="1" max="50"></label>
+              <label>Maximum attempts<input id="maxAttempts" type="number" min="1" max="10"></label>
+              <label>Worker timeout (seconds)<input id="workerTimeout" type="number" min="60" max="3600"></label>
+              <label>Claude model<input id="claudeModel" placeholder="sonnet"></label>
+            </div>
+            <div class="toggle-list">
+              <label><input id="serviceEnabled" type="checkbox"><span>Keep polling in the background</span></label>
+              <label><input id="autoPrepare" type="checkbox"><span>Prepare new matching roles automatically</span></label>
+              <label><input id="tailorResumes" type="checkbox"><span>Create fact-preserving tailored PDFs</span></label>
+              <label><input id="useLlm" type="checkbox"><span>Use an LLM for scores and cover letters</span></label>
+              <label><input id="generateCoverLetters" type="checkbox"><span>Generate factual cover letters when LLM use is on</span></label>
+              <label><input id="automationEnabled" type="checkbox"><span>Launch browser workers automatically</span></label>
+              <label class="danger-toggle"><input id="allowSubmission" type="checkbox"><span>Allow workers to click final Submit</span></label>
+              <label><input id="headless" type="checkbox"><span>Run browser windows headlessly</span></label>
+            </div>
+          </article>
+          <article class="panel settings-card">
+            <p class="kicker">COMMON ANSWERS</p><h2>Screening defaults</h2>
+            <div class="field-grid">
+              <label>Available start date<input id="availableStartDate" placeholder="May 2027"></label>
+              <label>How you heard<input id="howHeard"></label>
+            </div>
+            <div class="toggle-list">
+              <label><input id="age18" type="checkbox"><span>I am 18 or older</span></label>
+              <label><input id="previouslyWorked" type="checkbox"><span>I previously worked for the employer</span></label>
+            </div>
+            <p class="fine-print">These are defaults, not guesses. Unknown required answers still stop for review.</p>
+          </article>
+          <article class="panel settings-card">
+            <p class="kicker">VOLUNTARY EEO</p><h2>Self-identification defaults</h2>
+            <div class="form-stack compact-form">
+              <label>Gender<input id="eeoGender" placeholder="Decline to self-identify"></label>
+              <label>Race / ethnicity<input id="eeoRace" placeholder="Decline to self-identify"></label>
+              <label>Veteran status<input id="eeoVeteran" placeholder="Decline to self-identify"></label>
+              <label>Disability status<input id="eeoDisability" placeholder="Decline to self-identify"></label>
+            </div>
+          </article>
+          <article class="panel settings-card keys-card">
+            <p class="kicker">SECRETS</p><h2>API keys</h2>
+            <p class="fine-print">Keys are write-only in this UI and stored in <code>.env</code> with private permissions. Leave a field blank to keep the saved value.</p>
+            <div class="field-grid">
+              <label>Anthropic key <span id="anthropicState"></span><input id="anthropicKey" type="password" autocomplete="new-password" placeholder="sk-ant-…"><button class="clear-secret" data-secret="ANTHROPIC_API_KEY" type="button">Forget saved value</button></label>
+              <label>GitHub token <span id="githubState"></span><input id="githubToken" type="password" autocomplete="new-password" placeholder="optional"><button class="clear-secret" data-secret="GITHUB_TOKEN" type="button">Forget saved value</button></label>
+              <label>OpenAI key <span id="openaiState"></span><input id="openaiKey" type="password" autocomplete="new-password" placeholder="optional provider"><button class="clear-secret" data-secret="OPENAI_API_KEY" type="button">Forget saved value</button></label>
+              <label>Gemini key <span id="geminiState"></span><input id="geminiKey" type="password" autocomplete="new-password" placeholder="optional provider"><button class="clear-secret" data-secret="GEMINI_API_KEY" type="button">Forget saved value</button></label>
+              <label>Application account password <span id="applicationPasswordState"></span><input id="applicationPassword" type="password" autocomplete="new-password" placeholder="optional ATS account creation"><button class="clear-secret" data-secret="TIAAA_APPLICATION_PASSWORD" type="button">Forget saved value</button></label>
+            </div>
+          </article>
+          <div class="settings-save"><p id="settingsNote">Changes affect the next background cycle.</p><button class="button terracotta" type="submit">Save all settings</button></div>
+        </form>
       </section>
 
-      <footer>
-        <span>TI-AAA · Tech Internship Autonomous Application Agent</span>
-        <span>Data stays on this machine</span>
-      </footer>
+      <footer><span>TI-AAA · Tech Internship Autonomous Application Agent</span><span>Private by default · data stays in your local volume</span></footer>
     </main>
   </div>
+
+  <div id="onboarding" class="onboarding hidden" role="dialog" aria-modal="true" aria-labelledby="onboardingTitle">
+    <div class="onboarding-card">
+      <div class="onboarding-side">
+        <span class="brand-seal large">TI</span><p>SETUP</p>
+        <ol id="onboardingProgress"><li class="active">Welcome</li><li>Profile</li><li>Resume</li><li>Agent</li></ol>
+        <small>Your current repository listings become a protected baseline. They will never be auto-applied to.</small>
+      </div>
+      <div class="onboarding-content">
+        <section class="onboard-step active" data-step="0">
+          <p class="kicker">WELCOME TO YOUR INTERNSHIP DESK</p><h2 id="onboardingTitle">Set it once. Let it keep watch.</h2>
+          <p class="lead">TI-AAA runs on your computer, checks three curated GitHub repositories, and reacts only to listings added after your first sync.</p>
+          <div class="promise"><strong>The new-only promise</strong><p>Everything already in the repositories is recorded for context but stays in <em>Discovered</em>. It cannot silently enter the application queue later.</p></div>
+          <button class="button terracotta next-step" type="button">Begin setup</button>
+        </section>
+        <section class="onboard-step" data-step="1">
+          <p class="kicker">STEP 1 OF 3</p><h2>The facts applications need</h2>
+          <div class="field-grid onboard-fields">
+            <label>Legal name<input id="onboardName" required></label><label>Email<input id="onboardEmail" type="email" required></label>
+            <label>Phone<input id="onboardPhone"></label><label>University<input id="onboardSchool"></label>
+            <label>Major<input id="onboardMajor" value="Computer Science"></label><label>Graduation date<input id="onboardGraduation" placeholder="May 2028"></label>
+          </div>
+          <div class="toggle-list">
+            <label><input id="onboardAuthorized" type="checkbox" checked><span>Authorized to work in the U.S.</span></label>
+            <label><input id="onboardSponsorship" type="checkbox"><span>I require sponsorship</span></label>
+          </div>
+          <div class="step-actions"><button class="button ghost prev-step" type="button">Back</button><button class="button terracotta next-step" type="button">Continue</button></div>
+        </section>
+        <section class="onboard-step" data-step="2">
+          <p class="kicker">STEP 2 OF 3</p><h2>Add your first resume</h2>
+          <p class="lead">You can add more specialized versions later. A text-based PDF works best; for scanned PDFs, paste the plain text too.</p>
+          <form id="onboardResumeForm" class="form-stack onboard-upload">
+            <label>Resume label<input name="name" value="General tech resume" required></label>
+            <label>PDF<input name="file" type="file" accept="application/pdf,.pdf" required></label>
+            <label>Tags<input name="tags" placeholder="software, backend, python"></label>
+            <label>Plain text <span>optional</span><textarea name="text" rows="4"></textarea></label>
+            <button class="button ink" type="submit">Upload and continue</button>
+          </form>
+          <p id="onboardResumeStatus" class="fine-print"></p>
+          <div class="step-actions"><button class="button ghost prev-step" type="button">Back</button></div>
+        </section>
+        <section class="onboard-step" data-step="3">
+          <p class="kicker">STEP 3 OF 3</p><h2>Choose the agent’s boundary</h2>
+          <label class="wide-label">Anthropic API key <span>needed for browser application automation</span><input id="onboardAnthropic" type="password" autocomplete="new-password" placeholder="sk-ant-…"></label>
+          <label class="wide-label">Application account password <span>optional; used only if an employer requires account creation</span><input id="onboardApplicationPassword" type="password" autocomplete="new-password"></label>
+          <div class="choice-list">
+            <label><input type="radio" name="onboardMode" value="watch" checked><span><strong>Watch + prepare</strong><small>Poll, rank, and tailor; you apply manually.</small></span></label>
+            <label><input type="radio" name="onboardMode" value="review"><span><strong>Fill for review</strong><small>Open and fill applications, stopping before Submit.</small></span></label>
+            <label><input type="radio" name="onboardMode" value="submit"><span><strong>Autonomous submit</strong><small>Permit final submission within daily limits.</small></span></label>
+          </div>
+          <p class="fine-print">CAPTCHAs, ambiguous questions, and missing facts always stop for review.</p>
+          <div class="step-actions"><button class="button ghost prev-step" type="button">Back</button><button id="finishOnboarding" class="button terracotta" type="button">Finish setup</button></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/static/app.js" defer></script>
 </body>

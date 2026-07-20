@@ -39,6 +39,7 @@ def test_stream_json_ignores_intermediate_result_in_assistant_text() -> None:
 
 def test_claude_session_is_restricted_to_safe_playwright_tools(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("TIAAA_PLAYWRIGHT_MCP_PACKAGE", raising=False)
+    monkeypatch.delenv("TIAAA_PLAYWRIGHT_MCP_COMMAND", raising=False)
     config = _mcp_config(9330, windows=False)
     command = _claude_command(model="sonnet", config_path=tmp_path / "mcp.json")
     allowed = command[command.index("--allowedTools") + 1]
@@ -53,10 +54,20 @@ def test_claude_session_is_restricted_to_safe_playwright_tools(tmp_path, monkeyp
 
 def test_windows_mcp_config_wraps_npx_with_cmd(monkeypatch) -> None:
     monkeypatch.delenv("TIAAA_PLAYWRIGHT_MCP_PACKAGE", raising=False)
+    monkeypatch.delenv("TIAAA_PLAYWRIGHT_MCP_COMMAND", raising=False)
     server = _mcp_config(9330, windows=True)["mcpServers"]["playwright"]
 
     assert server["command"] == "cmd"
     assert server["args"][:4] == ["/c", "npx", "-y", "@playwright/mcp@0.0.78"]
+
+
+def test_container_can_use_preinstalled_playwright_mcp(monkeypatch) -> None:
+    monkeypatch.setenv("TIAAA_PLAYWRIGHT_MCP_COMMAND", "playwright-mcp")
+    server = _mcp_config(9330, windows=False)["mcpServers"]["playwright"]
+
+    assert server["command"] == "playwright-mcp"
+    assert server["args"][0] == "--cdp-endpoint=http://127.0.0.1:9330"
+    assert "@playwright/mcp@0.0.78" not in server["args"]
 
 
 def test_prompt_is_truth_constrained_and_stops_before_submit(tmp_path, profile) -> None:
@@ -71,6 +82,7 @@ def test_prompt_is_truth_constrained_and_stops_before_submit(tmp_path, profile) 
         "application_url": "https://jobs.test/1",
         "category": "Software Engineering",
         "resume_path": str(paths.resume_pdf),
+        "base_resume_text_path": str(paths.resume_text),
         "cover_letter_path": None,
     }
     prompt = build_prompt(

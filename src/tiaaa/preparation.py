@@ -12,6 +12,7 @@ from typing import Any
 from tiaaa.config import AppPaths
 from tiaaa.database import add_event, get_connection, mark_prepared, pending_preparation, utc_now
 from tiaaa.llm import get_client
+from tiaaa.resumes import choose_and_tailor_resume, import_legacy_resume
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +48,7 @@ def score_jobs_with_llm(
 ) -> dict[str, int]:
     """Optionally refine heuristic scores using repository metadata only."""
 
-    if not paths.resume_text.exists():
-        raise FileNotFoundError(f"Resume text not found: {paths.resume_text}")
-    resume = paths.resume_text.read_text(encoding="utf-8")
+    import_legacy_resume(paths=paths, db_path=db_path)
     connection = get_connection(db_path)
     query = """
         SELECT * FROM jobs WHERE eligibility = 'eligible' AND is_active = 1
@@ -62,9 +61,18 @@ def score_jobs_with_llm(
         parameters.append(limit)
     jobs = [dict(row) for row in connection.execute(query, parameters).fetchall()]
     completed = errors = 0
+    if not jobs:
+        return {"scored": 0, "errors": 0}
     client = get_client()
     try:
         for job in jobs:
+            _, _, _, resume = choose_and_tailor_resume(
+                job=job,
+                paths=paths,
+                profile={},
+                tailor=False,
+                db_path=db_path,
+            )
             prompt = f"""Evaluate this student's fit for a technology internship using ONLY the facts below.
 The listing came from a curated GitHub repository; no full job description is available.
 Do not infer credentials that are absent. Return JSON only:
@@ -150,28 +158,28 @@ def prepare_jobs(
     limit: int = 0,
     db_path: str | Path | None = None,
 ) -> dict[str, int]:
-    """Attach the base resume and optionally generate a factual cover letter."""
+    """Select the best resume, tailor it fact-safely, and prepare application packets."""
 
-    if not paths.resume_pdf.exists():
-        raise FileNotFoundError(
-            f"Resume PDF not found: {paths.resume_pdf}. Copy a recruiter-ready PDF there first."
-        )
-    if not paths.resume_text.exists():
-        raise FileNotFoundError(
-            f"Resume text not found: {paths.resume_text}. It is required as the agent's fact source."
-        )
-    resume = paths.resume_text.read_text(encoding="utf-8")
+    import_legacy_resume(paths=paths, db_path=db_path)
     minimum_score = int(settings.get("minimum_fit_score", 5))
     connection = get_connection(db_path)
     jobs = pending_preparation(connection, minimum_score, limit)
     use_llm = bool(settings.get("preparation", {}).get("use_llm"))
     generate_cover = bool(settings.get("preparation", {}).get("generate_cover_letters", True))
+    tailor = bool(settings.get("preparation", {}).get("tailor_resumes", True))
     prepared = errors = 0
 
     for job in jobs:
         cover_path: Path | None = None
-        notes = "Base resume selected; repository metadata retained for the browser agent."
+        notes = "Repository metadata retained for the browser agent."
         try:
+            selected, resume_path, tailoring_reason, resume = choose_and_tailor_resume(
+                job=job,
+                paths=paths,
+                profile=profile,
+                tailor=tailor,
+                db_path=db_path,
+            )
             if use_llm and generate_cover:
                 cover_letter, talking_points = _generate_packet(job=job, resume=resume, profile=profile)
                 packet_name = f"{job['id']}-{_safe_slug(job['company'])}-{_safe_slug(job['role'])}"
@@ -191,8 +199,10 @@ def prepare_jobs(
             mark_prepared(
                 connection,
                 int(job["id"]),
-                resume_path=str(paths.resume_pdf.resolve()),
+                base_resume_id=int(selected["id"]),
+                resume_path=str(resume_path.resolve()),
                 cover_letter_path=str(cover_path.resolve()) if cover_path else None,
+                tailoring_reason=tailoring_reason,
                 notes=notes,
             )
             prepared += 1

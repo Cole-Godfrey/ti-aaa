@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from tiaaa.apply.chrome import launch_chrome, stop_chrome
+from tiaaa.apply.preview import PreviewCapture
 from tiaaa.apply.prompt import build_prompt
 from tiaaa.config import AppPaths
 from tiaaa.database import (
@@ -26,6 +27,7 @@ from tiaaa.database import (
     init_db,
     mark_apply_result,
     release_claim,
+    update_worker_state,
 )
 
 log = logging.getLogger(__name__)
@@ -55,16 +57,17 @@ _PLAYWRIGHT_TOOLS = (
 def _mcp_config(port: int, *, windows: bool | None = None) -> dict[str, Any]:
     package = os.environ.get("TIAAA_PLAYWRIGHT_MCP_PACKAGE", "@playwright/mcp@0.0.78")
     windows = platform.system() == "Windows" if windows is None else windows
-    command = "cmd" if windows else "npx"
-    prefix = ["/c", "npx"] if windows else []
+    installed_command = os.environ.get("TIAAA_PLAYWRIGHT_MCP_COMMAND")
+    command = installed_command or ("cmd" if windows else "npx")
+    prefix = [] if installed_command else (["/c", "npx"] if windows else [])
+    package_args = [] if installed_command else ["-y", package]
     return {
         "mcpServers": {
             "playwright": {
                 "command": command,
                 "args": prefix
+                + package_args
                 + [
-                    "-y",
-                    package,
                     f"--cdp-endpoint=http://127.0.0.1:{port}",
                     "--viewport-size=1280x900",
                 ],
@@ -204,22 +207,52 @@ def _worker(
     automation = settings.get("automation", {})
     connection = get_connection(db_path)
     chrome_process = None
+    preview: PreviewCapture | None = None
+    worker_name = f"worker-{worker_id}"
+    preview_path = paths.previews / f"{worker_name}.jpg"
     totals = {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+    update_worker_state(
+        connection,
+        worker_name,
+        status="starting",
+        message="Launching an isolated browser",
+        screenshot_path=str(preview_path.resolve()),
+    )
     try:
         chrome_process, port = launch_chrome(
             worker_id=worker_id,
             paths=paths,
-            headless=bool(automation.get("headless", False)),
+            headless=(
+                bool(automation.get("headless", False))
+                or os.environ.get("TIAAA_FORCE_HEADLESS") == "1"
+            ),
+        )
+        preview = PreviewCapture(port=port, output_path=preview_path)
+        preview.start()
+        update_worker_state(
+            connection,
+            worker_name,
+            status="idle",
+            message="Browser ready; looking for prepared applications",
+            screenshot_path=str(preview_path.resolve()),
         )
         for _ in range(quota):
             job = claim_next_job(
                 connection,
-                worker_id=f"worker-{worker_id}",
+                worker_id=worker_name,
                 max_attempts=int(automation.get("max_attempts", 3)),
                 target_job_id=target_job_id,
             )
             if job is None:
                 break
+            update_worker_state(
+                connection,
+                worker_name,
+                status="applying",
+                job=job,
+                message="Filling the application in the browser",
+                screenshot_path=str(preview_path.resolve()),
+            )
             try:
                 result, detail = _run_agent(
                     job=job,
@@ -232,6 +265,22 @@ def _worker(
                     submit=submit,
                 )
                 mark_apply_result(connection, int(job["id"]), result, detail)
+                result_message = {
+                    "applied": "Application submitted",
+                    "expired": "Listing is no longer available",
+                    "review_ready": "Application is ready for your review",
+                    "needs_review": "Application needs your review",
+                    "captcha": "Paused for CAPTCHA review",
+                    "failed": "Application attempt failed",
+                }.get(result, result.replace("_", " ").title())
+                update_worker_state(
+                    connection,
+                    worker_name,
+                    status="complete" if result == "applied" else result,
+                    job=job,
+                    message=f"{result_message}{f': {detail}' if detail else ''}",
+                    screenshot_path=str(preview_path.resolve()),
+                )
                 if result == "applied":
                     totals["applied"] += 1
                 elif result == "expired":
@@ -246,11 +295,51 @@ def _worker(
             except Exception as exc:
                 log.exception("Application worker failed for job %s", job["id"])
                 mark_apply_result(connection, int(job["id"]), "failed", str(exc))
+                update_worker_state(
+                    connection,
+                    worker_name,
+                    status="failed",
+                    job=job,
+                    message=str(exc)[:500],
+                    screenshot_path=str(preview_path.resolve()),
+                )
                 totals["failed"] += 1
             if target_job_id is not None:
                 break
+    except Exception as exc:
+        update_worker_state(
+            connection,
+            worker_name,
+            status="failed",
+            message=str(exc)[:500],
+            screenshot_path=str(preview_path.resolve()),
+        )
+        raise
     finally:
+        if preview is not None:
+            preview.stop()
         stop_chrome(chrome_process)
+        current = connection.execute(
+            "SELECT job_id, company, role, message FROM worker_state WHERE worker_id = ?",
+            (worker_name,),
+        ).fetchone()
+        last_job = (
+            {
+                "id": current["job_id"],
+                "company": current["company"],
+                "role": current["role"],
+            }
+            if current and current["job_id"]
+            else None
+        )
+        update_worker_state(
+            connection,
+            worker_name,
+            status="idle",
+            job=last_job,
+            message=(current["message"] if current else None) or "Waiting for the next cycle",
+            screenshot_path=str(preview_path.resolve()),
+        )
     return totals
 
 
@@ -297,7 +386,7 @@ def run_applications(
         return {"applied": 0, "review": 0, "failed": 0, "expired": 0}
     if shutil.which("claude") is None:
         raise FileNotFoundError("Claude Code CLI was not found on PATH")
-    if shutil.which("npx") is None:
+    if not os.environ.get("TIAAA_PLAYWRIGHT_MCP_COMMAND") and shutil.which("npx") is None:
         raise FileNotFoundError("npx was not found on PATH; Node.js is required for Playwright MCP")
 
     base, extra = divmod(requested, workers)

@@ -28,7 +28,7 @@ The test suite must run without network access. Live-source checks may be perfor
 3. Preserve first-sync baseline protection and direct-URL deduplication.
 4. Never weaken the fact-only application rules or silently enable final submission.
 5. Do not commit profiles, resumes, API keys, browser data, databases, or agent logs.
-6. Run `ruff check .`, `pytest`, and `python -m build`.
+6. Run `ruff check src tests`, `pytest`, and `python -m build`.
 7. Update the README and CHANGELOG when user-facing behavior changes.
 
 ## Source parser changes
@@ -54,7 +54,7 @@ The browser agent must:
 - stop on CAPTCHA, MFA, SSO, or email verification
 - avoid sensitive financial, identity, biometric, and device-permission flows
 - verify visible confirmation before recording an application
-- require both the setting and CLI flag before final submission
+- require both `automation.enabled` and `automation.allow_submission`; terminal batches also require `--submit`
 
 ## Licensing
 

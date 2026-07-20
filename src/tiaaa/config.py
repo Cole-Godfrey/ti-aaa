@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv, set_key, unset_key
 
 from tiaaa.models import SourceDocument
 
@@ -67,7 +67,10 @@ SOURCE_DOCUMENTS: tuple[SourceDocument, ...] = (
 DEFAULT_SETTINGS: dict[str, Any] = {
     "poll_interval_seconds": 300,
     "minimum_fit_score": 5,
-    "initial_sync": "baseline",
+    "service": {
+        "enabled": True,
+        "auto_prepare": True,
+    },
     "filters": {
         "include_role_keywords": [],
         "exclude_keywords": [],
@@ -77,9 +80,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "preparation": {
         "use_llm": False,
         "generate_cover_letters": True,
+        "tailor_resumes": True,
     },
     "automation": {
+        "enabled": False,
         "allow_submission": False,
+        "workers": 1,
         "max_applications_per_cycle": 5,
         "max_applications_per_day": 25,
         "max_attempts": 3,
@@ -126,6 +132,14 @@ class AppPaths:
         return self.root / "application-packets"
 
     @property
+    def resumes(self) -> Path:
+        return self.root / "resumes"
+
+    @property
+    def previews(self) -> Path:
+        return self.root / "live-previews"
+
+    @property
     def logs(self) -> Path:
         return self.root / "logs"
 
@@ -148,6 +162,8 @@ def ensure_dirs(paths: AppPaths | None = None) -> AppPaths:
     for directory in (
         paths.root,
         paths.packets,
+        paths.resumes,
+        paths.previews,
         paths.logs,
         paths.browser_profiles,
         paths.workers,
@@ -199,6 +215,103 @@ def load_profile(paths: AppPaths | None = None) -> dict[str, Any]:
     if missing:
         raise ValueError(f"Profile is missing required sections: {', '.join(missing)}")
     return profile
+
+
+def save_profile(profile: dict[str, Any], paths: AppPaths | None = None) -> Path:
+    """Validate and persist the web/CLI profile with private file permissions."""
+
+    paths = ensure_dirs(paths)
+    required = ("personal", "education", "work_authorization", "preferences")
+    missing = [key for key in required if not isinstance(profile.get(key), dict)]
+    if missing:
+        raise ValueError(f"Profile is missing required sections: {', '.join(missing)}")
+    paths.profile.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    with suppress(OSError):
+        paths.profile.chmod(0o600)
+    return paths.profile
+
+
+def save_settings(settings: dict[str, Any], paths: AppPaths | None = None) -> Path:
+    """Persist user settings after merging defaults and clamping unsafe runtime values."""
+
+    paths = ensure_dirs(paths)
+    merged = _deep_merge(DEFAULT_SETTINGS, settings)
+    merged["poll_interval_seconds"] = max(30, int(merged.get("poll_interval_seconds", 300)))
+    merged["minimum_fit_score"] = max(1, min(10, int(merged.get("minimum_fit_score", 5))))
+    automation = merged["automation"]
+    automation["workers"] = max(1, min(8, int(automation.get("workers", 1))))
+    automation["max_applications_per_cycle"] = max(
+        1, min(50, int(automation.get("max_applications_per_cycle", 5)))
+    )
+    automation["max_applications_per_day"] = max(
+        1, min(200, int(automation.get("max_applications_per_day", 25)))
+    )
+    automation["max_attempts"] = max(1, min(10, int(automation.get("max_attempts", 3))))
+    automation["timeout_seconds"] = max(
+        60, min(3600, int(automation.get("timeout_seconds", 600)))
+    )
+    paths.settings.write_text(
+        yaml.safe_dump(merged, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    with suppress(OSError):
+        paths.settings.chmod(0o600)
+    return paths.settings
+
+
+SECRET_NAMES = (
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "GITHUB_TOKEN",
+    "TIAAA_APPLICATION_PASSWORD",
+)
+
+
+def secret_status(paths: AppPaths | None = None) -> dict[str, dict[str, str | bool]]:
+    """Return write-only secret presence and a short suffix, never the secret itself."""
+
+    paths = paths or get_paths()
+    stored = dotenv_values(paths.env) if paths.env.exists() else {}
+    result: dict[str, dict[str, str | bool]] = {}
+    for name in SECRET_NAMES:
+        value = os.environ.get(name) or str(stored.get(name) or "")
+        result[name] = {
+            "configured": bool(value),
+            "suffix": (
+                value[-4:]
+                if name != "TIAAA_APPLICATION_PASSWORD" and len(value) >= 4
+                else ""
+            ),
+        }
+    return result
+
+
+def update_secrets(
+    updates: dict[str, str | None],
+    *,
+    clear: list[str] | None = None,
+    paths: AppPaths | None = None,
+) -> Path:
+    """Update the fixed local secret set without returning or logging values."""
+
+    paths = ensure_dirs(paths)
+    unknown = (set(updates) | set(clear or [])) - set(SECRET_NAMES)
+    if unknown:
+        raise ValueError(f"Unknown secret fields: {', '.join(sorted(unknown))}")
+    paths.env.touch(mode=0o600, exist_ok=True)
+    for name in clear or []:
+        unset_key(paths.env, name)
+        os.environ.pop(name, None)
+    for name, value in updates.items():
+        if value:
+            clean_value = value.strip()
+            if "\n" in clean_value or "\r" in clean_value:
+                raise ValueError(f"{name} must be a single-line value")
+            set_key(paths.env, name, clean_value, quote_mode="always")
+            os.environ[name] = clean_value
+    with suppress(OSError):
+        paths.env.chmod(0o600)
+    return paths.env
 
 
 def initialize_user_files(paths: AppPaths | None = None, force: bool = False) -> list[Path]:

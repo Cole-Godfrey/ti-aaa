@@ -1,6 +1,10 @@
 poll_interval_seconds: 300
 minimum_fit_score: 5
-initial_sync: baseline
+
+service:
+  # The poller runs even when no browser is open.
+  enabled: true
+  auto_prepare: true
 
 filters:
   # Empty means accept all roles in the tech-internship repositories.
@@ -12,10 +16,15 @@ filters:
 preparation:
   use_llm: false
   generate_cover_letters: true
+  # Reorders existing resume facts into an ATS-friendly PDF; it never invents content.
+  tailor_resumes: true
 
 automation:
-  # Submission requires BOTH this setting and the CLI --submit flag.
+  # Enable after onboarding to launch browser workers for newly posted roles only.
+  enabled: false
+  # False fills forms for review; true lets the background service click final Submit.
   allow_submission: false
+  workers: 1
   max_applications_per_cycle: 5
   max_applications_per_day: 25
   max_attempts: 3

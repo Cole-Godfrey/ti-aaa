@@ -1,6 +1,6 @@
 [project]
 name = "ti-aaa"
-version = "0.1.0"
+version = "0.2.0"
 description = "Tech Internship Autonomous Application Agent powered by community GitHub internship lists"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -10,6 +10,7 @@ keywords = ["internships", "job-application", "automation", "github", "career-tr
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
+  "Environment :: Web Environment",
   "Framework :: FastAPI",
   "License :: OSI Approved :: GNU Affero General Public License v3",
   "Programming Language :: Python :: 3",
@@ -22,11 +23,15 @@ dependencies = [
   "beautifulsoup4>=4.12,<5",
   "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
+  "pypdf>=5.0,<7",
   "python-dotenv>=1.0,<2",
+  "python-multipart>=0.0.18,<1",
   "pyyaml>=6.0,<7",
+  "reportlab>=4.2,<5",
   "rich>=13.7,<15",
   "typer>=0.12,<1",
   "uvicorn>=0.30,<1",
+  "websockets>=14,<17",
 ]
 
 [project.optional-dependencies]
