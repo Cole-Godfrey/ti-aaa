@@ -228,11 +228,24 @@
               <label>Disability status<input id="eeoDisability" placeholder="Decline to self-identify"></label>
             </div>
           </article>
+          <article class="panel settings-card claude-card">
+            <p class="kicker">BROWSER AGENT</p><h2>Claude Code connection</h2>
+            <div class="auth-status-line"><span id="claudeAuthDot" class="auth-dot"></span><strong id="claudeAuthState">Checking connection…</strong></div>
+            <p id="claudeAuthDetail" class="fine-print">Use the Claude account included with a Pro or Max subscription. No API key or separate API billing is required.</p>
+            <div class="auth-actions">
+              <button id="connectClaude" class="button ink" type="button">Connect Claude account</button>
+              <button id="disconnectClaude" class="button ghost hidden" type="button">Disconnect account</button>
+            </div>
+            <div id="claudeCodePanel" class="auth-code-panel hidden">
+              <p><a id="claudeLoginLink" target="_blank" rel="noopener noreferrer">Open Claude sign-in</a>, finish signing in, then paste its one-time code here.</p>
+              <div class="auth-code-row"><input id="claudeLoginCode" autocomplete="one-time-code" placeholder="Paste one-time code"><button id="completeClaude" class="button terracotta" type="button">Complete connection</button></div>
+            </div>
+          </article>
           <article class="panel settings-card keys-card">
-            <p class="kicker">SECRETS</p><h2>API keys</h2>
-            <p class="fine-print">Keys are write-only in this UI and stored in <code>.env</code> with private permissions. Leave a field blank to keep the saved value.</p>
+            <p class="kicker">OPTIONAL SECRETS</p><h2>API keys and ATS password</h2>
+            <p class="fine-print">These are optional. Keys are write-only in this UI and stored in <code>.env</code> with private permissions. Leave a field blank to keep the saved value.</p>
             <div class="field-grid">
-              <label>Anthropic key <span id="anthropicState"></span><input id="anthropicKey" type="password" autocomplete="new-password" placeholder="sk-ant-…"><button class="clear-secret" data-secret="ANTHROPIC_API_KEY" type="button">Forget saved value</button></label>
+              <label>Anthropic API key <span>advanced alternative to account login · <span id="anthropicState"></span></span><input id="anthropicKey" type="password" autocomplete="new-password" placeholder="optional API billing"><button class="clear-secret" data-secret="ANTHROPIC_API_KEY" type="button">Forget saved value</button></label>
               <label>GitHub token <span id="githubState"></span><input id="githubToken" type="password" autocomplete="new-password" placeholder="optional"><button class="clear-secret" data-secret="GITHUB_TOKEN" type="button">Forget saved value</button></label>
               <label>OpenAI key <span id="openaiState"></span><input id="openaiKey" type="password" autocomplete="new-password" placeholder="optional provider"><button class="clear-secret" data-secret="OPENAI_API_KEY" type="button">Forget saved value</button></label>
               <label>Gemini key <span id="geminiState"></span><input id="geminiKey" type="password" autocomplete="new-password" placeholder="optional provider"><button class="clear-secret" data-secret="GEMINI_API_KEY" type="button">Forget saved value</button></label>
@@ -289,7 +302,16 @@
         </section>
         <section class="onboard-step" data-step="3">
           <p class="kicker">STEP 3 OF 3</p><h2>Choose the agent’s boundary</h2>
-          <label class="wide-label">Anthropic API key <span>needed for browser application automation</span><input id="onboardAnthropic" type="password" autocomplete="new-password" placeholder="sk-ant-…"></label>
+          <div class="onboard-auth">
+            <div class="auth-status-line"><span id="onboardClaudeAuthDot" class="auth-dot"></span><strong id="onboardClaudeAuthState">Claude account not connected</strong></div>
+            <p id="onboardClaudeAuthDetail" class="fine-print">Recommended: sign in with the Claude Pro or Max account you already use for Claude Code. No Anthropic API key is needed.</p>
+            <button id="onboardConnectClaude" class="button ink" type="button">Connect Claude account</button>
+            <div id="onboardClaudeCodePanel" class="auth-code-panel hidden">
+              <p><a id="onboardClaudeLoginLink" target="_blank" rel="noopener noreferrer">Open Claude sign-in</a>, finish signing in, then paste its one-time code here.</p>
+              <div class="auth-code-row"><input id="onboardClaudeLoginCode" autocomplete="one-time-code" placeholder="Paste one-time code"><button id="onboardCompleteClaude" class="button terracotta" type="button">Complete connection</button></div>
+            </div>
+            <details class="advanced-auth"><summary>Use an Anthropic API key instead</summary><label class="wide-label">Anthropic API key <span>optional; uses separate API billing</span><input id="onboardAnthropic" type="password" autocomplete="new-password" placeholder="sk-ant-…"></label></details>
+          </div>
           <label class="wide-label">Application account password <span>optional; used only if an employer requires account creation</span><input id="onboardApplicationPassword" type="password" autocomplete="new-password"></label>
           <div class="choice-list">
             <label><input type="radio" name="onboardMode" value="watch" checked><span><strong>Watch + prepare</strong><small>Poll, rank, and tailor; you apply manually.</small></span></label>

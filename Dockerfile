@@ -36,6 +36,7 @@ RUN python3 -m venv /opt/venv \
     && mkdir -p /data \
     && chown -R tiaaa:tiaaa /data /app
 
+ENV HOME=/data
 USER tiaaa
 EXPOSE 8787
 VOLUME ["/data"]

@@ -19,6 +19,7 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
+      HOME: /data
       TIAAA_HOME: /data
       TIAAA_FORCE_HEADLESS: "1"
       TIAAA_CHROME_NO_SANDBOX: "1"

@@ -6,6 +6,7 @@ const state = {
   activeView: "overview",
   searchTimer: null,
   onboardingStep: 0,
+  claudeAuth: null,
 };
 
 const viewCopy = {
@@ -93,6 +94,79 @@ function showToast(message, error = false) {
   toast.className = `toast show${error ? " error" : ""}`;
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => { toast.className = "toast"; }, 3200);
+}
+
+function renderClaudeAuth(auth) {
+  state.claudeAuth = auth;
+  const connected = Boolean(auth?.logged_in);
+  const pending = Boolean(auth?.login_pending);
+  const apiKey = auth?.auth_method === "api_key";
+  let title = "Claude account not connected";
+  let detail = "Connect a Claude Pro or Max account for browser form filling. You do not need an Anthropic API key.";
+  if (!auth?.installed) {
+    title = "Claude Code is not installed";
+    detail = "Docker includes Claude Code. Native installs need the Claude Code CLI before browser automation can run.";
+  } else if (connected && apiKey) {
+    title = "Connected with an API key";
+    detail = "Browser automation will use separate Anthropic API billing. Clear the API key below if you want to use your Claude subscription instead.";
+  } else if (connected) {
+    title = "Claude account connected";
+    detail = "Browser automation will use your saved Claude Code account login; no API key is required.";
+  } else if (pending) {
+    title = "Waiting for your one-time code";
+    detail = "Complete the Claude sign-in page, then paste the one-time code below.";
+  }
+  ["claudeAuthState", "onboardClaudeAuthState"].forEach(id => { element(id).textContent = title; });
+  ["claudeAuthDetail", "onboardClaudeAuthDetail"].forEach(id => { element(id).textContent = detail; });
+  ["claudeAuthDot", "onboardClaudeAuthDot"].forEach(id => {
+    element(id).className = `auth-dot${connected ? " connected" : pending ? " pending" : ""}`;
+  });
+  element("connectClaude").classList.toggle("hidden", connected);
+  element("onboardConnectClaude").classList.toggle("hidden", connected);
+  element("disconnectClaude").classList.toggle("hidden", !connected || apiKey);
+  ["claudeCodePanel", "onboardClaudeCodePanel"].forEach(id => element(id).classList.toggle("hidden", !pending));
+  const loginUrl = /^https:\/\/claude\.com\//.test(auth?.login_url || "") ? auth.login_url : "";
+  ["claudeLoginLink", "onboardClaudeLoginLink"].forEach(id => {
+    const link = element(id);
+    if (loginUrl) link.href = loginUrl;
+    else link.removeAttribute("href");
+  });
+}
+
+async function refreshClaudeAuth() {
+  const auth = await api("/api/claude-auth");
+  renderClaudeAuth(auth);
+  return auth;
+}
+
+async function startClaudeLogin(button) {
+  button.disabled = true;
+  const loginWindow = window.open("", "_blank");
+  if (loginWindow) loginWindow.opener = null;
+  try {
+    const auth = await api("/api/claude-auth/login", { method: "POST" });
+    renderClaudeAuth(auth);
+    if (loginWindow && auth.login_url) loginWindow.location.replace(auth.login_url);
+    showToast("Claude sign-in opened; paste its one-time code when finished");
+  } catch (error) {
+    if (loginWindow) loginWindow.close();
+    showToast(error.message, true);
+  } finally { button.disabled = false; }
+}
+
+async function completeClaudeLogin(inputId, button) {
+  const code = value(inputId);
+  if (!code) { showToast("Paste the one-time code from Claude", true); return; }
+  button.disabled = true;
+  try {
+    const auth = await api("/api/claude-auth/complete", {
+      method: "POST", body: JSON.stringify({ code }),
+    });
+    setValue("claudeLoginCode", ""); setValue("onboardClaudeLoginCode", "");
+    renderClaudeAuth(auth);
+    showToast("Claude account connected—no API key needed");
+  } catch (error) { showToast(error.message, true); }
+  finally { button.disabled = false; }
 }
 
 function setView(view) {
@@ -400,11 +474,16 @@ function configurationPayload() {
 async function saveConfiguration(event) {
   event.preventDefault();
   const button = event.submitter;
+  if (checked("automationEnabled") && !state.claudeAuth?.logged_in && !value("anthropicKey")) {
+    showToast("Connect Claude Code, enter an API key, or turn off browser automation", true);
+    return;
+  }
   if (button) button.disabled = true;
   try {
     const config = await api("/api/config", { method: "PUT", body: JSON.stringify(configurationPayload()) });
     populateConfiguration(config);
     ["anthropicKey", "githubToken", "openaiKey", "geminiKey", "applicationPassword"].forEach(id => setValue(id, ""));
+    await refreshClaudeAuth();
     showToast("Settings saved; the background agent has been notified");
   } catch (error) { showToast(error.message, true); }
   finally { if (button) button.disabled = false; }
@@ -461,6 +540,9 @@ async function finishOnboarding() {
     });
     const settings = clone(state.config.settings);
     const mode = document.querySelector('input[name="onboardMode"]:checked').value;
+    if (mode !== "watch" && !state.claudeAuth?.logged_in && !value("onboardAnthropic")) {
+      throw new Error("Connect your Claude account, enter an optional API key, or choose Watch + prepare");
+    }
     settings.service.enabled = true; settings.service.auto_prepare = true; settings.preparation.tailor_resumes = true;
     settings.automation.enabled = mode !== "watch"; settings.automation.allow_submission = mode === "submit";
     const secrets = {};
@@ -470,6 +552,7 @@ async function finishOnboarding() {
       method: "PUT", body: JSON.stringify({ profile, settings, secrets, onboarding_complete: true }),
     });
     populateConfiguration(config);
+    await refreshClaudeAuth();
     element("onboarding").classList.add("hidden");
     showToast("Setup complete. TI-AAA is watching for new listings.");
     await refreshAll();
@@ -486,8 +569,9 @@ async function refreshAll() {
 
 async function initialize() {
   try {
-    const [config, onboarding, resumes] = await Promise.all([api("/api/config"), api("/api/onboarding"), api("/api/resumes")]);
+    const [config, onboarding, resumes, claudeAuth] = await Promise.all([api("/api/config"), api("/api/onboarding"), api("/api/resumes"), api("/api/claude-auth")]);
     populateConfiguration(config);
+    renderClaudeAuth(claudeAuth);
     state.onboarding = onboarding;
     renderResumes(resumes.items);
     if (!onboarding.complete) {
@@ -513,6 +597,17 @@ document.querySelectorAll(".next-step").forEach(button => button.addEventListene
 }));
 document.querySelectorAll(".prev-step").forEach(button => button.addEventListener("click", () => setOnboardingStep(state.onboardingStep - 1)));
 element("finishOnboarding").addEventListener("click", finishOnboarding);
+element("connectClaude").addEventListener("click", event => startClaudeLogin(event.currentTarget));
+element("onboardConnectClaude").addEventListener("click", event => startClaudeLogin(event.currentTarget));
+element("completeClaude").addEventListener("click", event => completeClaudeLogin("claudeLoginCode", event.currentTarget));
+element("onboardCompleteClaude").addEventListener("click", event => completeClaudeLogin("onboardClaudeLoginCode", event.currentTarget));
+element("disconnectClaude").addEventListener("click", async event => {
+  if (!window.confirm("Disconnect this Claude account from TI-AAA?")) return;
+  event.currentTarget.disabled = true;
+  try { renderClaudeAuth(await api("/api/claude-auth", { method: "DELETE" })); showToast("Claude account disconnected"); }
+  catch (error) { showToast(error.message, true); }
+  finally { event.currentTarget.disabled = false; }
+});
 document.querySelectorAll(".clear-secret").forEach(button => button.addEventListener("click", async () => {
   if (!window.confirm("Forget this saved value?")) return;
   try {
@@ -520,6 +615,7 @@ document.querySelectorAll(".clear-secret").forEach(button => button.addEventList
       method: "PUT", body: JSON.stringify({ clear_secrets: [button.dataset.secret] }),
     });
     populateConfiguration(config);
+    if (button.dataset.secret === "ANTHROPIC_API_KEY") await refreshClaudeAuth();
     showToast("Saved value removed");
   } catch (error) { showToast(error.message, true); }
 }));

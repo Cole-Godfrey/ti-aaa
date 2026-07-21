@@ -78,8 +78,10 @@ The onboarding flow asks for:
 
 1. truthful profile and education facts;
 2. at least one PDF resume;
-3. an optional Anthropic API key;
+3. a Claude Code account connection if you want browser form filling;
 4. whether the agent should watch, fill for review, or submit automatically.
+
+For browser automation, click **Connect Claude account** and sign in with the Claude Pro or Max account you already use for Claude Code. Paste the one-time code from Claude back into TI-AAA. This login is saved in the private Docker volume and survives container restarts; it does **not** require an Anthropic API key or separate API billing. An API key remains available as an advanced alternative.
 
 The first repository check starts independently of the browser and establishes the protected baseline. You can close the tab after onboarding; polling and enabled browser workers continue inside Docker.
 
@@ -156,6 +158,13 @@ Install Claude Code if you want browser workers:
 
 ```bash
 npm install -g @anthropic-ai/claude-code@2.1.215
+```
+
+You can use an existing Claude Code login or connect from TI-AAA's web onboarding. To authenticate directly in a terminal instead:
+
+```bash
+claude auth login --claudeai
+claude auth status --text
 ```
 
 Then launch the website and background service together:
@@ -346,12 +355,13 @@ automation:
 
 Supported secret fields in the web app:
 
-- `ANTHROPIC_API_KEY` — Claude Code browser workers in Docker
+- Claude Code account login — recommended for browser workers; works with an existing Claude Pro or Max subscription and is managed from the web app
+- `ANTHROPIC_API_KEY` — optional advanced alternative that uses Anthropic API billing
 - `GITHUB_TOKEN` — optional extra GitHub request allowance
 - `GEMINI_API_KEY` or `OPENAI_API_KEY` — optional scoring and cover letters
 - `TIAAA_APPLICATION_PASSWORD` — optional employer-owned ATS account creation
 
-API keys are not required for GitHub discovery, heuristic scoring, resume ranking, the tracker, or dashboard analytics.
+API keys are not required for GitHub discovery, heuristic scoring, resume ranking, the tracker, or dashboard analytics. An Anthropic API key is also unnecessary for browser automation when Claude Code is connected to a Claude subscription.
 
 ## Pipeline and data model
 

@@ -4,6 +4,18 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-20
+
+### Added
+
+- browser-based Claude Code login with an existing Claude Pro or Max subscription
+- persistent Docker Claude credentials in the private `tiaaa-data` volume
+
+### Changed
+
+- the Anthropic API key is now an explicitly optional, advanced billing alternative
+- the web UI requires either account or API-key authentication only when browser automation is enabled
+
 ## [0.2.0] - 2026-07-19
 
 ### Added

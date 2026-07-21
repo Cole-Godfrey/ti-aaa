@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from tiaaa import __version__
+from tiaaa.claude_auth import ClaudeAuthManager
 from tiaaa.config import (
     SOURCE_DOCUMENTS,
     AppPaths,
@@ -86,6 +87,12 @@ class ConfigurationUpdate(BaseModel):
     onboarding_complete: bool | None = None
 
 
+class ClaudeAuthCode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=4096)
+
+
 def _public_resume(row: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
@@ -129,6 +136,7 @@ def create_app(
     load_environment(paths)
     database_path = Path(db_path).resolve() if db_path is not None else paths.database
     init_db(database_path)
+    claude_auth = ClaudeAuthManager(paths)
     background_service: AutomationService | None = (
         service_for(paths, database_path) if start_service else None
     )
@@ -142,6 +150,7 @@ def create_app(
         finally:
             if background_service is not None:
                 background_service.stop()
+            claude_auth.close()
 
     app = FastAPI(
         title="TI-AAA Dashboard",
@@ -153,6 +162,7 @@ def create_app(
     app.state.db_path = database_path
     app.state.paths = paths
     app.state.service = background_service
+    app.state.claude_auth = claude_auth
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.middleware("http")
@@ -215,6 +225,33 @@ def create_app(
             "settings": load_settings(paths),
             "secrets": secret_status(paths),
         }
+
+    @app.get("/api/claude-auth")
+    def claude_auth_status() -> dict[str, Any]:
+        return app.state.claude_auth.status()
+
+    @app.post("/api/claude-auth/login")
+    def start_claude_auth() -> dict[str, Any]:
+        try:
+            return app.state.claude_auth.start_login()
+        except (FileNotFoundError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/claude-auth/complete")
+    def complete_claude_auth(payload: ClaudeAuthCode) -> dict[str, Any]:
+        try:
+            return app.state.claude_auth.complete_login(payload.code)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.delete("/api/claude-auth")
+    def disconnect_claude_auth() -> dict[str, Any]:
+        try:
+            return app.state.claude_auth.logout()
+        except (FileNotFoundError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.put("/api/config")
     def put_configuration(update: ConfigurationUpdate) -> dict[str, Any]:
