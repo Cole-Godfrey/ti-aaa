@@ -33,6 +33,7 @@ from tiaaa.database import (
     init_db,
     list_jobs,
     list_resumes,
+    request_manual_application,
     source_status,
     update_tracker,
 )
@@ -130,7 +131,7 @@ def init_command(
     console.print(f"  2. Edit [cyan]{paths.settings}[/cyan]")
     console.print(f"  3. Put resume.txt and resume.pdf in [cyan]{paths.root}[/cyan]")
     console.print("  4. Run [bold]tiaaa doctor[/bold], then [bold]tiaaa sync[/bold]")
-    console.print("\n[dim]The first sync establishes a baseline and does not queue old listings.[/dim]")
+    console.print("\n[dim]The first sync imports the current catalog without auto-applying.[/dim]")
 
 
 def _run_sync(
@@ -166,7 +167,7 @@ def _run_sync(
             note = "conditional request/cache hit"
         else:
             state = "[green]synced[/green]"
-            note = "baseline only" if result.baseline else f"{result.expired} expired"
+            note = "first catalog import" if result.baseline else f"{result.expired} expired"
         table.add_row(
             result.label,
             state,
@@ -304,11 +305,34 @@ def apply(
         bool,
         typer.Option(help="Allow the browser agent to click the final Submit button."),
     ] = False,
-    job_id: Annotated[int | None, typer.Option(help="Target one prepared job ID.")] = None,
+    job_id: Annotated[
+        int | None,
+        typer.Option(help="Request, prepare, and target one catalog job ID."),
+    ] = None,
 ) -> None:
-    """Fill prepared applications; final submission requires explicit two-key opt-in."""
+    """Request and fill applications; final submission requires explicit two-key opt-in."""
 
     paths, profile, settings = _bootstrap()
+    if job_id is not None:
+        try:
+            job = request_manual_application(get_connection(paths.database), job_id)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if job is None:
+            raise typer.BadParameter(f"Job ID {job_id} was not found")
+        from tiaaa.preparation import prepare_jobs
+
+        prepared = prepare_jobs(
+            paths=paths,
+            profile=profile,
+            settings=settings,
+            limit=1,
+            target_job_id=job_id,
+            db_path=paths.database,
+        )
+        if prepared["errors"]:
+            console.print(f"[red]Could not prepare job ID {job_id}.[/red]")
+            raise typer.Exit(code=1)
     _run_apply(
         paths=paths,
         profile=profile,

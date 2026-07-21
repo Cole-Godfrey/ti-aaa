@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="TI-AAA local tech internship application agent">
   <title>TI-AAA · Internship desk</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%2341365a%22/><path d=%22M14 19h36v7H36v24h-8V26H14z%22 fill=%22%23f0b49e%22/></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 fill=%22%23171813%22/><rect x=%2210%22 y=%2210%22 width=%2244%22 height=%2244%22 fill=%22%23dcff45%22/><path d=%22M18 21h28v7H36v20h-8V28H18z%22 fill=%22%23171813%22/></svg>">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -18,15 +18,16 @@
 
       <nav class="nav" aria-label="App sections">
         <button class="nav-item active" data-view-target="overview"><span>01</span>Overview</button>
-        <button class="nav-item" data-view-target="applications"><span>02</span>Applications</button>
-        <button class="nav-item" data-view-target="live"><span>03</span>Live agent</button>
-        <button class="nav-item" data-view-target="resumes"><span>04</span>Resumes</button>
-        <button class="nav-item" data-view-target="settings"><span>05</span>Settings</button>
+        <button class="nav-item" data-view-target="latest"><span>02</span>Latest jobs</button>
+        <button class="nav-item" data-view-target="applications"><span>03</span>Applications</button>
+        <button class="nav-item" data-view-target="live"><span>04</span>Agent</button>
+        <button class="nav-item" data-view-target="resumes"><span>05</span>Resumes</button>
+        <button class="nav-item" data-view-target="settings"><span>06</span>Settings</button>
       </nav>
 
       <div class="rail-card">
         <div class="rail-status"><i id="railStatusDot"></i><span id="railStatus">Starting…</span></div>
-        <p>Checks GitHub in the background. Closing this tab does not stop it.</p>
+        <p>Repository line open. The browser can close; the desk keeps working.</p>
       </div>
       <p class="rail-foot">local-first · GitHub-only<br><span id="appVersion">TI-AAA</span></p>
     </aside>
@@ -80,6 +81,28 @@
         <article class="panel sources-panel">
           <div class="panel-head"><div><p class="kicker">WATCHLIST</p><h2>Repository health</h2></div><span class="tag accent">No job-board scraping</span></div>
           <div id="sourceCards" class="source-cards"></div>
+        </article>
+      </section>
+
+      <section class="view" data-view="latest">
+        <div class="ledger-intro">
+          <div><p class="kicker">REPOSITORY INBOX</p><h2>Latest internship listings</h2><p>Everything currently active in the watched repositories. Open a dossier, then decide whether the agent should apply.</p></div>
+          <div class="latest-controls">
+            <input id="latestSearch" type="search" placeholder="Filter company, role, place" autocomplete="off">
+            <select id="latestEligibility" aria-label="Filter latest jobs">
+              <option value="all">All active</option><option value="eligible">Matches my rules</option><option value="ineligible">Outside my rules</option>
+            </select>
+          </div>
+        </div>
+        <article class="ledger-sheet latest-sheet">
+          <div class="sheet-index"><span>ACTIVE FEED</span><strong id="latestCount">—</strong></div>
+          <div class="table-wrap">
+            <table class="latest-table">
+              <thead><tr><th>Posted</th><th>Company / role</th><th>Location</th><th>Fit</th><th>State</th><th></th></tr></thead>
+              <tbody id="latestJobsBody"><tr><td colspan="6" class="loading">Reading the repository ledger…</td></tr></tbody>
+            </table>
+          </div>
+          <p id="latestSummary" class="table-summary"></p>
         </article>
       </section>
 
@@ -202,7 +225,7 @@
               <label><input id="tailorResumes" type="checkbox"><span>Create fact-preserving tailored PDFs</span></label>
               <label><input id="useLlm" type="checkbox"><span>Use an LLM for scores and cover letters</span></label>
               <label><input id="generateCoverLetters" type="checkbox"><span>Generate factual cover letters when LLM use is on</span></label>
-              <label><input id="automationEnabled" type="checkbox"><span>Launch browser workers automatically</span></label>
+              <label><input id="autoApplyNew" type="checkbox"><span>Automatically apply to new matching roles</span></label>
               <label class="danger-toggle"><input id="allowSubmission" type="checkbox"><span>Allow workers to click final Submit</span></label>
               <label><input id="headless" type="checkbox"><span>Run browser windows headlessly</span></label>
             </div>
@@ -265,13 +288,13 @@
       <div class="onboarding-side">
         <span class="brand-seal large">TI</span><p>SETUP</p>
         <ol id="onboardingProgress"><li class="active">Welcome</li><li>Profile</li><li>Resume</li><li>Agent</li></ol>
-        <small>Your current repository listings become a protected baseline. They will never be auto-applied to.</small>
+        <small>Every active listing is browseable. Nothing applies automatically unless you enable that switch in Settings.</small>
       </div>
       <div class="onboarding-content">
         <section class="onboard-step active" data-step="0">
           <p class="kicker">WELCOME TO YOUR INTERNSHIP DESK</p><h2 id="onboardingTitle">Set it once. Let it keep watch.</h2>
-          <p class="lead">TI-AAA runs on your computer, checks three curated GitHub repositories, and reacts only to listings added after your first sync.</p>
-          <div class="promise"><strong>The new-only promise</strong><p>Everything already in the repositories is recorded for context but stays in <em>Discovered</em>. It cannot silently enter the application queue later.</p></div>
+          <p class="lead">TI-AAA runs on your computer, keeps a local catalog from three curated GitHub repositories, and lets you choose what deserves an application.</p>
+          <div class="intake-note"><strong>Manual by default</strong><p>Browse the latest listings and press <em>Apply with agent</em> when one looks right. Automatic applications to future matches stay off until you enable them in Settings.</p></div>
           <button class="button terracotta next-step" type="button">Begin setup</button>
         </section>
         <section class="onboard-step" data-step="1">
@@ -314,15 +337,23 @@
           </div>
           <label class="wide-label">Application account password <span>optional; used only if an employer requires account creation</span><input id="onboardApplicationPassword" type="password" autocomplete="new-password"></label>
           <div class="choice-list">
-            <label><input type="radio" name="onboardMode" value="watch" checked><span><strong>Watch + prepare</strong><small>Poll, rank, and tailor; you apply manually.</small></span></label>
-            <label><input type="radio" name="onboardMode" value="review"><span><strong>Fill for review</strong><small>Open and fill applications, stopping before Submit.</small></span></label>
-            <label><input type="radio" name="onboardMode" value="submit"><span><strong>Autonomous submit</strong><small>Permit final submission within daily limits.</small></span></label>
+            <label><input type="radio" name="onboardBoundary" value="review" checked><span><strong>Stop before final Submit</strong><small>Manual Apply actions fill the form, then wait for your review.</small></span></label>
+            <label><input type="radio" name="onboardBoundary" value="submit"><span><strong>Allow final submission</strong><small>Manual Apply actions—and future auto-apply if enabled—may click Submit.</small></span></label>
           </div>
+          <p class="fine-print">Automatic application to newly posted matches starts off. You can opt in later from Settings.</p>
           <p class="fine-print">CAPTCHAs, ambiguous questions, and missing facts always stop for review.</p>
           <div class="step-actions"><button class="button ghost prev-step" type="button">Back</button><button id="finishOnboarding" class="button terracotta" type="button">Finish setup</button></div>
         </section>
       </div>
     </div>
+  </div>
+
+  <div id="jobDetailScrim" class="drawer-scrim hidden">
+    <aside id="jobDetailDrawer" class="job-drawer" role="dialog" aria-modal="true" aria-labelledby="jobDetailTitle">
+      <header><span>DOSSIER <b id="jobDetailNumber">—</b></span><button id="closeJobDetail" type="button" aria-label="Close job details">×</button></header>
+      <div id="jobDetailContent" class="job-detail-content"></div>
+      <footer class="drawer-actions"><a id="jobExternalLink" class="button ghost" target="_blank" rel="noopener noreferrer">Open listing ↗</a><button id="applyJobButton" class="button signal" type="button">Apply with agent</button></footer>
+    </aside>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

@@ -25,7 +25,7 @@ Then:
 1. Update `CHANGELOG.md`.
 2. Set the same version in `pyproject.toml` and `src/tiaaa/__init__.py`.
 3. Commit the release.
-4. Create and push an annotated tag matching the release, such as `v0.2.1`.
+4. Create and push an annotated tag matching the release, such as `v0.3.0`.
 5. Verify the Publish workflow and install the artifact in a clean environment.
 
 The publish workflow uses PyPI trusted publishing and stores no long-lived PyPI token.

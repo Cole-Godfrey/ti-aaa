@@ -83,7 +83,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "tailor_resumes": True,
     },
     "automation": {
-        "enabled": False,
+        "auto_apply_new": False,
         "allow_submission": False,
         "workers": 1,
         "max_applications_per_cycle": 5,

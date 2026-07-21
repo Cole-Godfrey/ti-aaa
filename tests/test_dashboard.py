@@ -7,8 +7,16 @@ from reportlab.pdfgen import canvas
 
 from tiaaa.config import SOURCE_DOCUMENTS, AppPaths
 from tiaaa.dashboard.app import create_app
-from tiaaa.database import get_connection, ingest_listings, init_db, update_worker_state
+from tiaaa.database import (
+    get_connection,
+    get_job,
+    ingest_listings,
+    init_db,
+    set_app_state,
+    update_worker_state,
+)
 from tiaaa.models import InternshipListing
+from tiaaa.resumes import store_resume
 
 
 def test_dashboard_stats_jobs_and_tracker_updates(tmp_path, profile, settings) -> None:
@@ -111,3 +119,74 @@ def test_live_worker_preview_is_served_only_from_preview_directory(tmp_path) -> 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store, max-age=0"
     assert client.get("/api/workers/../../profile/preview").status_code == 404
+
+
+def test_latest_jobs_detail_and_manual_apply_action(tmp_path, profile, settings) -> None:
+    paths = AppPaths(tmp_path)
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    older = InternshipListing(
+        company="Older Co",
+        role="Software Intern",
+        location="Remote",
+        application_url="https://jobs.test/older",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+        posting_date="2026-06-01",
+    )
+    latest = InternshipListing(
+        company="Latest Co",
+        role="Backend Intern",
+        location="Seattle",
+        application_url="https://jobs.test/latest",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+        posting_date="2026-07-20",
+    )
+    ingest_listings(
+        connection, source, [older, latest], profile=profile, settings=settings
+    )
+    set_app_state(connection, "onboarding_complete", True)
+    buffer = io.BytesIO()
+    document = canvas.Canvas(buffer)
+    document.drawString(72, 760, "Avery Student - Python and backend projects")
+    document.save()
+    store_resume(
+        paths=paths,
+        name="General",
+        original_filename="resume.pdf",
+        content=buffer.getvalue(),
+        text_override="Avery Student - Python and backend projects",
+        db_path=paths.database,
+    )
+
+    class ConnectedAuth:
+        def status(self):
+            return {"logged_in": True}
+
+    class FakeService:
+        requested: list[int] = []
+
+        def request_application(self, job_id):
+            self.requested.append(job_id)
+            return get_job(connection, job_id)
+
+    app = create_app(paths.database, paths=paths)
+    service = FakeService()
+    app.state.claude_auth = ConnectedAuth()
+    app.state.service = service
+    client = TestClient(app)
+
+    rows = client.get("/api/jobs?view=latest").json()["items"]
+    assert [row["company"] for row in rows[:2]] == ["Latest Co", "Older Co"]
+    detail = client.get(f"/api/jobs/{rows[0]['id']}").json()
+    assert detail["application_mode"] == "review"
+    assert detail["source_labels"] == source.label
+    response = client.post(f"/api/jobs/{rows[0]['id']}/apply")
+    assert response.status_code == 202
+    assert response.json()["mode"] == "review"
+    assert service.requested == [rows[0]["id"]]

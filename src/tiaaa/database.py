@@ -135,6 +135,8 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             scored_at             TEXT,
             pipeline_status       TEXT NOT NULL DEFAULT 'discovered',
             discovered_as_new     INTEGER NOT NULL DEFAULT 0,
+            manual_requested      INTEGER NOT NULL DEFAULT 0,
+            manual_requested_at   TEXT,
             base_resume_id        INTEGER REFERENCES resumes(id),
             submitted_resume_id   INTEGER REFERENCES resumes(id),
             resume_path           TEXT,
@@ -213,6 +215,8 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     _ensure_column(connection, "jobs", "submitted_resume_id", "INTEGER REFERENCES resumes(id)")
     _ensure_column(connection, "jobs", "submitted_resume_path", "TEXT")
     _ensure_column(connection, "jobs", "tailoring_reason", "TEXT")
+    _ensure_column(connection, "jobs", "manual_requested", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "jobs", "manual_requested_at", "TEXT")
     now = utc_now()
     for key, value in (
         ("onboarding_complete", "false"),
@@ -547,6 +551,7 @@ def ingest_listings(
 
     source_state = ensure_source(connection, source)
     baseline = not bool(source_state["initialized"]) and not include_existing
+    auto_apply_new = bool(settings.get("automation", {}).get("auto_apply_new", False))
     now = utc_now()
     stats: dict[str, int | bool] = {
         "parsed": 0,
@@ -586,7 +591,7 @@ def ingest_listings(
                 if not eligibility.eligible:
                     status = "skipped"
                     stats["skipped"] = int(stats["skipped"]) + 1
-                elif is_new:
+                elif is_new and auto_apply_new:
                     status = "queued"
                     stats["queued"] = int(stats["queued"]) + 1
                 else:
@@ -647,17 +652,17 @@ def ingest_listings(
                     and row["eligibility"] == "ineligible"
                     and next_status == "skipped"
                 ):
-                    if baseline or not bool(row["discovered_as_new"]):
+                    if baseline or not bool(row["discovered_as_new"]) or not auto_apply_new:
                         next_status = "discovered"
-                        add_event(connection, job_id, "eligible", "Eligible baseline listing")
+                        add_event(connection, job_id, "eligible", "Eligible repository listing")
                     else:
                         next_status = "queued"
                         stats["queued"] = int(stats["queued"]) + 1
                         add_event(connection, job_id, "queued", "Listing became eligible")
                 elif next_status == "expired" and eligibility.eligible:
-                    if baseline:
+                    if baseline or not auto_apply_new:
                         next_status = "discovered"
-                        add_event(connection, job_id, "reopened", "Active in baseline source")
+                        add_event(connection, job_id, "reopened", "Active in repository source")
                     else:
                         next_status = "queued"
                         stats["queued"] = int(stats["queued"]) + 1
@@ -770,11 +775,15 @@ def get_job(connection: sqlite3.Connection, job_id: int) -> dict[str, Any] | Non
             """
             SELECT j.*, br.name AS base_resume_name,
                    br.text_path AS base_resume_text_path,
-                   sr.name AS submitted_resume_name
+                   sr.name AS submitted_resume_name,
+                   GROUP_CONCAT(DISTINCT js.source_label) AS source_labels,
+                   GROUP_CONCAT(DISTINCT js.source_repo_url) AS source_repo_urls
             FROM jobs j
             LEFT JOIN resumes br ON br.id = j.base_resume_id
             LEFT JOIN resumes sr ON sr.id = j.submitted_resume_id
+            LEFT JOIN job_sources js ON js.job_id = j.id AND js.active = 1
             WHERE j.id = ?
+            GROUP BY j.id
             """,
             (job_id,),
         ).fetchone()
@@ -788,6 +797,8 @@ def list_jobs(
     search: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    latest: bool = False,
+    active_only: bool = False,
 ) -> list[dict[str, Any]]:
     clauses = ["1 = 1"]
     parameters: list[Any] = []
@@ -801,6 +812,14 @@ def list_jobs(
         clauses.append("(j.company LIKE ? OR j.role LIKE ? OR j.location LIKE ?)")
         token = f"%{search}%"
         parameters.extend((token, token, token))
+    if active_only:
+        clauses.append("j.is_active = 1")
+    ordering = (
+        "COALESCE(j.posting_date, substr(j.first_seen_at, 1, 10)) DESC, "
+        "j.first_seen_at DESC, j.id DESC"
+        if latest
+        else "(j.applied_at IS NOT NULL) DESC, COALESCE(j.applied_at, j.last_seen_at) DESC"
+    )
     parameters.extend((max(1, min(limit, 500)), max(0, offset)))
     rows = connection.execute(
         f"""
@@ -815,7 +834,7 @@ def list_jobs(
         LEFT JOIN resumes sr ON sr.id = j.submitted_resume_id
         WHERE {' AND '.join(clauses)}
         GROUP BY j.id
-        ORDER BY (j.applied_at IS NOT NULL) DESC, COALESCE(j.applied_at, j.last_seen_at) DESC
+        ORDER BY {ordering}
         LIMIT ? OFFSET ?
         """,
         parameters,
@@ -885,11 +904,6 @@ def update_tracker(
         return None
     if pipeline_status is not None and pipeline_status not in PIPELINE_STATUSES:
         raise ValueError(f"Unknown pipeline status: {pipeline_status}")
-    if (
-        pipeline_status in {"queued", "ready", "applying", "failed"}
-        and not bool(row.get("discovered_as_new"))
-    ):
-        raise ValueError("Protected baseline listings cannot enter the automatic application queue")
     if outcome_status is not None and outcome_status not in OUTCOME_STATUSES:
         raise ValueError(f"Unknown outcome status: {outcome_status}")
 
@@ -905,6 +919,10 @@ def update_tracker(
         if pipeline_status == "applied":
             updates.append("submitted_resume_id = COALESCE(submitted_resume_id, base_resume_id)")
             updates.append("submitted_resume_path = COALESCE(submitted_resume_path, resume_path)")
+        if pipeline_status == "queued":
+            updates.append("manual_requested = 1")
+            updates.append("manual_requested_at = ?")
+            values.append(now)
         add_event(connection, job_id, "status", pipeline_status)
     if outcome_status is not None:
         updates.append("outcome_status = ?")
@@ -933,16 +951,30 @@ def update_tracker(
 
 
 def pending_preparation(
-    connection: sqlite3.Connection, minimum_score: int, limit: int = 0
+    connection: sqlite3.Connection,
+    minimum_score: int,
+    limit: int = 0,
+    target_job_id: int | None = None,
 ) -> list[dict[str, Any]]:
     query = """
         SELECT * FROM jobs
-        WHERE pipeline_status = 'queued' AND eligibility = 'eligible' AND is_active = 1
-          AND discovered_as_new = 1
-          AND COALESCE(fit_score, 0) >= ?
-        ORDER BY posting_date DESC, first_seen_at DESC
+        WHERE pipeline_status = 'queued' AND is_active = 1
+          AND (
+            manual_requested = 1
+            OR (
+              discovered_as_new = 1 AND eligibility = 'eligible'
+              AND COALESCE(fit_score, 0) >= ?
+            )
+          )
     """
     parameters: list[Any] = [minimum_score]
+    if target_job_id is not None:
+        query += " AND id = ?"
+        parameters.append(target_job_id)
+    query += """
+        ORDER BY manual_requested DESC, manual_requested_at ASC,
+                 posting_date DESC, first_seen_at DESC
+    """
     if limit > 0:
         query += " LIMIT ?"
         parameters.append(limit)
@@ -982,6 +1014,51 @@ def mark_prepared(
     connection.commit()
 
 
+def request_manual_application(
+    connection: sqlite3.Connection, job_id: int
+) -> dict[str, Any] | None:
+    """Explicitly place any active repository listing into the browser-agent queue."""
+
+    row = get_job(connection, job_id)
+    if row is None:
+        return None
+    if not bool(row["is_active"]) or row["pipeline_status"] == "expired":
+        raise ValueError("This listing is no longer active")
+    if row["pipeline_status"] in {"applied", "applying", "manual_review", "withdrawn"}:
+        raise ValueError(
+            f"This listing is already {str(row['pipeline_status']).replace('_', ' ')}"
+        )
+    now = utc_now()
+    next_status = "ready" if row.get("resume_path") else "queued"
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = ?, manual_requested = 1,
+                        manual_requested_at = ?, apply_error = NULL, updated_at = ?,
+                        apply_attempts = CASE WHEN pipeline_status = 'failed'
+                            THEN 0 ELSE apply_attempts END
+        WHERE id = ?
+        """,
+        (next_status, now, now, job_id),
+    )
+    add_event(connection, job_id, "manual_apply_requested", "Requested from Latest jobs")
+    connection.commit()
+    return get_job(connection, job_id)
+
+
+def manual_application_ids(connection: sqlite3.Connection) -> list[int]:
+    return [
+        int(row["id"])
+        for row in connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE manual_requested = 1 AND is_active = 1
+              AND pipeline_status IN ('queued', 'ready', 'failed')
+            ORDER BY manual_requested_at ASC, id ASC
+            """
+        ).fetchall()
+    ]
+
+
 def claim_next_job(
     connection: sqlite3.Connection,
     *,
@@ -991,13 +1068,17 @@ def claim_next_job(
 ) -> dict[str, Any] | None:
     connection.execute("BEGIN IMMEDIATE")
     try:
-        clauses = [
-            "pipeline_status IN ('ready', 'failed')",
-            "eligibility = 'eligible'",
-            "is_active = 1",
-            "discovered_as_new = 1",
-            "apply_attempts < ?",
-        ]
+        clauses = ["pipeline_status IN ('ready', 'failed')", "is_active = 1"]
+        if target_job_id is None:
+            clauses.extend(["eligibility = 'eligible'", "discovered_as_new = 1"])
+        else:
+            clauses.extend(
+                [
+                    "(eligibility = 'eligible' OR manual_requested = 1)",
+                    "(discovered_as_new = 1 OR manual_requested = 1)",
+                ]
+            )
+        clauses.append("apply_attempts < ?")
         parameters: list[Any] = [max_attempts]
         if target_job_id is not None:
             clauses.append("id = ?")
@@ -1038,13 +1119,17 @@ def claimable_application_count(
 ) -> int:
     """Count jobs that an application worker could atomically claim."""
 
-    clauses = [
-        "pipeline_status IN ('ready', 'failed')",
-        "eligibility = 'eligible'",
-        "is_active = 1",
-        "discovered_as_new = 1",
-        "apply_attempts < ?",
-    ]
+    clauses = ["pipeline_status IN ('ready', 'failed')", "is_active = 1"]
+    if target_job_id is None:
+        clauses.extend(["eligibility = 'eligible'", "discovered_as_new = 1"])
+    else:
+        clauses.extend(
+            [
+                "(eligibility = 'eligible' OR manual_requested = 1)",
+                "(discovered_as_new = 1 OR manual_requested = 1)",
+            ]
+        )
+    clauses.append("apply_attempts < ?")
     parameters: list[Any] = [max_attempts]
     if target_job_id is not None:
         clauses.append("id = ?")
@@ -1083,7 +1168,8 @@ def mark_apply_result(
                         submitted_resume_path = CASE WHEN ? = 'applied'
                             THEN COALESCE(submitted_resume_path, resume_path)
                             ELSE submitted_resume_path END,
-                        apply_error = ?, worker_id = NULL, updated_at = ?
+                        apply_error = ?, manual_requested = 0,
+                        worker_id = NULL, updated_at = ?
         WHERE id = ?
         """,
         (

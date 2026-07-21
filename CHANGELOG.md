@@ -4,6 +4,20 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-20
+
+### Added
+
+- latest-jobs repository inbox ordered by posting date
+- job detail dossier with source, fit, eligibility, activity, and application boundary
+- one-click manual browser-agent requests for any active repository listing
+
+### Changed
+
+- automatic application to newly discovered matches is opt-in and off by default
+- first-import listings remain visible and can be explicitly applied to from the web app
+- dashboard redesigned as a sharp-edged applications workbench with a top index, ruled ledgers, and slide-out dossiers
+
 ## [0.2.1] - 2026-07-20
 
 ### Added
@@ -31,7 +45,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Changed
 
-- initial repository contents are now an invariant protected baseline with no CLI opt-in escape hatch
+- initial repository contents are captured as the starting catalog (manual selection was added in 0.3.0)
 - dashboard redesign uses a simple editorial interface and five app sections
 - browser automation can run headlessly inside Docker while the dashboard is closed
 
@@ -42,7 +56,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - GitHub-only polling for the requested Summer 2026/2027 internship repositories
 - Markdown and generated-HTML table parsers
 - conditional requests, source health, direct-link selection, and cross-source deduplication
-- baseline protection and new-listing application queue
+- first-import catalog capture and new-listing application queue
 - internship authorization, sponsorship, citizenship, role, and location gates
 - heuristic and optional LLM scoring
 - factual application packet preparation

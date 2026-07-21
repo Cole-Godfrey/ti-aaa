@@ -292,11 +292,18 @@ def create_app(
     def jobs(
         status: str | None = None,
         search: str | None = Query(default=None, max_length=200),
+        view: Literal["tracker", "latest"] = "tracker",
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
         rows = list_jobs(
-            connection(), status=status, search=search, limit=limit, offset=offset
+            connection(),
+            status=status,
+            search=search,
+            limit=limit,
+            offset=offset,
+            latest=view == "latest",
+            active_only=view == "latest",
         )
         return {"items": [_public_job(row) for row in rows], "limit": limit, "offset": offset}
 
@@ -305,7 +312,50 @@ def create_app(
         row = get_job(connection(), job_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Job not found")
-        return _public_job(row)
+        result = _public_job(row)
+        events = connection().execute(
+            """
+            SELECT event_type, detail, created_at FROM events
+            WHERE job_id = ? ORDER BY created_at DESC LIMIT 20
+            """,
+            (job_id,),
+        ).fetchall()
+        result["events"] = [dict(item) for item in events]
+        result["application_mode"] = (
+            "submit"
+            if bool(load_settings(paths).get("automation", {}).get("allow_submission"))
+            else "review"
+        )
+        return result
+
+    @app.post("/api/jobs/{job_id}/apply", status_code=202)
+    def apply_to_job(job_id: int) -> dict[str, Any]:
+        state = get_app_state(connection())
+        if not bool(state.get("onboarding_complete")):
+            raise HTTPException(status_code=409, detail="Finish onboarding before applying")
+        if not list_resumes(connection()):
+            raise HTTPException(status_code=409, detail="Upload a resume before applying")
+        if not bool(app.state.claude_auth.status().get("logged_in")):
+            raise HTTPException(
+                status_code=409,
+                detail="Connect Claude Code in Settings before starting the browser agent",
+            )
+        service = require_service()
+        try:
+            row = service.request_application(job_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "status": "queued",
+            "job": _public_job(row),
+            "mode": (
+                "submit"
+                if bool(load_settings(paths).get("automation", {}).get("allow_submission"))
+                else "review"
+            ),
+        }
 
     @app.patch("/api/jobs/{job_id}")
     def patch_job(job_id: int, update: TrackerUpdate) -> dict[str, Any]:
@@ -321,6 +371,8 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if row is None:
             raise HTTPException(status_code=404, detail="Job not found")
+        if update.pipeline_status == "queued" and app.state.service is not None:
+            app.state.service.trigger()
         return _public_job(row)
 
     @app.get("/api/jobs/{job_id}/resume")
@@ -397,12 +449,13 @@ def create_app(
         return state
 
     def require_service() -> AutomationService:
-        if background_service is None:
+        service = app.state.service
+        if service is None:
             raise HTTPException(
                 status_code=409,
                 detail="This dashboard was started without the background service; use `tiaaa serve`.",
             )
-        return background_service
+        return service
 
     @app.post("/api/service/run", status_code=202)
     def run_service() -> dict[str, str]:

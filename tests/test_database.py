@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.database import (
     claim_next_job,
@@ -12,6 +10,8 @@ from tiaaa.database import (
     init_db,
     list_jobs,
     mark_apply_result,
+    mark_prepared,
+    request_manual_application,
     update_tracker,
 )
 from tiaaa.models import InternshipListing
@@ -30,12 +30,15 @@ def make_listing(source, company: str, role: str, url: str, location: str = "Rem
     )
 
 
-def test_first_sync_is_baseline_and_later_addition_is_queued(tmp_path, profile, settings) -> None:
+def test_auto_apply_new_is_off_by_default_and_only_queues_future_additions(
+    tmp_path, profile, settings
+) -> None:
     path = tmp_path / "tracker.db"
     connection = init_db(path)
     source = SOURCE_DOCUMENTS[0]
     first = make_listing(source, "Acme", "Software Engineer Intern", "https://jobs.test/acme")
     second = make_listing(source, "Beta", "Backend Intern", "https://jobs.test/beta")
+    third = make_listing(source, "Gamma", "Data Intern", "https://jobs.test/gamma")
 
     baseline = ingest_listings(
         connection, source, [first], profile=profile, settings=settings
@@ -47,15 +50,24 @@ def test_first_sync_is_baseline_and_later_addition_is_queued(tmp_path, profile, 
     assert baseline["baseline"] is True
     assert baseline["queued"] == 0
     assert update["baseline"] is False
-    assert update["queued"] == 1
+    assert update["queued"] == 0
     rows = {row["company"]: row for row in list_jobs(connection)}
     assert rows["Acme"]["pipeline_status"] == "discovered"
-    assert rows["Beta"]["pipeline_status"] == "queued"
+    assert rows["Beta"]["pipeline_status"] == "discovered"
+
+    settings["automation"]["auto_apply_new"] = True
+    enabled_update = ingest_listings(
+        connection, source, [first, second, third], profile=profile, settings=settings
+    )
+    rows = {row["company"]: row for row in list_jobs(connection)}
+    assert enabled_update["queued"] == 1
+    assert rows["Beta"]["pipeline_status"] == "discovered"
+    assert rows["Gamma"]["pipeline_status"] == "queued"
     close_connection(path)
 
 
-def test_baseline_cannot_be_manually_routed_into_automation(tmp_path, profile, settings) -> None:
-    path = tmp_path / "protected-baseline.db"
+def test_first_sync_listing_can_be_explicitly_sent_to_agent(tmp_path, profile, settings) -> None:
+    path = tmp_path / "manual-listing.db"
     connection = init_db(path)
     source = SOURCE_DOCUMENTS[0]
     baseline_job = make_listing(
@@ -63,12 +75,26 @@ def test_baseline_cannot_be_manually_routed_into_automation(tmp_path, profile, s
     )
     ingest_listings(connection, source, [baseline_job], profile=profile, settings=settings)
 
-    with pytest.raises(ValueError, match="Protected baseline"):
-        update_tracker(connection, 1, pipeline_status="ready")
-    connection.execute("UPDATE jobs SET pipeline_status = 'ready' WHERE id = 1")
-    connection.commit()
+    requested = request_manual_application(connection, 1)
+    assert requested is not None
+    assert requested["pipeline_status"] == "queued"
+    assert requested["manual_requested"] == 1
+    mark_prepared(
+        connection,
+        1,
+        base_resume_id=None,
+        resume_path=str(tmp_path / "resume.pdf"),
+        cover_letter_path=None,
+        tailoring_reason="manual test",
+        notes="ready",
+    )
     assert claimable_application_count(connection, max_attempts=3) == 0
-    assert claim_next_job(connection, worker_id="worker-0", max_attempts=3) is None
+    assert claimable_application_count(connection, max_attempts=3, target_job_id=1) == 1
+    claimed = claim_next_job(
+        connection, worker_id="worker-0", max_attempts=3, target_job_id=1
+    )
+    assert claimed is not None
+    assert claimed["pipeline_status"] == "applying"
     close_connection(path)
 
 

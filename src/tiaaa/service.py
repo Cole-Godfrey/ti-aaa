@@ -21,7 +21,9 @@ from tiaaa.database import (
     get_app_state,
     get_connection,
     init_db,
+    manual_application_ids,
     recover_stale_work,
+    request_manual_application,
     set_app_state,
     source_baseline_complete,
 )
@@ -100,6 +102,24 @@ class AutomationService:
         """Reload scheduling/configuration without overriding a disabled service."""
 
         self._wake.set()
+
+    def request_application(self, job_id: int) -> dict[str, Any]:
+        """Queue one user-selected listing and wake the background worker."""
+
+        connection = get_connection(self.db_path)
+        if bool(get_app_state(connection).get("service_paused")):
+            raise RuntimeError("Resume the background service before starting an application")
+        job = request_manual_application(connection, job_id)
+        if job is None:
+            raise LookupError("Job not found")
+        set_app_state(connection, "service_status", "requested")
+        set_app_state(
+            connection,
+            "service_message",
+            f"Application requested for {job['company']} · {job['role']}",
+        )
+        self.trigger()
+        return job
 
     def snapshot(self) -> dict[str, Any]:
         state = get_app_state(get_connection(self.db_path))
@@ -186,10 +206,11 @@ class AutomationService:
                 connection, expected_documents=len(SOURCE_DOCUMENTS)
             )
             service_settings = settings.get("service", {})
+            manual_pending = bool(manual_application_ids(connection))
             if (
                 onboarding_complete
                 and baseline_complete
-                and bool(service_settings.get("auto_prepare", True))
+                and (manual_pending or bool(service_settings.get("auto_prepare", True)))
             ):
                 set_app_state(connection, "service_status", "preparing")
                 set_app_state(connection, "service_message", "Selecting and tailoring resumes")
@@ -207,19 +228,38 @@ class AutomationService:
                 )
 
             automation = settings.get("automation", {})
-            if onboarding_complete and baseline_complete and bool(automation.get("enabled")):
+            manual_ids = manual_application_ids(connection)
+            if onboarding_complete and baseline_complete and (
+                manual_ids or bool(automation.get("auto_apply_new", False))
+            ):
                 set_app_state(connection, "service_status", "applying")
                 set_app_state(connection, "service_message", "Browser application workers are active")
                 from tiaaa.apply import run_applications
 
-                applied = run_applications(
-                    profile=profile,
-                    settings=settings,
-                    paths=self.paths,
-                    workers=int(automation.get("workers", 1)),
-                    submit=bool(automation.get("allow_submission")),
-                    db_path=self.db_path,
-                )
+                for job_id in manual_ids:
+                    result = run_applications(
+                        profile=profile,
+                        settings=settings,
+                        paths=self.paths,
+                        limit=1,
+                        workers=1,
+                        submit=bool(automation.get("allow_submission")),
+                        target_job_id=job_id,
+                        db_path=self.db_path,
+                    )
+                    for key in applied:
+                        applied[key] += result[key]
+                if bool(automation.get("auto_apply_new", False)):
+                    result = run_applications(
+                        profile=profile,
+                        settings=settings,
+                        paths=self.paths,
+                        workers=int(automation.get("workers", 1)),
+                        submit=bool(automation.get("allow_submission")),
+                        db_path=self.db_path,
+                    )
+                    for key in applied:
+                        applied[key] += result[key]
 
             summary: dict[str, Any] = {
                 "status": "complete",
@@ -233,9 +273,9 @@ class AutomationService:
             set_app_state(connection, "last_cycle", summary)
             set_app_state(connection, "last_cycle_at", summary["completed_at"])
             if not onboarding_complete:
-                message = "Baseline is protected; finish onboarding to enable preparation"
+                message = "Finish onboarding to enable preparation and application actions"
             elif not baseline_complete:
-                message = "Finishing the protected first-sync baseline before preparing anything"
+                message = "Finishing the first repository import"
             elif sync_summary["errors"]:
                 message = f"Cycle finished with {sync_summary['errors']} source error(s)"
             else:

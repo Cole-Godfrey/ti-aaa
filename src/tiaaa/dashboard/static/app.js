@@ -3,18 +3,22 @@ const state = {
   onboarding: null,
   resumes: [],
   jobs: [],
+  latestJobs: [],
+  selectedJob: null,
   activeView: "overview",
   searchTimer: null,
+  latestSearchTimer: null,
   onboardingStep: 0,
   claudeAuth: null,
 };
 
 const viewCopy = {
-  overview: ["THE DAILY BRIEF", "Your internship desk", "A quiet view of what the agent found, prepared, and submitted."],
-  applications: ["APPLICATION LEDGER", "Your opportunity record", "Update outcomes and see exactly which resume accompanied each application."],
-  live: ["AGENT OBSERVATORY", "The work in progress", "Follow browser workers without keeping the dashboard open."],
-  resumes: ["FACT LIBRARY", "Resumes for each kind of role", "Keep multiple truthful versions; TI-AAA selects the closest match."],
-  settings: ["CONTROL ROOM", "Your rules, your data", "Configure the entire local service without editing a file."],
+  overview: ["DESK / 01", "Situation report", "Signals from the repository feed and your application register."],
+  latest: ["DESK / 02", "Repository inbox", "Inspect current internship listings, open a dossier, and choose what the agent works on."],
+  applications: ["DESK / 03", "Application register", "Outcomes, submitted resumes, and every role already in motion."],
+  live: ["DESK / 04", "Agent wire", "A live trace of the browser worker without keeping this page open."],
+  resumes: ["DESK / 05", "Fact archive", "Source resumes the agent may select and tailor without inventing claims."],
+  settings: ["DESK / 06", "Operating rules", "Change polling, matching, application boundaries, and local credentials."],
 };
 const pipelineOptions = [
   ["discovered", "Discovered"], ["queued", "Queued"], ["ready", "Ready"],
@@ -172,6 +176,10 @@ async function completeClaudeLogin(inputId, button) {
 function setView(view) {
   if (!viewCopy[view]) return;
   state.activeView = view;
+  const url = new URL(window.location.href);
+  if (view === "overview") url.searchParams.delete("view");
+  else url.searchParams.set("view", view);
+  window.history.replaceState({}, "", url);
   document.querySelectorAll(".view").forEach(node => node.classList.toggle("active", node.dataset.view === view));
   document.querySelectorAll(".nav-item").forEach(node => node.classList.toggle("active", node.dataset.viewTarget === view));
   const [kicker, title, subtitle] = viewCopy[view];
@@ -180,6 +188,7 @@ function setView(view) {
   element("viewSubtitle").textContent = subtitle;
   window.scrollTo({ top: 0, behavior: "smooth" });
   if (view === "live") refreshLive().catch(error => showToast(error.message, true));
+  if (view === "latest") loadLatestJobs().catch(error => showToast(error.message, true));
 }
 
 function renderStats(stats) {
@@ -210,7 +219,7 @@ function renderStats(stats) {
     <div class="recent-item"><span class="avatar">${escapeHtml(initials(job.company))}</span>
       <div class="recent-copy"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)}</span>
       <span class="recent-resume">${escapeHtml(job.submitted_resume_name || "Resume not recorded")}</span></div>
-      <time>${escapeHtml(relativeTime(job.applied_at))}</time></div>`).join("") : '<div class="empty">No applications yet. New repository additions will appear here.</div>';
+      <time>${escapeHtml(relativeTime(job.applied_at))}</time></div>`).join("") : '<div class="empty">No applications yet. Choose a role from Latest jobs when you are ready.</div>';
 }
 
 function optionsMarkup(options, current, disabled = []) {
@@ -228,10 +237,9 @@ function renderJobs(jobs) {
   body.innerHTML = jobs.map(job => {
     const resumeName = job.submitted_resume_name || job.base_resume_name;
     const resumeLabel = job.submitted_resume_name ? "submitted" : "selected";
-    const protectedStates = job.discovered_as_new ? [] : ["queued", "ready", "applying", "failed"];
     return `<tr data-job-id="${job.id}">
       <td class="role-cell"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)} · ${escapeHtml(job.location || "location not listed")}</span></td>
-      <td><select class="status-select pipeline-select" aria-label="Pipeline status for ${escapeHtml(job.company)}" title="${job.discovered_as_new ? "" : "Protected first-sync baseline"}">${optionsMarkup(pipelineOptions, job.pipeline_status, protectedStates)}</select></td>
+      <td><select class="status-select pipeline-select" aria-label="Pipeline status for ${escapeHtml(job.company)}">${optionsMarkup(pipelineOptions, job.pipeline_status)}</select></td>
       <td class="resume-cell">${resumeName ? `<a href="/api/jobs/${job.id}/resume" target="_blank">${escapeHtml(resumeName)}</a><span>${resumeLabel}</span>` : "—"}</td>
       <td><select class="status-select outcome-select" aria-label="Outcome for ${escapeHtml(job.company)}">${optionsMarkup(outcomeOptions, job.outcome_status)}</select></td>
       <td>${escapeHtml(shortDate(job.first_seen_at))}</td>
@@ -268,6 +276,113 @@ async function loadJobs() {
   renderJobs(response.items);
 }
 
+function jobActionLabel(job) {
+  if (job.manual_requested && ["queued", "ready", "failed"].includes(job.pipeline_status)) return "Queued";
+  const labels = {
+    queued: "Start agent",
+    ready: "Start agent",
+    applying: "Applying…",
+    manual_review: "Review ready",
+    applied: "Applied",
+    expired: "Closed",
+    withdrawn: "Withdrawn",
+    failed: "Retry",
+  };
+  return labels[job.pipeline_status] || "Apply";
+}
+
+function jobActionDisabled(job) {
+  return !job.is_active || Boolean(job.manual_requested) || ["applying", "manual_review", "applied", "expired", "withdrawn"].includes(job.pipeline_status);
+}
+
+function renderLatestJobs() {
+  const eligibility = element("latestEligibility").value;
+  const jobs = state.latestJobs.filter(job => eligibility === "all" || job.eligibility === eligibility);
+  const body = element("latestJobsBody");
+  element("latestCount").textContent = jobs.length.toLocaleString();
+  if (!jobs.length) {
+    body.innerHTML = '<tr><td colspan="6" class="loading">No active listings match this filter.</td></tr>';
+    element("latestSummary").textContent = "Try another phrase or matching-rule filter.";
+    return;
+  }
+  body.innerHTML = jobs.map(job => `<tr data-job-id="${job.id}">
+    <td class="date-cell">${escapeHtml(job.posting_date || shortDate(job.first_seen_at))}</td>
+    <td class="role-cell"><button class="row-detail" type="button"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)}</span></button></td>
+    <td>${escapeHtml(job.location || "Not listed")}</td>
+    <td><span class="fit-mark ${job.eligibility === "eligible" ? "good" : "warn"}">${escapeHtml(job.fit_score ?? "—")}/10</span></td>
+    <td><span class="state-stamp state-${escapeHtml(job.pipeline_status)}">${escapeHtml(job.pipeline_status.replaceAll("_", " "))}</span></td>
+    <td class="row-actions"><button class="text-button detail-job" type="button">Details</button><button class="mini-apply" type="button"${jobActionDisabled(job) ? " disabled" : ""}>${escapeHtml(jobActionLabel(job))}</button></td>
+  </tr>`).join("");
+  element("latestSummary").textContent = `${jobs.length} active listing${jobs.length === 1 ? "" : "s"} · ordered by repository posting date`;
+  body.querySelectorAll(".row-detail, .detail-job").forEach(button => button.addEventListener("click", event => openJobDetail(event.target.closest("tr").dataset.jobId)));
+  body.querySelectorAll(".mini-apply").forEach(button => button.addEventListener("click", event => requestJobApplication(event.target.closest("tr").dataset.jobId, button)));
+}
+
+async function loadLatestJobs() {
+  const parameters = new URLSearchParams({ view: "latest", limit: "500" });
+  const search = value("latestSearch");
+  if (search) parameters.set("search", search);
+  const response = await api(`/api/jobs?${parameters}`);
+  state.latestJobs = response.items;
+  renderLatestJobs();
+}
+
+function closeJobDetail() {
+  element("jobDetailScrim").classList.add("hidden");
+  state.selectedJob = null;
+}
+
+async function openJobDetail(jobId) {
+  try {
+    const job = await api(`/api/jobs/${jobId}`);
+    state.selectedJob = job;
+    element("jobDetailNumber").textContent = `#${job.id}`;
+    const sources = String(job.source_labels || "Repository source").split(",");
+    const events = (job.events || []).slice(0, 6);
+    element("jobDetailContent").innerHTML = `
+      <p class="drawer-kicker">${escapeHtml(job.posting_date || "DATE NOT LISTED")}</p>
+      <h2 id="jobDetailTitle">${escapeHtml(job.role)}</h2><h3>${escapeHtml(job.company)}</h3>
+      <dl class="job-facts">
+        <div><dt>Location</dt><dd>${escapeHtml(job.location || "Not listed")}</dd></div>
+        <div><dt>Fit</dt><dd>${escapeHtml(job.fit_score ?? "—")}/10 · ${escapeHtml(job.score_reasoning || "Not scored")}</dd></div>
+        <div><dt>Eligibility</dt><dd>${escapeHtml(job.eligibility)} · ${escapeHtml(job.eligibility_reason || "No rule note")}</dd></div>
+        <div><dt>Agent boundary</dt><dd>${job.application_mode === "submit" ? "May click final Submit" : "Stops before final Submit"}</dd></div>
+        <div><dt>Resume</dt><dd>${escapeHtml(job.submitted_resume_name || job.base_resume_name || "Selected during preparation")}</dd></div>
+      </dl>
+      <section class="drawer-section"><span>FOUND IN</span>${sources.map(source => `<p>${escapeHtml(source)}</p>`).join("")}</section>
+      <section class="drawer-section"><span>RECENT ACTIVITY</span>${events.length ? events.map(event => `<p><b>${escapeHtml(event.event_type.replaceAll("_", " "))}</b> ${escapeHtml(relativeTime(event.created_at))}${event.detail ? ` · ${escapeHtml(event.detail)}` : ""}</p>`).join("") : "<p>No application activity yet.</p>"}</section>`;
+    const external = /^https?:\/\//i.test(job.application_url || "") ? job.application_url : "#";
+    element("jobExternalLink").href = external;
+    const applyButton = element("applyJobButton");
+    applyButton.textContent = jobActionLabel(job);
+    applyButton.disabled = jobActionDisabled(job);
+    applyButton.dataset.jobId = job.id;
+    element("jobDetailScrim").classList.remove("hidden");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function requestJobApplication(jobId, button) {
+  if (!state.claudeAuth?.logged_in) {
+    closeJobDetail();
+    setView("settings");
+    showToast("Connect Claude Code in Settings before starting the agent", true);
+    return;
+  }
+  const submits = Boolean(state.config?.settings?.automation?.allow_submission);
+  const boundary = submits ? "The agent may click final Submit." : "The agent will stop before final Submit for review.";
+  if (!window.confirm(`Apply to this role with TI-AAA?\n\n${boundary}`)) return;
+  button.disabled = true;
+  try {
+    await api(`/api/jobs/${jobId}/apply`, { method: "POST" });
+    showToast("Application queued; follow progress in Agent");
+    await Promise.all([loadLatestJobs(), loadJobs()]);
+    if (!element("jobDetailScrim").classList.contains("hidden")) await openJobDetail(jobId);
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
+}
+
 function renderSources(items) {
   const groups = new Map();
   items.forEach(source => {
@@ -281,14 +396,14 @@ function renderSources(items) {
     const latest = successes.at(-1);
     return `<article class="source-card"><header><strong>${escapeHtml(source.label.replace(/ · .*/, ""))}</strong><i class="health${errors ? " error" : ""}"></i></header>
       <p>${escapeHtml(source.repo_url.replace("https://github.com/", "github.com/"))}</p>
-      <div class="source-meta"><span>${documents.length} document${documents.length === 1 ? "" : "s"}</span><span>${escapeHtml(latest ? relativeTime(latest) : "awaiting baseline")}</span></div></article>`;
+      <div class="source-meta"><span>${documents.length} document${documents.length === 1 ? "" : "s"}</span><span>${escapeHtml(latest ? relativeTime(latest) : "awaiting first import")}</span></div></article>`;
   }).join("") : '<div class="empty">The first background poll will initialize all three repositories.</div>';
 }
 
 function renderService(service) {
   const status = String(service.process_running ? (service.service_status || "starting") : "dashboard_only");
   const banner = element("serviceBanner");
-  const good = ["waiting", "syncing", "preparing", "applying", "starting"].includes(status);
+  const good = ["waiting", "syncing", "preparing", "applying", "starting", "requested"].includes(status);
   banner.className = `service-banner${good ? " good" : status === "error" || status === "offline" ? " error" : ""}`;
   element("serviceStatus").textContent = status.replaceAll("_", " ");
   element("serviceMessage").textContent = service.process_running
@@ -388,7 +503,7 @@ function populateConfiguration(config) {
   setChecked("serviceEnabled", service.enabled); setChecked("autoPrepare", service.auto_prepare);
   setChecked("tailorResumes", preparation.tailor_resumes); setChecked("useLlm", preparation.use_llm);
   setChecked("generateCoverLetters", preparation.generate_cover_letters);
-  setChecked("automationEnabled", automation.enabled); setChecked("allowSubmission", automation.allow_submission);
+  setChecked("autoApplyNew", automation.auto_apply_new); setChecked("allowSubmission", automation.allow_submission);
   setChecked("headless", automation.headless);
   setValue("availableStartDate", answers.available_start_date); setValue("howHeard", answers.how_heard);
   setChecked("age18", answers.age_18_or_older); setChecked("previouslyWorked", answers.previously_worked_here);
@@ -457,7 +572,7 @@ function configurationPayload() {
   settings.preparation.generate_cover_letters = checked("generateCoverLetters");
   settings.automation = settings.automation || {};
   Object.assign(settings.automation, {
-    enabled: checked("automationEnabled"), allow_submission: checked("allowSubmission"), headless: checked("headless"),
+    auto_apply_new: checked("autoApplyNew"), allow_submission: checked("allowSubmission"), headless: checked("headless"),
     workers: Number(value("workerCount")) || 1, max_applications_per_day: Number(value("dayCap")) || 25,
     max_applications_per_cycle: Number(value("cycleCap")) || 5, max_attempts: Number(value("maxAttempts")) || 3,
     timeout_seconds: Number(value("workerTimeout")) || 600, claude_model: value("claudeModel") || "sonnet",
@@ -474,7 +589,7 @@ function configurationPayload() {
 async function saveConfiguration(event) {
   event.preventDefault();
   const button = event.submitter;
-  if (checked("automationEnabled") && !state.claudeAuth?.logged_in && !value("anthropicKey")) {
+  if (checked("autoApplyNew") && !state.claudeAuth?.logged_in && !value("anthropicKey")) {
     showToast("Connect Claude Code, enter an API key, or turn off browser automation", true);
     return;
   }
@@ -539,12 +654,9 @@ async function finishOnboarding() {
       legally_authorized_to_work_us: checked("onboardAuthorized"), requires_sponsorship: checked("onboardSponsorship"),
     });
     const settings = clone(state.config.settings);
-    const mode = document.querySelector('input[name="onboardMode"]:checked').value;
-    if (mode !== "watch" && !state.claudeAuth?.logged_in && !value("onboardAnthropic")) {
-      throw new Error("Connect your Claude account, enter an optional API key, or choose Watch + prepare");
-    }
+    const boundary = document.querySelector('input[name="onboardBoundary"]:checked').value;
     settings.service.enabled = true; settings.service.auto_prepare = true; settings.preparation.tailor_resumes = true;
-    settings.automation.enabled = mode !== "watch"; settings.automation.allow_submission = mode === "submit";
+    settings.automation.auto_apply_new = false; settings.automation.allow_submission = boundary === "submit";
     const secrets = {};
     if (value("onboardAnthropic")) secrets.ANTHROPIC_API_KEY = value("onboardAnthropic");
     if (value("onboardApplicationPassword")) secrets.TIAAA_APPLICATION_PASSWORD = value("onboardApplicationPassword");
@@ -554,14 +666,14 @@ async function finishOnboarding() {
     populateConfiguration(config);
     await refreshClaudeAuth();
     element("onboarding").classList.add("hidden");
-    showToast("Setup complete. TI-AAA is watching for new listings.");
+    showToast("Setup complete. Browse Latest jobs whenever you are ready.");
     await refreshAll();
   } catch (error) { showToast(error.message, true); }
   finally { button.disabled = false; }
 }
 
 async function refreshAll() {
-  const [stats, sources, service] = await Promise.all([api("/api/stats"), api("/api/sources"), api("/api/service"), loadJobs()]);
+  const [stats, sources, service] = await Promise.all([api("/api/stats"), api("/api/sources"), api("/api/service"), loadJobs(), loadLatestJobs()]);
   renderStats(stats); renderSources(sources.items); renderService(service);
   element("lastUpdated").textContent = `Local state · ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
   if (state.activeView === "live") await refreshLive();
@@ -579,6 +691,8 @@ async function initialize() {
       setOnboardingStep(0);
     }
     await refreshAll();
+    const requestedView = new URLSearchParams(window.location.search).get("view");
+    if (requestedView && viewCopy[requestedView]) setView(requestedView);
   } catch (error) {
     showToast(error.message, true);
     element("serviceMessage").textContent = error.message;
@@ -624,6 +738,17 @@ element("searchInput").addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.searchTimer = setTimeout(() => loadJobs().catch(error => showToast(error.message, true)), 250);
 });
+element("latestEligibility").addEventListener("change", renderLatestJobs);
+element("latestSearch").addEventListener("input", () => {
+  clearTimeout(state.latestSearchTimer);
+  state.latestSearchTimer = setTimeout(() => loadLatestJobs().catch(error => showToast(error.message, true)), 250);
+});
+element("closeJobDetail").addEventListener("click", closeJobDetail);
+element("jobDetailScrim").addEventListener("click", event => {
+  if (event.target === event.currentTarget) closeJobDetail();
+});
+element("applyJobButton").addEventListener("click", event => requestJobApplication(event.currentTarget.dataset.jobId, event.currentTarget));
+document.addEventListener("keydown", event => { if (event.key === "Escape") closeJobDetail(); });
 element("runButton").addEventListener("click", async () => {
   try { await api("/api/service/run", { method: "POST" }); showToast("Repository check scheduled"); }
   catch (error) { showToast(error.message, true); }

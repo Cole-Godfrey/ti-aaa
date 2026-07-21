@@ -2,7 +2,7 @@
 
 **Tech Internship Autonomous Application Agent**
 
-TI-AAA is a local, always-on app that watches community-maintained tech-internship repositories, prepares truthful application packets for listings added after startup, fills or submits applications within your limits, and records every result in a web dashboard.
+TI-AAA is a local, always-on app that watches community-maintained tech-internship repositories, presents their active roles in a searchable inbox, prepares truthful application packets for jobs you select, and optionally applies to future matches within your limits.
 
 It reads only these GitHub repositories:
 
@@ -14,14 +14,12 @@ It does **not** search or scrape LinkedIn, Indeed, Glassdoor, Google Jobs, or em
 
 ## The important behavior
 
-- The first successful read of every repository document is a protected baseline.
-- Listings already present during that baseline are saved as `discovered`, never queued.
-- Changing filters or profile details later cannot promote a baseline listing into the queue.
-- Only a later repository addition can become `queued`, `ready`, and then `applying`.
+- The first successful read imports the current active catalog without automatically applying.
+- Every imported listing appears under **Latest jobs** and can be opened or explicitly sent to the agent.
+- **Automatically apply to new matching roles** is off by default. Enabling it affects roles discovered afterward.
+- Manual **Apply with agent** actions work independently of that automatic setting.
 - The worker runs in the background. Closing the dashboard tab does not stop it.
 - Docker restarts the app unless you explicitly stop it; the computer and Docker still need to be running.
-
-There is no web or CLI switch that opts the initial baseline into automatic applications.
 
 ## What is included
 
@@ -35,6 +33,7 @@ There is no web or CLI switch that opts the initial baseline into automatic appl
 - Isolated Chrome workers driven by Claude Code and Playwright MCP
 - Review-only and autonomous-submit modes with per-cycle and daily limits
 - A local web app for onboarding, API keys, profile, filters, and automation settings
+- A latest-jobs table with job dossiers and explicit manual application actions
 - An application tracker with the exact selected/submitted resume
 - Total application, OA, interview, offer, and pipeline statistics
 - Live worker status and local browser snapshots
@@ -79,11 +78,11 @@ The onboarding flow asks for:
 1. truthful profile and education facts;
 2. at least one PDF resume;
 3. a Claude Code account connection if you want browser form filling;
-4. whether the agent should watch, fill for review, or submit automatically.
+4. whether manual application actions should stop for review or permit final submission.
 
 For browser automation, click **Connect Claude account** and sign in with the Claude Pro or Max account you already use for Claude Code. Paste the one-time code from Claude back into TI-AAA. This login is saved in the private Docker volume and survives container restarts; it does **not** require an Anthropic API key or separate API billing. An API key remains available as an advanced alternative.
 
-The first repository check starts independently of the browser and establishes the protected baseline. You can close the tab after onboarding; polling and enabled browser workers continue inside Docker.
+The first repository check starts independently of the browser and imports the current catalog. You can close the tab after onboarding; polling and enabled browser workers continue inside Docker.
 
 ### 4. Add specialized resumes and configure limits
 
@@ -97,9 +96,22 @@ Use **Settings** for:
 - resume tailoring and optional LLM preparation;
 - browser-worker count;
 - daily and per-cycle limits;
+- optional automatic application to future matching roles;
 - review-only versus final submission.
 
 Keys are write-only in the UI. They are stored in the private Docker volume rather than returned by the API.
+
+### 5. Choose a listing and start the agent
+
+Open **Latest jobs**. This is the live catalog from the three repositories, including roles that were already present when TI-AAA first started.
+
+1. Search or filter the table, then select a company or **Details**.
+2. Review the location, fit explanation, eligibility note, source, and application boundary in the dossier.
+3. Select **Apply with agent** (or **Apply** in the table) and confirm.
+4. Open **Agent** to follow browser status and the latest local snapshot. The worker continues if you close the dashboard.
+5. In review mode, finish the final submission yourself. In submit mode, TI-AAA may submit only after you enable that boundary in Settings.
+
+Nothing is applied to automatically by default. If you later enable **Automatically apply to new matching roles**, it applies only to matching roles discovered after you enable it; every catalog role remains available for an explicit manual request.
 
 ### Everyday Docker commands
 
@@ -201,7 +213,7 @@ Then edit:
 
 The legacy `resume.pdf` + `resume.txt` pair is registered as the first resume automatically. Additional versions are easiest to upload through the web app.
 
-Validate and establish the protected baseline:
+Validate and populate the current repository catalog:
 
 ```bash
 tiaaa doctor
@@ -215,6 +227,7 @@ tiaaa score                   # inspect heuristic scores
 tiaaa score --llm             # optional API-backed score refinement
 tiaaa prepare                 # select/tailor resumes for newly queued jobs
 tiaaa apply --limit 3         # fill, but stop before final Submit
+tiaaa apply --job-id 42       # request + prepare + fill one current catalog role
 tiaaa status                  # conversion statistics
 tiaaa jobs                    # tracker rows
 tiaaa mark 42 --outcome oa    # record an OA
@@ -253,7 +266,7 @@ tiaaa watch --once
 | `tiaaa init` | Create/import local terminal configuration |
 | `tiaaa doctor` | Check profile, resumes, and browser tools |
 | `tiaaa sources` | Show fixed GitHub sources and their health |
-| `tiaaa sync` | Poll repositories without queuing the baseline |
+| `tiaaa sync` | Poll repositories and refresh the local catalog |
 | `tiaaa run` | One sync → optional score → prepare cycle |
 | `tiaaa watch` | Continuously poll and prepare later additions |
 | `tiaaa prepare` | Select and optionally tailor resumes |
@@ -285,22 +298,24 @@ agent.configure(profile=profile)
 # Add one or more truthful resume versions.
 agent.add_resume("./resume.pdf", name="Backend", tags=["backend", "python"])
 
-# The first call is always a protected baseline.
+# The first call imports the current catalog without automatic application.
 sync_results = agent.sync()
 
-# Later additions can be prepared and processed.
-prepared = agent.prepare()
-applications = agent.apply(limit=2, submit=False)
+# Inspect the catalog, then explicitly request one role by its tracker ID.
+catalog = agent.jobs(limit=100)
+job_id = catalog[0]["id"]
+agent.request(job_id)  # selects and fact-safely tailors the best resume
+application = agent.apply(job_id=job_id, submit=False)
 
 print(agent.stats())
 print(agent.jobs(status="manual_review"))
 ```
 
-`TIAAA.sync()` intentionally has no `include_existing` argument.
+`TIAAA.sync()` intentionally has no bulk "apply to everything" argument. Current roles are selected individually from the web inbox.
 
 ## How resume selection and tailoring work
 
-For each newly queued role, TI-AAA ranks active resumes using role/category tokens, user tags, and factual resume text. The selected resume ID and packet path are saved on the tracker row.
+For each user-selected or automatically queued role, TI-AAA ranks active resumes using role/category tokens, user tags, and factual resume text. The selected resume ID and packet path are saved on the tracker row.
 
 When tailoring is enabled, TI-AAA creates an ATS-friendly PDF that:
 
@@ -321,7 +336,7 @@ Each isolated browser worker publishes:
 - a short status message;
 - a low-frequency local screenshot.
 
-The **Live agent** screen refreshes those snapshots about every 2.5 seconds. This is an observation view, not remote browser control. A snapshot can contain form answers and personal details, so files remain in the local data directory and the Docker port is bound to `127.0.0.1` by default.
+The **Agent** screen refreshes those snapshots about every 2.5 seconds. This is an observation view, not remote browser control. A snapshot can contain form answers and personal details, so files remain in the local data directory and the Docker port is bound to `127.0.0.1` by default.
 
 ## Configuration and API keys
 
@@ -343,7 +358,7 @@ preparation:
   tailor_resumes: true
 
 automation:
-  enabled: false
+  auto_apply_new: false
   allow_submission: false
   workers: 1
   max_applications_per_cycle: 5
@@ -369,10 +384,13 @@ API keys are not required for GitHub discovery, heuristic scoring, resume rankin
 three GitHub repositories
           │
           ▼
- protected baseline → poll later additions
+ import current catalog → poll later additions
           │
           ▼
  parse → normalize → deduplicate → eligibility → score
+                                                │
+                                                ▼
+                         browse / manual Apply / optional auto-new
                                                 │
                                                 ▼
                               select + fact-safe tailor resume
@@ -428,7 +446,7 @@ src/tiaaa/
 ├── discovery/       GitHub-only fetcher and repository table parsers
 ├── api.py           public Python facade
 ├── config.py        fixed sources, paths, profile/settings/secrets
-├── database.py      SQLite schema, baseline queue, tracker, and analytics
+├── database.py      SQLite catalog, manual/automatic queue, tracker, and analytics
 ├── eligibility.py   internship filters and heuristic scoring
 ├── preparation.py   score and application-packet preparation
 ├── resumes.py       upload, extraction, selection, and safe tailoring
@@ -441,7 +459,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request and [SECUR
 
 TI-AAA is a new internship-focused project adapted from architectural ideas and application workflow patterns in [ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot), created by [Pickle-Pixel](https://github.com/Pickle-Pixel). ApplyPilot deserves explicit credit for the original open-source pipeline concept, staged SQLite tracking, and Claude Code/Playwright application approach that informed this project.
 
-TI-AAA replaces broad job-board discovery with the fixed GitHub internship pipeline above and adds protected new-only semantics, a persistent background service, multi-resume selection/tailoring, and a local app dashboard. It is not affiliated with or endorsed by ApplyPilot or the three internship-repository maintainers. See [NOTICE](NOTICE).
+TI-AAA replaces broad job-board discovery with the fixed GitHub internship pipeline above and adds a browsable repository inbox, explicit manual and opt-in automatic application modes, a persistent background service, multi-resume selection/tailoring, and a local app dashboard. It is not affiliated with or endorsed by ApplyPilot or the three internship-repository maintainers. See [NOTICE](NOTICE).
 
 ## License
 

@@ -20,8 +20,9 @@ preparation:
   tailor_resumes: true
 
 automation:
-  # Enable after onboarding to launch browser workers for newly posted roles only.
-  enabled: false
+  # Opt in to browser workers for matching roles discovered after this is enabled.
+  # Current and previously discovered roles remain available for manual Apply actions.
+  auto_apply_new: false
   # False fills forms for review; true lets the background service click final Submit.
   allow_submission: false
   workers: 1

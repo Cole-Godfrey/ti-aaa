@@ -38,3 +38,38 @@ def test_background_cycle_syncs_before_and_only_prepares_after_onboarding_and_ba
     assert summary["baseline_complete"] is True
     assert summary["status"] == "complete"
     assert get_connection(paths.database).execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_manual_application_runs_when_automatic_new_job_setting_is_off(
+    tmp_path, profile, settings, monkeypatch
+) -> None:
+    paths = ensure_dirs(AppPaths(tmp_path))
+    save_profile(profile, paths)
+    settings["automation"]["auto_apply_new"] = False
+    save_settings(settings, paths)
+    connection = init_db(paths.database)
+    set_app_state(connection, "onboarding_complete", True)
+    calls: list[int | None] = []
+
+    monkeypatch.setattr(
+        "tiaaa.discovery.github.sync_repositories",
+        lambda **_kwargs: [
+            SyncResult("source/readme", "Source", "unchanged", parsed=10, baseline=False)
+        ],
+    )
+    monkeypatch.setattr("tiaaa.service.source_baseline_complete", lambda *_a, **_k: True)
+    monkeypatch.setattr("tiaaa.service.manual_application_ids", lambda _connection: [42])
+    monkeypatch.setattr(
+        "tiaaa.preparation.prepare_jobs",
+        lambda **_kwargs: {"prepared": 1, "errors": 0},
+    )
+
+    def fake_apply(**kwargs):
+        calls.append(kwargs.get("target_job_id"))
+        return {"applied": 0, "review": 1, "failed": 0, "expired": 0}
+
+    monkeypatch.setattr("tiaaa.apply.run_applications", fake_apply)
+    summary = AutomationService(paths).run_cycle()
+
+    assert calls == [42]
+    assert summary["applications"]["review"] == 1

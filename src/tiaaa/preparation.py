@@ -156,6 +156,7 @@ def prepare_jobs(
     profile: dict[str, Any],
     settings: dict[str, Any],
     limit: int = 0,
+    target_job_id: int | None = None,
     db_path: str | Path | None = None,
 ) -> dict[str, int]:
     """Select the best resume, tailor it fact-safely, and prepare application packets."""
@@ -163,7 +164,12 @@ def prepare_jobs(
     import_legacy_resume(paths=paths, db_path=db_path)
     minimum_score = int(settings.get("minimum_fit_score", 5))
     connection = get_connection(db_path)
-    jobs = pending_preparation(connection, minimum_score, limit)
+    jobs = pending_preparation(
+        connection,
+        minimum_score,
+        limit,
+        target_job_id=target_job_id,
+    )
     use_llm = bool(settings.get("preparation", {}).get("use_llm"))
     generate_cover = bool(settings.get("preparation", {}).get("generate_cover_letters", True))
     tailor = bool(settings.get("preparation", {}).get("tailor_resumes", True))

@@ -17,7 +17,15 @@ from tiaaa.config import (
     save_settings,
     update_secrets,
 )
-from tiaaa.database import get_connection, get_stats, init_db, list_jobs, list_resumes
+from tiaaa.database import (
+    get_connection,
+    get_job,
+    get_stats,
+    init_db,
+    list_jobs,
+    list_resumes,
+    request_manual_application,
+)
 
 
 class TIAAA:
@@ -52,7 +60,7 @@ class TIAAA:
             update_secrets(secrets, paths=self.paths)
 
     def sync(self, *, force: bool = False) -> list[dict[str, Any]]:
-        """Poll all fixed sources without ever opting the baseline into the queue."""
+        """Poll all fixed sources; first-import roles remain available for manual selection."""
 
         from tiaaa.discovery.github import sync_repositories
 
@@ -74,6 +82,28 @@ class TIAAA:
             limit=limit,
             db_path=self.paths.database,
         )
+
+    def request(self, job_id: int, *, prepare: bool = True) -> dict[str, Any]:
+        """Queue one active catalog listing, optionally selecting its resume immediately."""
+
+        connection = get_connection(self.paths.database)
+        row = request_manual_application(connection, job_id)
+        if row is None:
+            raise LookupError(f"Job ID {job_id} was not found")
+        if prepare:
+            from tiaaa.preparation import prepare_jobs
+
+            result = prepare_jobs(
+                paths=self.paths,
+                profile=self.profile,
+                settings=self.settings,
+                limit=1,
+                target_job_id=job_id,
+                db_path=self.paths.database,
+            )
+            if result["errors"]:
+                raise RuntimeError(f"Could not prepare job ID {job_id}")
+        return get_job(connection, job_id) or row
 
     def add_resume(
         self,
@@ -108,6 +138,7 @@ class TIAAA:
         limit: int | None = None,
         workers: int = 1,
         submit: bool = False,
+        job_id: int | None = None,
     ) -> dict[str, int]:
         from tiaaa.apply import run_applications
 
@@ -118,6 +149,7 @@ class TIAAA:
             limit=limit,
             workers=workers,
             submit=submit,
+            target_job_id=job_id,
             db_path=self.paths.database,
         )
 
