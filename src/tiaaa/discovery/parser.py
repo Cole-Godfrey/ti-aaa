@@ -170,7 +170,10 @@ def _parse_posting_date(raw: str, today: date) -> str | None:
 
             parsed = _datetime.datetime.strptime(value, pattern)
             candidate = date(today.year, parsed.month, parsed.day)
-            if candidate > today + timedelta(days=45):
+            # A posting date cannot meaningfully be in the future. Allow one day
+            # for upstream UTC/local-time differences; otherwise the row belongs
+            # to the previous calendar year.
+            if candidate > today + timedelta(days=1):
                 candidate = candidate.replace(year=today.year - 1)
             return candidate.isoformat()
         except ValueError:

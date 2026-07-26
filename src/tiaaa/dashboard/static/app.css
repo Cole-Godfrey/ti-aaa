@@ -246,6 +246,7 @@ tbody tr:hover td { background: rgba(220,255,69,.16); }
 .row-actions { min-width: 150px; text-align: right; white-space: nowrap; }
 .row-actions > * + * { margin-left: 10px; }
 .mini-apply { padding: 6px 8px; background: var(--acid); border: 1px solid var(--ink); font: 8px var(--data); text-transform: uppercase; }
+.manual-link { color: var(--ink); text-decoration: none; }
 .mini-apply:disabled { color: var(--muted); background: transparent; border-color: var(--rule); cursor: default; }
 .text-button { padding: 0; color: var(--blue); background: none; border: 0; border-bottom: 1px solid currentColor; font: 9px var(--data); text-transform: uppercase; }
 .open-link { font: 19px var(--slab); text-decoration: none; }
@@ -296,6 +297,23 @@ tbody tr:hover td { background: rgba(220,255,69,.16); }
 .preview-frame img { width: 100%; height: 100%; object-fit: contain; }
 .preview-empty { height: 100%; display: grid; place-items: center; color: #aaaca3; font: 9px var(--data); }
 .worker-message { margin: 0; padding: 11px 14px; color: var(--muted); border-top: 1px solid var(--rule); font-size: 10px; }
+.agent-input-stack { display: grid; gap: 12px; margin-top: 18px; }
+.agent-checkpoint { background: var(--paper); border: 1px solid var(--ink); border-left: 8px solid var(--signal); box-shadow: 5px 5px 0 rgba(23,24,19,.09); }
+.agent-checkpoint > header { display: flex; justify-content: space-between; gap: 20px; align-items: start; padding: 17px 19px 14px; border-bottom: 1px solid var(--ink); }
+.agent-checkpoint h3 { margin: 0; font: 18px var(--slab); }
+.agent-checkpoint > header > span { padding: 4px 6px; background: var(--acid); border: 1px solid var(--ink); font: 8px var(--data); text-transform: uppercase; }
+.agent-checkpoint.quiet { display: flex; gap: 16px; align-items: center; min-height: 44px; padding: 10px 14px; border-left-color: var(--rule); box-shadow: none; }
+.agent-checkpoint.quiet span { color: var(--muted); font: 8px var(--data); letter-spacing: .1em; }
+.agent-checkpoint.quiet p { margin: 0; color: var(--muted); font-size: 10px; }
+.checkpoint-note { margin: 0; padding: 13px 19px; color: var(--muted); border-bottom: 1px dotted var(--rule); font-size: 11px; line-height: 1.45; }
+.agent-input-form { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px 18px; padding: 18px 19px; }
+.agent-input-form label { min-width: 0; font: 9px var(--data); text-transform: uppercase; }
+.agent-input-form label > span { color: var(--muted); font-size: 7px; }
+.agent-input-form input, .agent-input-form select, .agent-input-form textarea { margin-top: 6px; text-transform: none; }
+.checkpoint-actions { grid-column: 1 / -1; display: flex; gap: 14px; align-items: center; justify-content: space-between; padding-top: 4px; }
+.checkpoint-actions > span { color: var(--muted); font: 8px var(--data); text-transform: uppercase; }
+.checkpoint-actions > div { display: flex; gap: 15px; align-items: center; }
+.agent-checkpoint.handoff { border-left-color: var(--blue); }
 .activity-panel { margin-top: 18px; }
 .event-list { border-top: 1px solid var(--rule); }
 .event-item { display: grid; grid-template-columns: 8px 1fr auto; gap: 10px; align-items: center; min-height: 37px; border-bottom: 1px solid var(--rule); }
@@ -442,6 +460,9 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 4
   .metric:last-child { border-bottom: 0; }
   .field-grid { grid-template-columns: 1fr; }
   .latest-controls, .filters, .drawer-actions, .live-intro { flex-direction: column; align-items: stretch; }
+  .agent-input-form { grid-template-columns: 1fr; }
+  .checkpoint-actions { align-items: stretch; flex-direction: column; }
+  .checkpoint-actions > div { justify-content: space-between; }
   .latest-controls input, .latest-controls select { width: 100%; min-width: 0; flex: 0 0 auto; }
   .ledger-sheet { padding-left: 0; }
   .sheet-index { display: none; }

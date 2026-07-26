@@ -7,6 +7,16 @@ from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.discovery.github import GitHubPoller
 
 
+def test_source_registry_tracks_only_the_three_requested_readmes() -> None:
+    assert len(SOURCE_DOCUMENTS) == 3
+    assert {source.path for source in SOURCE_DOCUMENTS} == {"README.md"}
+    assert {source.repo_url for source in SOURCE_DOCUMENTS} == {
+        "https://github.com/sndsh404/summer-2027-internships",
+        "https://github.com/vanshb03/Summer2027-Internships",
+        "https://github.com/SimplifyJobs/Summer2026-Internships",
+    }
+
+
 def test_poller_uses_baseline_then_conditional_request(tmp_path, profile, settings) -> None:
     source = SOURCE_DOCUMENTS[0]
     document = """

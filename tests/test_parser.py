@@ -50,7 +50,7 @@ def test_html_table_prefers_direct_apply_link_over_simplify_tracking_link() -> N
   <td>2d</td>
 </tr></tbody></table>
 """
-    jobs = parse_document(document, SOURCE_DOCUMENTS[3], today=date(2026, 7, 18))
+    jobs = parse_document(document, SOURCE_DOCUMENTS[2], today=date(2026, 7, 18))
 
     assert len(jobs) == 1
     assert jobs[0].company == "Acme"
@@ -58,6 +58,18 @@ def test_html_table_prefers_direct_apply_link_over_simplify_tracking_link() -> N
     assert jobs[0].category == "Software Engineering"
     assert jobs[0].application_url == "https://jobs.ashbyhq.com/acme/abc/application"
     assert jobs[0].posting_date == "2026-07-16"
+
+
+def test_yearless_posting_date_cannot_sort_as_a_future_listing() -> None:
+    document = """
+| Company | Role | Location | Apply | Added |
+| --- | --- | --- | --- | --- |
+| Acme | Software Intern | Remote | [apply](https://jobs.test/1) | Aug 30 |
+"""
+
+    jobs = parse_document(document, SOURCE_DOCUMENTS[0], today=date(2026, 7, 25))
+
+    assert jobs[0].posting_date == "2025-08-30"
 
 
 def test_canonical_url_preserves_job_identifier_and_removes_campaign_parameters() -> None:

@@ -12,6 +12,7 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from tiaaa.apply.preview import PreviewCapture
 from tiaaa.apply.prompt import build_prompt
 from tiaaa.config import AppPaths
 from tiaaa.database import (
+    answered_agent_inputs,
     applications_today,
     claim_next_job,
     claimable_application_count,
@@ -27,6 +29,8 @@ from tiaaa.database import (
     init_db,
     mark_apply_result,
     release_claim,
+    resolve_agent_inputs,
+    store_agent_inputs,
     update_worker_state,
 )
 
@@ -50,8 +54,55 @@ _RESULT_SCHEMA = {
             ],
         },
         "detail": {"type": "string"},
+        "reason_code": {
+            "type": "string",
+            "enum": [
+                "none",
+                "missing_input",
+                "access_blocked",
+                "login_required",
+                "captcha",
+                "sensitive_information",
+                "eligibility_conflict",
+                "assessment_required",
+                "verification_required",
+                "unknown",
+            ],
+        },
+        "questions": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "maxLength": 80},
+                    "label": {"type": "string", "maxLength": 240},
+                    "input_type": {
+                        "type": "string",
+                        "enum": [
+                            "text",
+                            "textarea",
+                            "email",
+                            "tel",
+                            "number",
+                            "date",
+                            "select",
+                            "boolean",
+                        ],
+                    },
+                    "options": {
+                        "type": "array",
+                        "maxItems": 50,
+                        "items": {"type": "string", "maxLength": 120},
+                    },
+                    "required": {"type": "boolean"},
+                },
+                "required": ["key", "label", "input_type", "options", "required"],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["status", "detail"],
+    "required": ["status", "detail", "reason_code", "questions"],
     "additionalProperties": False,
 }
 _MISSING_RESULT = "agent returned no result code"
@@ -72,6 +123,14 @@ _PLAYWRIGHT_TOOLS = (
     "mcp__playwright__browser_type",
     "mcp__playwright__browser_wait_for",
 )
+
+
+@dataclass(slots=True)
+class AgentResult:
+    result: str
+    detail: str | None = None
+    reason_code: str = "unknown"
+    questions: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _mcp_config(port: int, *, windows: bool | None = None) -> dict[str, Any]:
@@ -258,7 +317,23 @@ def _claude_command(*, model: str, config_path: Path) -> list[str]:
     ]
 
 
-def _parse_result(text: str, *, submit: bool) -> tuple[str, str | None]:
+def _infer_reason_code(detail: str | None) -> str:
+    lowered = (detail or "").casefold()
+    if any(
+        marker in lowered
+        for marker in ("http 403", "403 forbidden", "access denied", "access blocked")
+    ):
+        return "access_blocked"
+    if "captcha" in lowered:
+        return "captcha"
+    if any(marker in lowered for marker in ("verification", "mfa", "one-time code")):
+        return "verification_required"
+    if any(marker in lowered for marker in ("login", "sign in", "account required")):
+        return "login_required"
+    return "unknown"
+
+
+def _parse_agent_result(text: str, *, submit: bool) -> AgentResult:
     try:
         structured = json.loads(text)
     except json.JSONDecodeError:
@@ -276,10 +351,22 @@ def _parse_result(text: str, *, submit: bool) -> tuple[str, str | None]:
             "applied": "applied" if submit else "review_ready",
         }
         if code in mapping:
-            return mapping[code], detail
+            questions = structured.get("questions")
+            if not isinstance(questions, list):
+                questions = []
+            reason_code = str(structured.get("reason_code") or "").casefold()
+            allowed_reason_codes = set(_RESULT_SCHEMA["properties"]["reason_code"]["enum"])
+            if reason_code not in allowed_reason_codes:
+                reason_code = _infer_reason_code(detail)
+            return AgentResult(
+                mapping[code],
+                detail,
+                reason_code,
+                [item for item in questions if isinstance(item, dict)],
+            )
     matches = list(_RESULT_PATTERN.finditer(text))
     if not matches:
-        return "failed", _MISSING_RESULT
+        return AgentResult("failed", _MISSING_RESULT)
     match = matches[-1]
     code = match.group(1).casefold()
     detail = (match.group(2) or "").strip().strip("*` .") or None
@@ -291,7 +378,14 @@ def _parse_result(text: str, *, submit: bool) -> tuple[str, str | None]:
         "failed": "failed",
         "applied": "applied" if submit else "review_ready",
     }
-    return mapping[code], detail
+    return AgentResult(mapping[code], detail, _infer_reason_code(detail))
+
+
+def _parse_result(text: str, *, submit: bool) -> tuple[str, str | None]:
+    """Backward-compatible result parser used by focused unit tests."""
+
+    parsed = _parse_agent_result(text, submit=submit)
+    return parsed.result, parsed.detail
 
 
 def _run_agent(
@@ -304,7 +398,8 @@ def _run_agent(
     model: str,
     timeout: int,
     submit: bool,
-) -> tuple[str, str | None]:
+    application_answers: dict[str, dict[str, Any]] | None = None,
+) -> AgentResult:
     worker_dir = paths.workers / f"worker-{worker_id}"
     worker_dir.mkdir(parents=True, exist_ok=True)
     with suppress(OSError):
@@ -315,6 +410,7 @@ def _run_agent(
         paths=paths,
         worker_dir=worker_dir,
         submit=submit,
+        application_answers=application_answers,
     )
     config_path = worker_dir / "playwright-mcp.json"
     config_path.write_text(json.dumps(_mcp_config(port), indent=2), encoding="utf-8")
@@ -339,7 +435,7 @@ def _run_agent(
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return "failed", f"agent timed out after {timeout}s"
+        return AgentResult("failed", f"agent timed out after {timeout}s")
 
     agent_text = _extract_agent_text(process.stdout)
     if os.environ.get("TIAAA_DEBUG_AGENT_OUTPUT") == "1":
@@ -350,10 +446,13 @@ def _run_agent(
         debug_path.write_text(process.stdout, encoding="utf-8")
         with suppress(OSError):
             debug_path.chmod(0o600)
-    result, detail = _parse_result(agent_text, submit=submit)
-    if process.returncode != 0 or detail == _MISSING_RESULT:
-        detail = _failure_detail(process.stdout, returncode=process.returncode)
-    if result == "failed":
+    parsed = _parse_agent_result(agent_text, submit=submit)
+    if process.returncode != 0 or parsed.detail == _MISSING_RESULT:
+        parsed = AgentResult(
+            "failed",
+            _failure_detail(process.stdout, returncode=process.returncode),
+        )
+    if parsed.result == "failed":
         _write_safe_diagnostic(
             paths=paths,
             job=job,
@@ -361,7 +460,7 @@ def _run_agent(
             output=process.stdout,
             returncode=process.returncode,
         )
-    return result, detail
+    return parsed
 
 
 def _worker(
@@ -425,7 +524,7 @@ def _worker(
                 screenshot_path=str(preview_path.resolve()),
             )
             try:
-                result, detail = _run_agent(
+                agent_result = _run_agent(
                     job=job,
                     profile=profile,
                     paths=paths,
@@ -434,8 +533,27 @@ def _worker(
                     model=str(automation.get("claude_model", "sonnet")),
                     timeout=int(automation.get("timeout_seconds", 600)),
                     submit=submit,
+                    application_answers=answered_agent_inputs(
+                        connection, int(job["id"])
+                    ),
                 )
-                mark_apply_result(connection, int(job["id"]), result, detail)
+                result = agent_result.result
+                detail = agent_result.detail
+                if result == "needs_review" and agent_result.questions:
+                    store_agent_inputs(
+                        connection,
+                        int(job["id"]),
+                        agent_result.questions,
+                    )
+                else:
+                    resolve_agent_inputs(connection, int(job["id"]))
+                mark_apply_result(
+                    connection,
+                    int(job["id"]),
+                    result,
+                    detail,
+                    reason_code=agent_result.reason_code,
+                )
                 result_message = {
                     "applied": "Application submitted",
                     "expired": "Listing is no longer available",

@@ -1,4 +1,4 @@
-"""Low-frequency screenshots for the local live worker view."""
+"""Local screenshots for the live worker view."""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ log = logging.getLogger(__name__)
 class PreviewCapture:
     """Capture a browser tab over its loopback-only Chrome DevTools endpoint."""
 
-    def __init__(self, *, port: int, output_path: Path, interval: float = 1.5) -> None:
+    def __init__(self, *, port: int, output_path: Path, interval: float = 0.5) -> None:
         self.port = port
         self.output_path = output_path
-        self.interval = max(0.75, interval)
+        self.interval = max(0.5, interval)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 

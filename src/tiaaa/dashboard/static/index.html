@@ -109,23 +109,21 @@
       <section class="view" data-view="applications">
         <article class="panel table-panel">
           <div class="panel-head tracker-head">
-            <div><p class="kicker">APPLICATION LEDGER</p><h2>Every role, resume, and outcome</h2></div>
+            <div><p class="kicker">APPLICATION LEDGER</p><h2>Submitted applications</h2><p>Only roles you actually applied to appear here.</p></div>
             <div class="filters">
               <input id="searchInput" type="search" placeholder="Search company, role, location" autocomplete="off">
               <select id="statusFilter" aria-label="Filter applications by status">
-                <option value="all">All statuses</option><option value="queued">Queued</option>
-                <option value="ready">Ready</option><option value="applying">Applying</option>
-                <option value="manual_review">Needs review</option><option value="applied">Applied</option>
+                <option value="all">All applications</option><option value="applied">Applied</option>
                 <option value="oa">OA received</option><option value="interview">Interviewing</option>
                 <option value="offer">Offer</option><option value="rejected">Rejected</option>
-                <option value="failed">Failed</option><option value="expired">Expired</option>
+                <option value="withdrawn">Withdrawn</option>
               </select>
             </div>
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Company / role</th><th>Pipeline</th><th>Resume</th><th>Outcome</th><th>Added</th><th></th></tr></thead>
-              <tbody id="jobsTableBody"><tr><td colspan="6" class="loading">Loading the ledger…</td></tr></tbody>
+              <thead><tr><th>Company / role</th><th>Status</th><th>Submitted resume</th><th>Outcome</th><th>Applied</th><th></th></tr></thead>
+              <tbody id="jobsTableBody"><tr><td colspan="6" class="loading">Loading submitted applications…</td></tr></tbody>
             </table>
           </div>
           <p id="tableSummary" class="table-summary"></p>
@@ -135,9 +133,10 @@
       <section class="view" data-view="live">
         <div class="live-intro">
           <div><p class="kicker">BROWSER WORKERS</p><h2>Watch the agent work</h2><p>Local snapshots refresh while a form is being filled. They can contain personal information, so they never leave this machine.</p></div>
-          <span class="tag">~1.5 second snapshots</span>
+          <span class="tag">0.5 second snapshots</span>
         </div>
         <div id="workerGrid" class="worker-grid"></div>
+        <div id="agentInputPanel" class="agent-input-stack"></div>
         <article class="panel activity-panel">
           <div class="panel-head"><div><p class="kicker">EVENT LOG</p><h2>What just happened</h2></div></div>
           <div id="eventList" class="event-list"></div>

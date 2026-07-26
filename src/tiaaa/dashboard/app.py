@@ -45,6 +45,7 @@ from tiaaa.database import (
     get_stats,
     get_worker_states,
     init_db,
+    list_agent_inputs,
     list_jobs,
     list_resumes,
     set_app_state,
@@ -91,6 +92,12 @@ class ClaudeAuthCode(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: str = Field(min_length=1, max_length=4096)
+
+
+class AgentInputAnswers(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answers: dict[str, Any] = Field(default_factory=dict)
 
 
 def _public_resume(row: dict[str, Any]) -> dict[str, Any]:
@@ -292,7 +299,7 @@ def create_app(
     def jobs(
         status: str | None = None,
         search: str | None = Query(default=None, max_length=200),
-        view: Literal["tracker", "latest"] = "tracker",
+        view: Literal["tracker", "latest", "applications"] = "tracker",
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
@@ -304,6 +311,7 @@ def create_app(
             offset=offset,
             latest=view == "latest",
             active_only=view == "latest",
+            applied_only=view == "applications",
         )
         return {"items": [_public_job(row) for row in rows], "limit": limit, "offset": offset}
 
@@ -356,6 +364,17 @@ def create_app(
                 else "review"
             ),
         }
+
+    @app.post("/api/jobs/{job_id}/inputs", status_code=202)
+    def submit_agent_inputs(job_id: int, payload: AgentInputAnswers) -> dict[str, Any]:
+        service = require_service()
+        try:
+            row = service.continue_application(job_id, payload.answers)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "queued", "job": _public_job(row)}
 
     @app.patch("/api/jobs/{job_id}")
     def patch_job(job_id: int, update: TrackerUpdate) -> dict[str, Any]:
@@ -481,6 +500,25 @@ def create_app(
             item["preview_url"] = (
                 f"/api/workers/{item['worker_id']}/preview" if item["preview_available"] else None
             )
+            job_row = get_job(connection(), int(item["job_id"])) if item.get("job_id") else None
+            item["questions"] = (
+                list_agent_inputs(connection(), int(item["job_id"]), pending_only=True)
+                if item.get("job_id")
+                else []
+            )
+            if job_row is not None:
+                item["pipeline_status"] = job_row.get("pipeline_status")
+                item["application_url"] = job_row.get("application_url")
+                item["availability_status"] = job_row.get("availability_status")
+                item["availability_detail"] = job_row.get("availability_detail")
+                item["review_detail"] = job_row.get("apply_error")
+                item["base_resume_name"] = job_row.get("base_resume_name")
+                item["submitted_resume_name"] = job_row.get("submitted_resume_name")
+                item["resume_url"] = (
+                    f"/api/jobs/{item['job_id']}/resume"
+                    if job_row.get("resume_path") or job_row.get("submitted_resume_path")
+                    else None
+                )
         return {"items": items}
 
     @app.get("/api/workers/{worker_id}/preview")

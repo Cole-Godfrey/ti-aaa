@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Iterable
@@ -12,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from tiaaa.config import get_paths
+from tiaaa.config import SOURCE_DOCUMENTS, get_paths
 from tiaaa.discovery.parser import canonicalize_url, listing_fingerprint
 from tiaaa.eligibility import evaluate_listing
 from tiaaa.models import InternshipListing, SourceDocument
@@ -33,6 +34,23 @@ PIPELINE_STATUSES = {
 }
 OUTCOME_STATUSES = {"none", "oa", "interview", "offer", "rejected", "withdrawn"}
 TERMINAL_PIPELINE_STATUSES = {"applied", "skipped", "withdrawn"}
+AVAILABILITY_STATUSES = {"unknown", "open", "closed", "manual_only"}
+AGENT_INPUT_TYPES = {
+    "text",
+    "textarea",
+    "email",
+    "tel",
+    "number",
+    "date",
+    "select",
+    "boolean",
+}
+_SENSITIVE_INPUT_PATTERN = re.compile(
+    r"\b(?:password|passcode|one.?time code|verification code|mfa|otp|captcha|"
+    r"social security|ssn|bank|routing|credit card|debit card|passport|"
+    r"driver.?s license|government id|biometric)\b",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -95,6 +113,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             last_modified      TEXT,
             content_sha256     TEXT,
             initialized        INTEGER NOT NULL DEFAULT 0,
+            enabled            INTEGER NOT NULL DEFAULT 1,
             last_polled_at     TEXT,
             last_success_at    TEXT,
             last_error         TEXT
@@ -126,6 +145,9 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             first_seen_at         TEXT NOT NULL,
             last_seen_at          TEXT NOT NULL,
             is_active             INTEGER NOT NULL DEFAULT 1,
+            availability_status   TEXT NOT NULL DEFAULT 'unknown',
+            availability_detail   TEXT,
+            availability_checked_at TEXT,
             no_sponsorship        INTEGER NOT NULL DEFAULT 0,
             citizenship_required  INTEGER NOT NULL DEFAULT 0,
             eligibility           TEXT NOT NULL DEFAULT 'eligible',
@@ -209,14 +231,73 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             started_at      TEXT,
             updated_at      TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS agent_inputs (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id         INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            input_key      TEXT NOT NULL,
+            label          TEXT NOT NULL,
+            input_type     TEXT NOT NULL DEFAULT 'text',
+            options_json   TEXT NOT NULL DEFAULT '[]',
+            required       INTEGER NOT NULL DEFAULT 1,
+            answer         TEXT,
+            status         TEXT NOT NULL DEFAULT 'pending',
+            created_at     TEXT NOT NULL,
+            answered_at    TEXT,
+            updated_at     TEXT NOT NULL,
+            UNIQUE(job_id, input_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_inputs_job
+            ON agent_inputs(job_id, status, id);
         """
     )
+    _ensure_column(connection, "sources", "enabled", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(connection, "jobs", "base_resume_id", "INTEGER REFERENCES resumes(id)")
     _ensure_column(connection, "jobs", "submitted_resume_id", "INTEGER REFERENCES resumes(id)")
     _ensure_column(connection, "jobs", "submitted_resume_path", "TEXT")
     _ensure_column(connection, "jobs", "tailoring_reason", "TEXT")
     _ensure_column(connection, "jobs", "manual_requested", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "jobs", "manual_requested_at", "TEXT")
+    _ensure_column(
+        connection, "jobs", "availability_status", "TEXT NOT NULL DEFAULT 'unknown'"
+    )
+    _ensure_column(connection, "jobs", "availability_detail", "TEXT")
+    _ensure_column(connection, "jobs", "availability_checked_at", "TEXT")
+    connection.execute(
+        """
+        UPDATE jobs
+        SET availability_status = 'closed',
+            availability_detail = COALESCE(availability_detail, apply_error),
+            availability_checked_at = COALESCE(
+                availability_checked_at, last_attempted_at, updated_at
+            )
+        WHERE availability_status = 'unknown'
+          AND pipeline_status = 'expired'
+          AND apply_error IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        UPDATE jobs
+        SET availability_status = 'manual_only',
+            availability_detail = COALESCE(availability_detail, apply_error),
+            availability_checked_at = COALESCE(
+                availability_checked_at, last_attempted_at, updated_at
+            ),
+            pipeline_status = CASE
+                WHEN pipeline_status = 'failed' THEN 'manual_review'
+                ELSE pipeline_status
+            END
+        WHERE availability_status = 'unknown'
+          AND apply_error IS NOT NULL
+          AND (
+              lower(apply_error) LIKE '%403%'
+              OR lower(apply_error) LIKE '%access denied%'
+              OR lower(apply_error) LIKE '%access blocked%'
+          )
+        """
+    )
     now = utc_now()
     for key, value in (
         ("onboarding_complete", "false"),
@@ -228,6 +309,8 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             "INSERT OR IGNORE INTO app_state (key, value, updated_at) VALUES (?, ?, ?)",
             (key, value, now),
         )
+    backfill_legacy_agent_inputs(connection)
+    reconcile_source_registry(connection, SOURCE_DOCUMENTS)
     connection.commit()
     return connection
 
@@ -257,9 +340,9 @@ def get_app_state(connection: sqlite3.Connection) -> dict[str, Any]:
     return result
 
 
-def source_baseline_complete(connection: sqlite3.Connection, expected_documents: int = 5) -> bool:
+def source_baseline_complete(connection: sqlite3.Connection, expected_documents: int = 3) -> bool:
     row = connection.execute(
-        "SELECT COUNT(*) FROM sources WHERE initialized = 1"
+        "SELECT COUNT(*) FROM sources WHERE initialized = 1 AND enabled = 1"
     ).fetchone()
     return int(row[0]) >= expected_documents
 
@@ -401,6 +484,261 @@ def get_worker_states(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     ]
 
 
+def _decode_agent_answer(value: str | None) -> Any:
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def backfill_legacy_agent_inputs(connection: sqlite3.Connection) -> int:
+    """Give pre-0.4 pauses an answer channel when their reason clearly requests facts."""
+
+    rows = connection.execute(
+        """
+        SELECT j.id, j.apply_error
+        FROM jobs j
+        WHERE j.pipeline_status = 'manual_review'
+          AND j.availability_status NOT IN ('closed', 'manual_only')
+          AND j.apply_error IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM agent_inputs ai WHERE ai.job_id = j.id)
+        """
+    ).fetchall()
+    now = utc_now()
+    created = 0
+    for row in rows:
+        detail = str(row["apply_error"] or "")
+        lowered = detail.casefold()
+        requests_candidate_facts = any(
+            marker in lowered
+            for marker in (
+                "cannot be answered",
+                "can't be answered",
+                "unanswered question",
+                "missing required",
+                "required field",
+                "needs your input",
+            )
+        )
+        if not requests_candidate_facts or _SENSITIVE_INPUT_PATTERN.search(
+            re.sub(r"[_-]+", " ", detail)
+        ):
+            continue
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO agent_inputs (
+                job_id, input_key, label, input_type, options_json, required,
+                answer, status, created_at, answered_at, updated_at
+            ) VALUES (
+                ?, 'legacy_follow_up',
+                'Provide the missing information described in the checkpoint note',
+                'textarea', '[]', 1, NULL, 'pending', ?, NULL, ?
+            )
+            """,
+            (row["id"], now, now),
+        )
+        created += 1
+    return created
+
+
+def list_agent_inputs(
+    connection: sqlite3.Connection,
+    job_id: int,
+    *,
+    pending_only: bool = False,
+) -> list[dict[str, Any]]:
+    clause = "AND status = 'pending'" if pending_only else ""
+    rows = connection.execute(
+        f"""
+        SELECT id, job_id, input_key, label, input_type, options_json,
+               required, answer, status, created_at, answered_at, updated_at
+        FROM agent_inputs
+        WHERE job_id = ? {clause}
+        ORDER BY id
+        """,
+        (job_id,),
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["options"] = json.loads(item.pop("options_json") or "[]")
+        except json.JSONDecodeError:
+            item["options"] = []
+        item["required"] = bool(item["required"])
+        item["answer"] = _decode_agent_answer(item["answer"])
+        result.append(item)
+    return result
+
+
+def answered_agent_inputs(
+    connection: sqlite3.Connection,
+    job_id: int,
+) -> dict[str, dict[str, Any]]:
+    return {
+        item["input_key"]: {
+            "question": item["label"],
+            "answer": item["answer"],
+        }
+        for item in list_agent_inputs(connection, job_id)
+        if item["status"] == "answered" and item["answer"] is not None
+    }
+
+
+def store_agent_inputs(
+    connection: sqlite3.Connection,
+    job_id: int,
+    questions: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Persist only ordinary, non-sensitive questions returned by the agent."""
+
+    now = utc_now()
+    connection.execute(
+        "UPDATE agent_inputs SET status = 'superseded', updated_at = ? "
+        "WHERE job_id = ? AND status = 'pending'",
+        (now, job_id),
+    )
+    saved = 0
+    seen: set[str] = set()
+    for raw in questions:
+        key = str(raw.get("key") or "").strip().casefold()
+        label = str(raw.get("label") or "").strip()
+        input_type = str(raw.get("input_type") or "text").strip().casefold()
+        if (
+            not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", key)
+            or key in seen
+            or not label
+            or len(label) > 240
+            or input_type not in AGENT_INPUT_TYPES
+            or _SENSITIVE_INPUT_PATTERN.search(
+                re.sub(r"[_-]+", " ", f"{key} {label}")
+            )
+        ):
+            continue
+        options = raw.get("options")
+        if not isinstance(options, list):
+            options = []
+        options = [str(option).strip()[:120] for option in options if str(option).strip()][
+            :50
+        ]
+        if input_type == "select" and not options:
+            input_type = "text"
+        seen.add(key)
+        connection.execute(
+            """
+            INSERT INTO agent_inputs (
+                job_id, input_key, label, input_type, options_json, required,
+                answer, status, created_at, answered_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, NULL, ?)
+            ON CONFLICT(job_id, input_key) DO UPDATE SET
+                label = excluded.label,
+                input_type = excluded.input_type,
+                options_json = excluded.options_json,
+                required = excluded.required,
+                status = 'pending',
+                updated_at = excluded.updated_at
+            """,
+            (
+                job_id,
+                key,
+                label,
+                input_type,
+                json.dumps(options),
+                int(bool(raw.get("required", True))),
+                now,
+                now,
+            ),
+        )
+        saved += 1
+    connection.commit()
+    return list_agent_inputs(connection, job_id, pending_only=True) if saved else []
+
+
+def resolve_agent_inputs(connection: sqlite3.Connection, job_id: int) -> None:
+    connection.execute(
+        "UPDATE agent_inputs SET status = 'resolved', updated_at = ? "
+        "WHERE job_id = ? AND status = 'pending'",
+        (utc_now(), job_id),
+    )
+    connection.commit()
+
+
+def answer_agent_inputs(
+    connection: sqlite3.Connection,
+    job_id: int,
+    answers: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Save candidate-provided answers and safely requeue the same prepared job."""
+
+    job = get_job(connection, job_id)
+    if job is None:
+        return None
+    if job["pipeline_status"] != "manual_review":
+        raise ValueError("This application is not waiting for your input")
+    if job["availability_status"] in {"closed", "manual_only"}:
+        raise ValueError("This application requires a manual browser handoff")
+    pending = list_agent_inputs(connection, job_id, pending_only=True)
+    if not pending:
+        raise ValueError("The agent did not request any answerable fields")
+    by_key = {item["input_key"]: item for item in pending}
+    unknown = sorted(set(answers) - set(by_key))
+    if unknown:
+        raise ValueError(f"Unknown application field: {unknown[0]}")
+
+    normalized: dict[str, Any] = {}
+    for key, value in answers.items():
+        if not isinstance(value, (str, bool, int, float)):
+            raise ValueError(f"Invalid value for {by_key[key]['label']}")
+        if isinstance(value, str):
+            value = value.strip()
+            if len(value) > 4000:
+                raise ValueError(f"Answer is too long for {by_key[key]['label']}")
+        normalized[key] = value
+    missing = [
+        item["label"]
+        for item in pending
+        if item["required"] and (item["input_key"] not in normalized or normalized[item["input_key"]] == "")
+    ]
+    if missing:
+        raise ValueError(f"Answer required: {missing[0]}")
+
+    now = utc_now()
+    for item in pending:
+        key = item["input_key"]
+        value = normalized.get(key, "")
+        connection.execute(
+            """
+            UPDATE agent_inputs SET answer = ?, status = 'answered',
+                                    answered_at = ?, updated_at = ?
+            WHERE job_id = ? AND input_key = ? AND status = 'pending'
+            """,
+            (json.dumps(value), now, now, job_id, key),
+        )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = CASE
+                            WHEN resume_path IS NULL THEN 'queued' ELSE 'ready' END,
+                        manual_requested = 1, manual_requested_at = ?,
+                        apply_error = NULL, worker_id = NULL,
+                        apply_attempts = CASE WHEN apply_attempts > 0
+                            THEN apply_attempts - 1 ELSE 0 END,
+                        updated_at = ?
+        WHERE id = ?
+        """,
+        (now, now, job_id),
+    )
+    add_event(
+        connection,
+        job_id,
+        "agent_input_supplied",
+        f"{len(normalized)} answer(s) supplied; application requeued",
+    )
+    connection.commit()
+    return get_job(connection, job_id)
+
+
 def recover_stale_work(connection: sqlite3.Connection) -> int:
     now = utc_now()
     cursor = connection.execute(
@@ -431,19 +769,77 @@ def add_event(
     )
 
 
+def reconcile_source_registry(
+    connection: sqlite3.Connection,
+    configured_sources: Iterable[SourceDocument],
+) -> int:
+    """Retire documents removed from the configured feed without deleting history."""
+
+    document_keys = tuple(source.document_key for source in configured_sources)
+    now = utc_now()
+    if document_keys:
+        placeholders = ", ".join("?" for _ in document_keys)
+        connection.execute(
+            f"UPDATE sources SET enabled = (document_key IN ({placeholders}))",
+            document_keys,
+        )
+        connection.execute(
+            f"""
+            UPDATE job_sources SET active = 0
+            WHERE document_key NOT IN ({placeholders}) AND active = 1
+            """,
+            document_keys,
+        )
+    else:
+        connection.execute("UPDATE sources SET enabled = 0")
+        connection.execute("UPDATE job_sources SET active = 0 WHERE active = 1")
+
+    inactive = connection.execute(
+        """
+        SELECT j.id, j.pipeline_status
+        FROM jobs j
+        WHERE j.is_active = 1
+          AND NOT EXISTS (
+              SELECT 1 FROM job_sources js
+              JOIN sources s ON s.document_key = js.document_key
+              WHERE js.job_id = j.id AND js.active = 1 AND s.enabled = 1
+          )
+        """
+    ).fetchall()
+    for row in inactive:
+        status = row["pipeline_status"]
+        next_status = status if status in TERMINAL_PIPELINE_STATUSES else "expired"
+        connection.execute(
+            """
+            UPDATE jobs SET is_active = 0, pipeline_status = ?,
+                            worker_id = NULL, manual_requested = 0, updated_at = ?
+            WHERE id = ?
+            """,
+            (next_status, now, row["id"]),
+        )
+        add_event(
+            connection,
+            int(row["id"]),
+            "expired",
+            "Removed from the configured repository feed",
+        )
+    return len(inactive)
+
+
 def ensure_source(connection: sqlite3.Connection, source: SourceDocument) -> dict[str, Any]:
     connection.execute(
         """
         INSERT INTO sources (
-            document_key, source_key, label, repo_url, branch, path, raw_url
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            document_key, source_key, label, repo_url, branch, path, raw_url, enabled
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
         ON CONFLICT(document_key) DO UPDATE SET
             source_key = excluded.source_key,
             label = excluded.label,
             repo_url = excluded.repo_url,
             branch = excluded.branch,
             path = excluded.path,
-            raw_url = excluded.raw_url
+            raw_url = excluded.raw_url,
+            enabled = 1
         """,
         (
             source.document_key,
@@ -588,6 +984,10 @@ def ingest_listings(
 
             if row is None:
                 is_new = not baseline
+                availability_status = "closed" if listing.closed else "unknown"
+                availability_detail = (
+                    "Marked closed in the repository source" if listing.closed else None
+                )
                 if not eligibility.eligible:
                     status = "skipped"
                     stats["skipped"] = int(stats["skipped"]) + 1
@@ -601,10 +1001,13 @@ def ingest_listings(
                     INSERT INTO jobs (
                         fingerprint, canonical_url, application_url, company, role, location,
                         category, posting_date, first_seen_at, last_seen_at, is_active,
+                        availability_status, availability_detail, availability_checked_at,
                         no_sponsorship, citizenship_required, eligibility, eligibility_reason,
                         fit_score, score_reasoning, scored_at, pipeline_status, discovered_as_new,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
                     """,
                     (
                         fingerprint,
@@ -617,6 +1020,9 @@ def ingest_listings(
                         listing.posting_date,
                         now,
                         now,
+                        availability_status,
+                        availability_detail,
+                        now if listing.closed else None,
                         int(listing.no_sponsorship),
                         int(listing.citizenship_required),
                         "eligible" if eligibility.eligible else "ineligible",
@@ -639,6 +1045,23 @@ def ingest_listings(
                 job_id = int(row["id"])
                 stats["existing"] = int(stats["existing"]) + 1
                 next_status = row["pipeline_status"]
+                url_changed = canonical_url != row["canonical_url"]
+                availability_status = str(row["availability_status"] or "unknown")
+                availability_detail = row["availability_detail"]
+                availability_checked_at = row["availability_checked_at"]
+                if listing.closed:
+                    availability_status = "closed"
+                    availability_detail = "Marked closed in the repository source"
+                    availability_checked_at = now
+                    if next_status not in TERMINAL_PIPELINE_STATUSES:
+                        next_status = "expired"
+                elif availability_status == "closed" and (
+                    url_changed
+                    or availability_detail == "Marked closed in the repository source"
+                ):
+                    availability_status = "unknown"
+                    availability_detail = None
+                    availability_checked_at = None
                 if not eligibility.eligible and next_status in {
                     "discovered",
                     "queued",
@@ -659,7 +1082,11 @@ def ingest_listings(
                         next_status = "queued"
                         stats["queued"] = int(stats["queued"]) + 1
                         add_event(connection, job_id, "queued", "Listing became eligible")
-                elif next_status == "expired" and eligibility.eligible:
+                elif (
+                    next_status == "expired"
+                    and eligibility.eligible
+                    and availability_status != "closed"
+                ):
                     if baseline or not auto_apply_new:
                         next_status = "discovered"
                         add_event(connection, job_id, "reopened", "Active in repository source")
@@ -670,8 +1097,11 @@ def ingest_listings(
                 connection.execute(
                     """
                     UPDATE jobs SET
-                        application_url = ?, company = ?, role = ?, location = ?, category = ?,
+                        canonical_url = ?, application_url = ?, company = ?, role = ?,
+                        location = ?, category = ?,
                         posting_date = COALESCE(?, posting_date), last_seen_at = ?, is_active = 1,
+                        availability_status = ?, availability_detail = ?,
+                        availability_checked_at = ?,
                         no_sponsorship = no_sponsorship OR ?,
                         citizenship_required = citizenship_required OR ?,
                         eligibility = ?, eligibility_reason = ?,
@@ -681,6 +1111,7 @@ def ingest_listings(
                     WHERE id = ?
                     """,
                     (
+                        canonical_url,
                         listing.application_url,
                         listing.company,
                         listing.role,
@@ -688,6 +1119,9 @@ def ingest_listings(
                         listing.category,
                         listing.posting_date,
                         now,
+                        availability_status,
+                        availability_detail,
+                        availability_checked_at,
                         int(listing.no_sponsorship),
                         int(listing.citizenship_required),
                         "eligible" if eligibility.eligible else "ineligible",
@@ -749,7 +1183,8 @@ def ingest_listings(
             cursor = connection.execute(
                 """
                 UPDATE jobs SET pipeline_status = 'queued', discovered_as_new = 1, updated_at = ?
-                WHERE pipeline_status = 'discovered' AND eligibility = 'eligible' AND is_active = 1
+                WHERE pipeline_status = 'discovered' AND eligibility = 'eligible'
+                  AND is_active = 1 AND availability_status != 'closed'
                 """,
                 (now,),
             )
@@ -799,6 +1234,7 @@ def list_jobs(
     offset: int = 0,
     latest: bool = False,
     active_only: bool = False,
+    applied_only: bool = False,
 ) -> list[dict[str, Any]]:
     clauses = ["1 = 1"]
     parameters: list[Any] = []
@@ -814,6 +1250,10 @@ def list_jobs(
         parameters.extend((token, token, token))
     if active_only:
         clauses.append("j.is_active = 1")
+    if latest:
+        clauses.append("j.availability_status != 'closed'")
+    if applied_only:
+        clauses.append("j.applied_at IS NOT NULL")
     ordering = (
         "COALESCE(j.posting_date, substr(j.first_seen_at, 1, 10)) DESC, "
         "j.first_seen_at DESC, j.id DESC"
@@ -847,8 +1287,11 @@ def get_stats(connection: sqlite3.Connection) -> dict[str, Any]:
         """
         SELECT
             COUNT(*) AS total_discovered,
-            SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active,
-            SUM(CASE WHEN eligibility = 'eligible' AND is_active = 1 THEN 1 ELSE 0 END) AS eligible,
+            SUM(CASE WHEN is_active = 1 AND availability_status != 'closed'
+                     THEN 1 ELSE 0 END) AS active,
+            SUM(CASE WHEN eligibility = 'eligible' AND is_active = 1
+                          AND availability_status != 'closed'
+                     THEN 1 ELSE 0 END) AS eligible,
             SUM(CASE WHEN pipeline_status = 'queued' THEN 1 ELSE 0 END) AS queued,
             SUM(CASE WHEN pipeline_status = 'ready' THEN 1 ELSE 0 END) AS ready,
             SUM(CASE WHEN applied_at IS NOT NULL THEN 1 ELSE 0 END) AS applications,
@@ -923,6 +1366,10 @@ def update_tracker(
             updates.append("manual_requested = 1")
             updates.append("manual_requested_at = ?")
             values.append(now)
+        if pipeline_status == "withdrawn":
+            updates.append("outcome_status = 'withdrawn'")
+            updates.append("withdrawn_at = COALESCE(withdrawn_at, ?)")
+            values.append(now)
         add_event(connection, job_id, "status", pipeline_status)
     if outcome_status is not None:
         updates.append("outcome_status = ?")
@@ -959,6 +1406,7 @@ def pending_preparation(
     query = """
         SELECT * FROM jobs
         WHERE pipeline_status = 'queued' AND is_active = 1
+          AND availability_status NOT IN ('closed', 'manual_only')
           AND (
             manual_requested = 1
             OR (
@@ -1022,8 +1470,16 @@ def request_manual_application(
     row = get_job(connection, job_id)
     if row is None:
         return None
-    if not bool(row["is_active"]) or row["pipeline_status"] == "expired":
+    if (
+        not bool(row["is_active"])
+        or row["pipeline_status"] == "expired"
+        or row["availability_status"] == "closed"
+    ):
         raise ValueError("This listing is no longer active")
+    if row["availability_status"] == "manual_only":
+        raise ValueError(
+            "This employer blocks the automated browser; open the application manually"
+        )
     if row["pipeline_status"] in {"applied", "applying", "manual_review", "withdrawn"}:
         raise ValueError(
             f"This listing is already {str(row['pipeline_status']).replace('_', ' ')}"
@@ -1052,6 +1508,7 @@ def manual_application_ids(connection: sqlite3.Connection) -> list[int]:
             """
             SELECT id FROM jobs
             WHERE manual_requested = 1 AND is_active = 1
+              AND availability_status NOT IN ('closed', 'manual_only')
               AND pipeline_status IN ('queued', 'ready', 'failed')
             ORDER BY manual_requested_at ASC, id ASC
             """
@@ -1068,7 +1525,11 @@ def claim_next_job(
 ) -> dict[str, Any] | None:
     connection.execute("BEGIN IMMEDIATE")
     try:
-        clauses = ["pipeline_status IN ('ready', 'failed')", "is_active = 1"]
+        clauses = [
+            "pipeline_status IN ('ready', 'failed')",
+            "is_active = 1",
+            "availability_status NOT IN ('closed', 'manual_only')",
+        ]
         if target_job_id is None:
             clauses.extend(["eligibility = 'eligible'", "discovered_as_new = 1"])
         else:
@@ -1119,7 +1580,11 @@ def claimable_application_count(
 ) -> int:
     """Count jobs that an application worker could atomically claim."""
 
-    clauses = ["pipeline_status IN ('ready', 'failed')", "is_active = 1"]
+    clauses = [
+        "pipeline_status IN ('ready', 'failed')",
+        "is_active = 1",
+        "availability_status NOT IN ('closed', 'manual_only')",
+    ]
     if target_job_id is None:
         clauses.extend(["eligibility = 'eligible'", "discovered_as_new = 1"])
     else:
@@ -1146,6 +1611,8 @@ def mark_apply_result(
     job_id: int,
     result: str,
     detail: str | None = None,
+    *,
+    reason_code: str | None = None,
 ) -> None:
     now = utc_now()
     status_map = {
@@ -1157,10 +1624,43 @@ def mark_apply_result(
         "failed": "failed",
     }
     status = status_map.get(result, "failed")
+    lowered_detail = (detail or "").casefold()
+    access_blocked = reason_code == "access_blocked" or any(
+        marker in lowered_detail
+        for marker in ("http 403", "403 forbidden", "access denied", "access blocked")
+    )
+    current = connection.execute(
+        "SELECT availability_status FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    availability_status = (
+        str(current["availability_status"]) if current is not None else "unknown"
+    )
+    availability_detail: str | None = None
+    availability_checked_at: str | None = None
+    if result == "expired":
+        availability_status = "closed"
+        availability_detail = detail or "Employer application is no longer available"
+        availability_checked_at = now
+    elif access_blocked:
+        status = "manual_review"
+        availability_status = "manual_only"
+        availability_detail = detail or "Employer blocks the automated browser"
+        availability_checked_at = now
+    elif result in {"applied", "review_ready"}:
+        availability_status = "open"
+        availability_detail = None
+        availability_checked_at = now
     applied_at = now if result == "applied" else None
     connection.execute(
         """
         UPDATE jobs SET pipeline_status = ?,
+                        availability_status = ?,
+                        availability_detail = CASE
+                            WHEN ? IS NOT NULL OR ? IN ('open', 'unknown')
+                            THEN ?
+                            ELSE availability_detail
+                        END,
+                        availability_checked_at = COALESCE(?, availability_checked_at),
                         applied_at = COALESCE(?, applied_at),
                         submitted_resume_id = CASE WHEN ? = 'applied'
                             THEN COALESCE(submitted_resume_id, base_resume_id)
@@ -1174,6 +1674,11 @@ def mark_apply_result(
         """,
         (
             status,
+            availability_status,
+            availability_detail,
+            availability_status,
+            availability_detail,
+            availability_checked_at,
             applied_at,
             result,
             result,
@@ -1210,6 +1715,6 @@ def source_status(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     return [
         dict(row)
         for row in connection.execute(
-            "SELECT * FROM sources ORDER BY source_key, path"
+            "SELECT * FROM sources WHERE enabled = 1 ORDER BY source_key, path"
         ).fetchall()
     ]

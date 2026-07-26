@@ -1,6 +1,6 @@
 [project]
 name = "ti-aaa"
-version = "0.3.2"
+version = "0.4.0"
 description = "Tech Internship Autonomous Application Agent powered by community GitHub internship lists"
 readme = "README.md"
 license = "AGPL-3.0-only"

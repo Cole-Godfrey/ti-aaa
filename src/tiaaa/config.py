@@ -38,28 +38,12 @@ SOURCE_DOCUMENTS: tuple[SourceDocument, ...] = (
         season="2027",
     ),
     SourceDocument(
-        key="vanshb03-summer-2027",
-        label="Vansh · 2027 Off-season",
-        repo_url="https://github.com/vanshb03/Summer2027-Internships",
-        branch="dev",
-        path="OFFSEASON_README.md",
-        season="2027 off-season",
-    ),
-    SourceDocument(
         key="simplify-summer-2026",
         label="Simplify & Pitt CSC · Summer 2026",
         repo_url="https://github.com/SimplifyJobs/Summer2026-Internships",
         branch="dev",
         path="README.md",
         season="2026",
-    ),
-    SourceDocument(
-        key="simplify-summer-2026",
-        label="Simplify & Pitt CSC · 2026 Off-season",
-        repo_url="https://github.com/SimplifyJobs/Summer2026-Internships",
-        branch="dev",
-        path="README-Off-Season.md",
-        season="2026 off-season",
     ),
 )
 

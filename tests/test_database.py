@@ -2,19 +2,24 @@ from __future__ import annotations
 
 from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.database import (
+    answer_agent_inputs,
+    answered_agent_inputs,
     claim_next_job,
     claimable_application_count,
     close_connection,
     get_stats,
     ingest_listings,
     init_db,
+    list_agent_inputs,
     list_jobs,
     mark_apply_result,
     mark_prepared,
+    reconcile_source_registry,
     request_manual_application,
+    store_agent_inputs,
     update_tracker,
 )
-from tiaaa.models import InternshipListing
+from tiaaa.models import InternshipListing, SourceDocument
 
 
 def make_listing(source, company: str, role: str, url: str, location: str = "Remote"):
@@ -345,4 +350,167 @@ def test_application_claim_rejects_inactive_and_ineligible_jobs(
 
     assert claimable_application_count(connection, max_attempts=3) == 0
     assert claim_next_job(connection, worker_id="worker-0", max_attempts=3) is None
+    close_connection(path)
+
+
+def test_applications_view_contains_only_submitted_jobs(tmp_path, profile, settings) -> None:
+    path = tmp_path / "applications-only.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    jobs = [
+        make_listing(source, "Acme", "Software Intern", "https://jobs.test/1"),
+        make_listing(source, "Beta", "Data Intern", "https://jobs.test/2"),
+    ]
+    ingest_listings(connection, source, jobs, profile=profile, settings=settings)
+    update_tracker(connection, 2, pipeline_status="applied")
+
+    rows = list_jobs(connection, applied_only=True)
+
+    assert [row["company"] for row in rows] == ["Beta"]
+    assert rows[0]["applied_at"] is not None
+    close_connection(path)
+
+
+def test_employer_closed_listing_is_not_reopened_by_unchanged_source(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "employer-closed.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/closed")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    mark_apply_result(connection, 1, "expired", "Employer page returned 404")
+
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    row = list_jobs(connection)[0]
+
+    assert row["pipeline_status"] == "expired"
+    assert row["availability_status"] == "closed"
+    assert list_jobs(connection, latest=True, active_only=True) == []
+    close_connection(path)
+
+
+def test_access_block_becomes_manual_handoff_instead_of_retry(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "manual-handoff.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/blocked")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+
+    mark_apply_result(
+        connection,
+        1,
+        "needs_review",
+        "Employer returned HTTP 403",
+        reason_code="access_blocked",
+    )
+    row = list_jobs(connection)[0]
+
+    assert row["pipeline_status"] == "manual_review"
+    assert row["availability_status"] == "manual_only"
+    assert claimable_application_count(connection, max_attempts=3, target_job_id=1) == 0
+    close_connection(path)
+
+
+def test_removed_source_document_is_retired_without_deleting_history(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "retired-source.db"
+    connection = init_db(path)
+    retired = SourceDocument(
+        key="retired",
+        label="Retired off-season feed",
+        repo_url="https://github.com/example/retired",
+        branch="main",
+        path="OFFSEASON.md",
+        season="old",
+    )
+    listing = make_listing(retired, "Old Co", "Software Intern", "https://jobs.test/old")
+    ingest_listings(connection, retired, [listing], profile=profile, settings=settings)
+
+    retired_count = reconcile_source_registry(connection, SOURCE_DOCUMENTS)
+    row = list_jobs(connection)[0]
+
+    assert retired_count == 1
+    assert row["is_active"] == 0
+    assert row["pipeline_status"] == "expired"
+    assert connection.execute(
+        "SELECT enabled FROM sources WHERE document_key = ?", (retired.document_key,)
+    ).fetchone()[0] == 0
+    close_connection(path)
+
+
+def test_candidate_agent_inputs_are_saved_and_requeue_prepared_job(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "agent-inputs.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/input")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'manual_review', resume_path = ?
+        WHERE id = 1
+        """,
+        (str(tmp_path / "resume.pdf"),),
+    )
+    connection.commit()
+    saved = store_agent_inputs(
+        connection,
+        1,
+        [
+            {
+                "key": "preferred_team",
+                "label": "Which engineering team do you prefer?",
+                "input_type": "select",
+                "options": ["Platform", "Product"],
+                "required": True,
+            },
+            {
+                "key": "verification_code",
+                "label": "Email verification code",
+                "input_type": "text",
+                "options": [],
+                "required": True,
+            },
+        ],
+    )
+
+    assert [item["input_key"] for item in saved] == ["preferred_team"]
+    job = answer_agent_inputs(connection, 1, {"preferred_team": "Platform"})
+
+    assert job is not None
+    assert job["pipeline_status"] == "ready"
+    assert job["manual_requested"] == 1
+    assert answered_agent_inputs(connection, 1)["preferred_team"]["answer"] == "Platform"
+    close_connection(path)
+
+
+def test_pre_feature_missing_fact_pause_gets_a_legacy_answer_channel(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "legacy-agent-input.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/legacy")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'manual_review',
+                        apply_error = 'Two required fields cannot be answered from the profile'
+        WHERE id = 1
+        """
+    )
+    connection.commit()
+    close_connection(path)
+
+    connection = init_db(path)
+    questions = list_agent_inputs(connection, 1, pending_only=True)
+
+    assert len(questions) == 1
+    assert questions[0]["input_key"] == "legacy_follow_up"
+    assert questions[0]["input_type"] == "textarea"
     close_connection(path)

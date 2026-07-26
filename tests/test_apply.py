@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import tiaaa.apply.runner as runner
+from tiaaa.apply.preview import PreviewCapture
 from tiaaa.apply.prompt import build_prompt
 from tiaaa.apply.runner import (
     _claude_command,
     _extract_agent_text,
     _failure_detail,
     _mcp_config,
+    _parse_agent_result,
     _parse_result,
     _stream_summary,
     run_applications,
@@ -33,6 +35,30 @@ def test_result_parser_accepts_schema_validated_json() -> None:
         "review_ready",
         None,
     )
+
+
+def test_structured_result_carries_safe_candidate_questions() -> None:
+    parsed = _parse_agent_result(
+        """
+        {
+          "status": "NEEDS_REVIEW",
+          "detail": "One required preference is missing",
+          "reason_code": "missing_input",
+          "questions": [{
+            "key": "preferred_team",
+            "label": "Which team do you prefer?",
+            "input_type": "select",
+            "options": ["Platform", "Product"],
+            "required": true
+          }]
+        }
+        """,
+        submit=False,
+    )
+
+    assert parsed.result == "needs_review"
+    assert parsed.reason_code == "missing_input"
+    assert parsed.questions[0]["key"] == "preferred_team"
 
 
 def test_stream_json_text_extraction() -> None:
@@ -178,6 +204,12 @@ def test_prompt_is_truth_constrained_and_stops_before_submit(tmp_path, profile) 
         paths=paths,
         worker_dir=paths.workers,
         submit=False,
+        application_answers={
+            "preferred_team": {
+                "question": "Which team do you prefer?",
+                "answer": "Platform",
+            }
+        },
     )
 
     assert "Never invent or exaggerate" in prompt
@@ -186,6 +218,9 @@ def test_prompt_is_truth_constrained_and_stops_before_submit(tmp_path, profile) 
     assert "do not search LinkedIn, Indeed" in prompt
     assert "Always finish with the required structured result object" in prompt
     assert "browser_navigation_unavailable" in prompt
+    assert "Candidate-supplied answers from an earlier pause" in prompt
+    assert '"answer": "Platform"' in prompt
+    assert "HTTP 401/403" in prompt
 
 
 def test_empty_application_queue_does_not_require_browser_tools(
@@ -202,3 +237,9 @@ def test_empty_application_queue_does_not_require_browser_tools(
     )
 
     assert totals == {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+
+
+def test_live_preview_defaults_to_half_second_capture(tmp_path) -> None:
+    preview = PreviewCapture(port=9330, output_path=tmp_path / "preview.jpg")
+
+    assert preview.interval == 0.5

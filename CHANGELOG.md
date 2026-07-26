@@ -4,6 +4,26 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-25
+
+### Added
+
+- candidate-input checkpoints on the Agent page for ordinary unanswered application fields
+- safe manual-browser handoffs for employer access blocks, CAPTCHAs, verification, and review steps
+- persistent availability state that distinguishes repository presence from employer-confirmed closure
+
+### Changed
+
+- the Applications register now contains only submitted applications and records the submitted resume
+- live browser snapshots now capture and refresh every 0.5 seconds
+- polling is limited to the main README in each of the three explicitly configured repositories
+
+### Fixed
+
+- employer-confirmed closed roles remain closed when they are still present in a repository
+- retired source documents are removed from the active feed without deleting application history
+- yearless posting dates can no longer be interpreted as implausible future dates
+
 ## [0.3.2] - 2026-07-25
 
 ### Fixed

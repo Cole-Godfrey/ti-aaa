@@ -10,21 +10,19 @@ const state = {
   latestSearchTimer: null,
   onboardingStep: 0,
   claudeAuth: null,
+  agentInputSignature: null,
 };
 
 const viewCopy = {
   overview: ["DESK / 01", "Situation report", "Signals from the repository feed and your application register."],
   latest: ["DESK / 02", "Repository inbox", "Inspect current internship listings, open a dossier, and choose what the agent works on."],
-  applications: ["DESK / 03", "Application register", "Outcomes, submitted resumes, and every role already in motion."],
+  applications: ["DESK / 03", "Application register", "A spreadsheet-style record of submitted applications, resumes, and outcomes."],
   live: ["DESK / 04", "Agent wire", "A live trace of the browser worker without keeping this page open."],
   resumes: ["DESK / 05", "Fact archive", "Source resumes the agent may select and tailor without inventing claims."],
   settings: ["DESK / 06", "Operating rules", "Change polling, matching, application boundaries, and local credentials."],
 };
-const pipelineOptions = [
-  ["discovered", "Discovered"], ["queued", "Queued"], ["ready", "Ready"],
-  ["applying", "Applying"], ["manual_review", "Needs review"], ["applied", "Applied"],
-  ["failed", "Failed"], ["skipped", "Skipped"], ["expired", "Expired"],
-  ["withdrawn", "Withdrawn"],
+const applicationPipelineOptions = [
+  ["applied", "Applied"], ["withdrawn", "Withdrawn"],
 ];
 const outcomeOptions = [
   ["none", "No update"], ["oa", "OA received"], ["interview", "Interview"],
@@ -230,23 +228,22 @@ function renderJobs(jobs) {
   state.jobs = jobs;
   const body = element("jobsTableBody");
   if (!jobs.length) {
-    body.innerHTML = '<tr><td colspan="6" class="loading">No internships match this view.</td></tr>';
-    element("tableSummary").textContent = "0 internships shown";
+    body.innerHTML = '<tr><td colspan="6" class="loading">No submitted applications match this view.</td></tr>';
+    element("tableSummary").textContent = "0 submitted applications shown";
     return;
   }
   body.innerHTML = jobs.map(job => {
-    const resumeName = job.submitted_resume_name || job.base_resume_name;
-    const resumeLabel = job.submitted_resume_name ? "submitted" : "selected";
+    const resumeName = job.submitted_resume_name;
     return `<tr data-job-id="${job.id}">
       <td class="role-cell"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)} · ${escapeHtml(job.location || "location not listed")}</span></td>
-      <td><select class="status-select pipeline-select" aria-label="Pipeline status for ${escapeHtml(job.company)}">${optionsMarkup(pipelineOptions, job.pipeline_status)}</select></td>
-      <td class="resume-cell">${resumeName ? `<a href="/api/jobs/${job.id}/resume" target="_blank">${escapeHtml(resumeName)}</a><span>${resumeLabel}</span>` : "—"}</td>
+      <td><select class="status-select pipeline-select" aria-label="Application status for ${escapeHtml(job.company)}">${optionsMarkup(applicationPipelineOptions, job.pipeline_status)}</select></td>
+      <td class="resume-cell">${resumeName ? `<a href="/api/jobs/${job.id}/resume" target="_blank">${escapeHtml(resumeName)}</a><span>submitted</span>` : "Not recorded"}</td>
       <td><select class="status-select outcome-select" aria-label="Outcome for ${escapeHtml(job.company)}">${optionsMarkup(outcomeOptions, job.outcome_status)}</select></td>
-      <td>${escapeHtml(shortDate(job.first_seen_at))}</td>
+      <td>${escapeHtml(shortDate(job.applied_at))}</td>
       <td><a class="open-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer" title="Open application">↗</a></td>
     </tr>`;
   }).join("");
-  element("tableSummary").textContent = `${jobs.length} internship${jobs.length === 1 ? "" : "s"} shown · tracker changes save immediately`;
+  element("tableSummary").textContent = `${jobs.length} submitted application${jobs.length === 1 ? "" : "s"} shown · tracker changes save immediately`;
   body.querySelectorAll(".pipeline-select").forEach(select => select.addEventListener("change", event => {
     updateJob(event.target.closest("tr").dataset.jobId, { pipeline_status: event.target.value });
   }));
@@ -267,7 +264,7 @@ async function updateJob(jobId, payload) {
 }
 
 async function loadJobs() {
-  const parameters = new URLSearchParams({ limit: "250" });
+  const parameters = new URLSearchParams({ view: "applications", limit: "250" });
   const search = value("searchInput");
   const status = element("statusFilter").value;
   if (search) parameters.set("search", search);
@@ -277,6 +274,7 @@ async function loadJobs() {
 }
 
 function jobActionLabel(job) {
+  if (job.availability_status === "manual_only") return "Open manually";
   if (job.manual_requested && ["queued", "ready", "failed"].includes(job.pipeline_status)) return "Queued";
   const labels = {
     queued: "Start agent",
@@ -292,6 +290,7 @@ function jobActionLabel(job) {
 }
 
 function jobActionDisabled(job) {
+  if (job.availability_status === "manual_only") return !job.is_active;
   return !job.is_active || Boolean(job.manual_requested) || ["applying", "manual_review", "applied", "expired", "withdrawn"].includes(job.pipeline_status);
 }
 
@@ -311,7 +310,9 @@ function renderLatestJobs() {
     <td>${escapeHtml(job.location || "Not listed")}</td>
     <td><span class="fit-mark ${job.eligibility === "eligible" ? "good" : "warn"}">${escapeHtml(job.fit_score ?? "—")}/10</span></td>
     <td><span class="state-stamp state-${escapeHtml(job.pipeline_status)}">${escapeHtml(job.pipeline_status.replaceAll("_", " "))}</span></td>
-    <td class="row-actions"><button class="text-button detail-job" type="button">Details</button><button class="mini-apply" type="button"${jobActionDisabled(job) ? " disabled" : ""}>${escapeHtml(jobActionLabel(job))}</button></td>
+    <td class="row-actions"><button class="text-button detail-job" type="button">Details</button>${job.availability_status === "manual_only"
+      ? `<a class="mini-apply manual-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer">Open manually</a>`
+      : `<button class="mini-apply" type="button"${jobActionDisabled(job) ? " disabled" : ""}>${escapeHtml(jobActionLabel(job))}</button>`}</td>
   </tr>`).join("");
   element("latestSummary").textContent = `${jobs.length} active listing${jobs.length === 1 ? "" : "s"} · ordered by repository posting date`;
   body.querySelectorAll(".row-detail, .detail-job").forEach(button => button.addEventListener("click", event => openJobDetail(event.target.closest("tr").dataset.jobId)));
@@ -362,6 +363,11 @@ async function openJobDetail(jobId) {
 }
 
 async function requestJobApplication(jobId, button) {
+  const selected = state.latestJobs.find(job => String(job.id) === String(jobId)) || state.selectedJob;
+  if (selected?.availability_status === "manual_only") {
+    window.open(selected.application_url, "_blank", "noopener,noreferrer");
+    return;
+  }
   if (!state.claudeAuth?.logged_in) {
     closeJobDetail();
     setView("settings");
@@ -450,6 +456,89 @@ function renderWorkers(items) {
       <span class="worker-state ${escapeHtml(worker.status)}">${escapeHtml(worker.status)}</span></div>
       <div class="preview-frame">${worker.preview_available ? `<img src="${escapeHtml(worker.preview_url)}?t=${Date.now()}" alt="Current browser snapshot for ${escapeHtml(worker.worker_id)}">` : '<p class="preview-empty">A browser snapshot appears here when a worker starts.</p>'}</div>
       <p class="worker-message">${escapeHtml(worker.message || "Waiting for the next cycle")}</p></article>`).join("") : '<div class="empty tall">No browser worker has run yet. Enable browser automation in Settings, or keep watch-and-prepare mode.</div>';
+  renderAgentInputs(items);
+}
+
+function agentInputControl(question) {
+  const key = escapeHtml(question.input_key);
+  const current = question.answer ?? "";
+  const required = question.required ? " required" : "";
+  if (question.input_type === "select") {
+    return `<select data-agent-key="${key}"${required}><option value="">Choose an answer</option>${(question.options || []).map(option => `<option value="${escapeHtml(option)}"${String(option) === String(current) ? " selected" : ""}>${escapeHtml(option)}</option>`).join("")}</select>`;
+  }
+  if (question.input_type === "boolean") {
+    return `<select data-agent-key="${key}" data-agent-kind="boolean"${required}><option value="">Choose yes or no</option><option value="true"${current === true ? " selected" : ""}>Yes</option><option value="false"${current === false ? " selected" : ""}>No</option></select>`;
+  }
+  if (question.input_type === "textarea") {
+    return `<textarea data-agent-key="${key}" rows="3"${required}>${escapeHtml(current)}</textarea>`;
+  }
+  const type = ["email", "tel", "number", "date"].includes(question.input_type) ? question.input_type : "text";
+  return `<input data-agent-key="${key}" type="${type}" value="${escapeHtml(current)}"${required}>`;
+}
+
+function renderAgentInputs(workers) {
+  const actionable = workers.filter(worker =>
+    worker.job_id && ((worker.questions || []).length || worker.pipeline_status === "manual_review")
+  );
+  const signature = JSON.stringify(actionable.map(worker => ({
+    job_id: worker.job_id,
+    pipeline_status: worker.pipeline_status,
+    availability_status: worker.availability_status,
+    message: worker.message,
+    review_detail: worker.review_detail,
+    questions: worker.questions,
+  })));
+  if (signature === state.agentInputSignature) return;
+  state.agentInputSignature = signature;
+  const panel = element("agentInputPanel");
+  if (!actionable.length) {
+    panel.innerHTML = '<article class="agent-checkpoint quiet"><span>INPUT CHANNEL</span><p>The agent has not requested any information.</p></article>';
+    return;
+  }
+  panel.innerHTML = actionable.map(worker => {
+    const questions = worker.questions || [];
+    const resumeName = worker.submitted_resume_name || worker.base_resume_name || "Prepared resume";
+    if (questions.length && worker.availability_status !== "manual_only") {
+      return `<article class="agent-checkpoint" data-agent-job="${worker.job_id}">
+        <header><div><p class="kicker">CANDIDATE INPUT NEEDED</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>${questions.length} field${questions.length === 1 ? "" : "s"}</span></header>
+        <p class="checkpoint-note">${escapeHtml(worker.review_detail || "Answer only with truthful information. TI-AAA saves these locally and restarts this application with your answers.")}</p>
+        <form class="agent-input-form">${questions.map(question => `<label>${escapeHtml(question.label)}${question.required ? "" : " <span>optional</span>"}${agentInputControl(question)}</label>`).join("")}
+          <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><button class="button ink" type="submit">Save answers & continue</button></div>
+        </form></article>`;
+    }
+    const blocked = worker.availability_status === "manual_only";
+    return `<article class="agent-checkpoint handoff">
+      <header><div><p class="kicker">${blocked ? "EMPLOYER ACCESS BLOCK" : "MANUAL CHECKPOINT"}</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>${blocked ? "Manual browser" : "Your review"}</span></header>
+      <p class="checkpoint-note">${escapeHtml(worker.availability_detail || worker.review_detail || worker.message || "The agent cannot safely continue this step on its own.")}</p>
+      <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><div>${worker.resume_url ? `<a class="text-button" href="${escapeHtml(worker.resume_url)}" target="_blank">Open resume</a>` : ""}<a class="button ink" href="${safeExternalUrl(worker.application_url)}" target="_blank" rel="noopener noreferrer">Open application</a></div></div>
+    </article>`;
+  }).join("");
+  panel.querySelectorAll(".agent-input-form").forEach(form => form.addEventListener("submit", submitAgentInputs));
+}
+
+async function submitAgentInputs(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const card = form.closest("[data-agent-job]");
+  const button = form.querySelector('button[type="submit"]');
+  const answers = {};
+  form.querySelectorAll("[data-agent-key]").forEach(control => {
+    let answer = control.value;
+    if (control.dataset.agentKind === "boolean" && answer) answer = answer === "true";
+    answers[control.dataset.agentKey] = answer;
+  });
+  button.disabled = true;
+  try {
+    await api(`/api/jobs/${card.dataset.agentJob}/inputs`, {
+      method: "POST", body: JSON.stringify({ answers }),
+    });
+    state.agentInputSignature = null;
+    showToast("Answers saved; the agent is continuing");
+    await refreshLive();
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
 }
 
 function renderEvents(items) {
@@ -457,10 +546,18 @@ function renderEvents(items) {
     <div class="event-item"><i></i><p>${escapeHtml(item.company || "System")} <span>· ${escapeHtml(item.role || item.event_type)} · ${escapeHtml(item.event_type.replaceAll("_", " "))}${item.detail ? ` · ${escapeHtml(item.detail)}` : ""}</span></p><time>${escapeHtml(relativeTime(item.created_at))}</time></div>`).join("") : '<div class="empty">No activity recorded yet.</div>';
 }
 
-async function refreshLive() {
-  const [workers, events] = await Promise.all([api("/api/workers"), api("/api/events?limit=18")]);
+async function refreshWorkers() {
+  const workers = await api("/api/workers");
   renderWorkers(workers.items);
+}
+
+async function refreshEvents() {
+  const events = await api("/api/events?limit=18");
   renderEvents(events.items);
+}
+
+async function refreshLive() {
+  await Promise.all([refreshWorkers(), refreshEvents()]);
 }
 
 function secretLabel(status) {
@@ -765,5 +862,8 @@ element("pauseButton").addEventListener("click", async () => {
 initialize();
 setInterval(() => refreshAll().catch(error => showToast(error.message, true)), 15000);
 setInterval(() => {
-  if (state.activeView === "live") refreshLive().catch(() => {});
+  if (state.activeView === "live") refreshWorkers().catch(() => {});
+}, 500);
+setInterval(() => {
+  if (state.activeView === "live") refreshEvents().catch(() => {});
 }, 2500);

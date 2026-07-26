@@ -18,6 +18,7 @@ from tiaaa.config import (
     load_settings,
 )
 from tiaaa.database import (
+    answer_agent_inputs,
     get_app_state,
     get_connection,
     init_db,
@@ -117,6 +118,28 @@ class AutomationService:
             connection,
             "service_message",
             f"Application requested for {job['company']} · {job['role']}",
+        )
+        self.trigger()
+        return job
+
+    def continue_application(
+        self,
+        job_id: int,
+        answers: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Save candidate answers and restart the same prepared application."""
+
+        connection = get_connection(self.db_path)
+        if bool(get_app_state(connection).get("service_paused")):
+            raise RuntimeError("Resume the background service before continuing an application")
+        job = answer_agent_inputs(connection, job_id, answers)
+        if job is None:
+            raise LookupError("Job not found")
+        set_app_state(connection, "service_status", "requested")
+        set_app_state(
+            connection,
+            "service_message",
+            f"Continuing application for {job['company']} · {job['role']}",
         )
         self.trigger()
         return job
