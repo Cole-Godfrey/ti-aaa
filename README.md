@@ -417,6 +417,7 @@ OA and interview rates use submitted applications as the denominator. Milestones
 - Secret values are never returned by the configuration API.
 - The dashboard binds to loopback by default and has no user authentication. Do not expose port 8787 publicly without an authenticated reverse proxy.
 - Debug agent output is off by default because form output can contain personal data.
+- Failed workers retain only a private, sanitized diagnostic summary (tool names, MCP state, exit state, and turn count); prompts, page text, and candidate data are excluded.
 - Browser prompts treat webpages as untrusted and prohibit invented facts.
 - CAPTCHAs, MFA, SSO, email verification, assessments, and unknown required answers route to manual review.
 - The worker refuses payment, banking, SSN, government-ID, biometric, camera, microphone, screen-share, and device-location requests.

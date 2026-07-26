@@ -4,6 +4,15 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-25
+
+### Fixed
+
+- browser workers now use schema-validated final statuses instead of relying only on a free-form `RESULT:` line
+- missing Claude results now report whether execution, browser permissions, MCP startup, or pre-navigation termination failed
+- privacy-safe worker diagnostics retain execution metadata without storing prompts, page text, or candidate data
+- browser prompts explicitly require navigation as the first action and a typed result on every normal completion
+
 ## [0.3.0] - 2026-07-20
 
 ### Added
