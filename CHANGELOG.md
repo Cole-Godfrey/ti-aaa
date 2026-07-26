@@ -4,6 +4,14 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-25
+
+### Fixed
+
+- Docker browser workers now recover stale Chromium singleton locks left by a recreated container
+- Chrome startup failures now include a concise stderr reason instead of only an exit code
+- stale-lock recovery remains disabled for foreign-host native profiles and preserves locks with a live process or socket
+
 ## [0.3.1] - 2026-07-25
 
 ### Fixed

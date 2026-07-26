@@ -138,6 +138,8 @@ docker compose up -d --build
 
 `docker compose down` removes the container but keeps the named `tiaaa-data` volume. **Do not run `docker compose down -v` unless you intend to delete the database, profiles, keys, resumes, and browser state.**
 
+TI-AAA automatically recovers stale Chromium lock files left when Docker recreates the container. If an older installation reports `Chrome exited before opening its debug port (21)`, pull the latest release and run `docker compose up -d --build`; do not delete the data volume.
+
 To make a simple backup while the container exists:
 
 ```bash

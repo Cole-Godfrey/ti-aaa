@@ -8,6 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TIAAA_HOME=/data \
     TIAAA_FORCE_HEADLESS=1 \
     TIAAA_CHROME_NO_SANDBOX=1 \
+    TIAAA_DOCKER=1 \
     TIAAA_PLAYWRIGHT_MCP_COMMAND=playwright-mcp \
     CHROME_PATH=/usr/bin/chromium \
     PATH=/opt/venv/bin:$PATH
