@@ -8,15 +8,17 @@ import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tiaaa.apply.chrome import launch_chrome, stop_chrome
+from tiaaa.apply.chrome import launch_chrome, stop_chrome, stop_process_tree
 from tiaaa.apply.preview import PreviewCapture
 from tiaaa.apply.prompt import build_prompt
 from tiaaa.config import AppPaths
@@ -106,22 +108,28 @@ _RESULT_SCHEMA = {
     "additionalProperties": False,
 }
 _MISSING_RESULT = "agent returned no result code"
-_PLAYWRIGHT_TOOLS = (
-    "mcp__playwright__browser_click",
-    "mcp__playwright__browser_file_upload",
-    "mcp__playwright__browser_fill_form",
-    "mcp__playwright__browser_handle_dialog",
-    "mcp__playwright__browser_hover",
-    "mcp__playwright__browser_navigate",
-    "mcp__playwright__browser_navigate_back",
-    "mcp__playwright__browser_navigate_forward",
-    "mcp__playwright__browser_press_key",
-    "mcp__playwright__browser_select_option",
-    "mcp__playwright__browser_snapshot",
-    "mcp__playwright__browser_tabs",
-    "mcp__playwright__browser_take_screenshot",
-    "mcp__playwright__browser_type",
-    "mcp__playwright__browser_wait_for",
+BASE_MCP_PORT = 9430
+_PLAYWRIGHT_SERVER_NAME = "tiaaa_browser"
+_PLAYWRIGHT_TOOL_PREFIX = f"mcp__{_PLAYWRIGHT_SERVER_NAME}__"
+_PLAYWRIGHT_TOOLS = tuple(
+    f"{_PLAYWRIGHT_TOOL_PREFIX}{name}"
+    for name in (
+        "browser_click",
+        "browser_file_upload",
+        "browser_fill_form",
+        "browser_handle_dialog",
+        "browser_hover",
+        "browser_navigate",
+        "browser_navigate_back",
+        "browser_navigate_forward",
+        "browser_press_key",
+        "browser_select_option",
+        "browser_snapshot",
+        "browser_tabs",
+        "browser_take_screenshot",
+        "browser_type",
+        "browser_wait_for",
+    )
 )
 
 
@@ -133,26 +141,97 @@ class AgentResult:
     questions: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _mcp_config(port: int, *, windows: bool | None = None) -> dict[str, Any]:
+def _mcp_server_command(
+    cdp_port: int,
+    mcp_port: int,
+    *,
+    windows: bool | None = None,
+) -> list[str]:
     package = os.environ.get("TIAAA_PLAYWRIGHT_MCP_PACKAGE", "@playwright/mcp@0.0.78")
     windows = platform.system() == "Windows" if windows is None else windows
     installed_command = os.environ.get("TIAAA_PLAYWRIGHT_MCP_COMMAND")
     command = installed_command or ("cmd" if windows else "npx")
     prefix = [] if installed_command else (["/c", "npx"] if windows else [])
     package_args = [] if installed_command else ["-y", package]
+    return [
+        command,
+        *prefix,
+        *package_args,
+        f"--cdp-endpoint=http://127.0.0.1:{cdp_port}",
+        "--viewport-size=1280x900",
+        "--host=127.0.0.1",
+        "--allowed-hosts=*",
+        f"--port={mcp_port}",
+    ]
+
+
+def _mcp_config(port: int) -> dict[str, Any]:
+    """Point Claude at a bridge that is already listening before Claude starts."""
+
     return {
         "mcpServers": {
-            "playwright": {
-                "command": command,
-                "args": prefix
-                + package_args
-                + [
-                    f"--cdp-endpoint=http://127.0.0.1:{port}",
-                    "--viewport-size=1280x900",
-                ],
+            _PLAYWRIGHT_SERVER_NAME: {
+                "type": "sse",
+                "url": f"http://localhost:{port}/sse",
             }
         }
     }
+
+
+def _port_is_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_for_mcp_bridge(
+    port: int,
+    process: subprocess.Popen[bytes],
+    timeout: float = 30,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                "Playwright browser bridge exited before opening "
+                f"its local port ({process.returncode})"
+            )
+        if _port_is_open(port):
+            return
+        time.sleep(0.1)
+    raise TimeoutError(
+        f"Playwright browser bridge did not open local port {port} within {timeout:g}s"
+    )
+
+
+def _launch_mcp_bridge(
+    *,
+    cdp_port: int,
+    mcp_port: int,
+) -> subprocess.Popen[bytes]:
+    if _port_is_open(mcp_port):
+        raise RuntimeError(
+            f"Browser bridge port {mcp_port} is already in use; stop that process "
+            "or use fewer workers"
+        )
+    command = _mcp_server_command(cdp_port, mcp_port)
+    kwargs: dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    process = subprocess.Popen(command, **kwargs)
+    try:
+        _wait_for_mcp_bridge(mcp_port, process)
+    except Exception:
+        stop_process_tree(process)
+        raise
+    return process
 
 
 def _extract_agent_text(output: str) -> str:
@@ -209,9 +288,9 @@ def _stream_summary(output: str, *, returncode: int) -> dict[str, Any]:
                 if not isinstance(block, dict) or block.get("type") != "tool_use":
                     continue
                 raw_name = str(block.get("name", ""))
-                if not raw_name.startswith("mcp__playwright__"):
+                if not raw_name.startswith(_PLAYWRIGHT_TOOL_PREFIX):
                     continue
-                name = raw_name.replace("mcp__playwright__", "browser:")
+                name = raw_name.replace(_PLAYWRIGHT_TOOL_PREFIX, "browser:")
                 summary["browser_actions"].append(name[:120])
         elif message_type == "result":
             summary["result_subtype"] = str(message.get("subtype") or "")[:80] or None
@@ -238,6 +317,22 @@ def _stream_summary(output: str, *, returncode: int) -> dict[str, Any]:
             ]
     summary["browser_actions"] = summary["browser_actions"][-30:]
     return summary
+
+
+def _bridge_needs_retry(summary: dict[str, Any]) -> bool:
+    return not summary["browser_actions"] and any(
+        server["name"] == _PLAYWRIGHT_SERVER_NAME
+        and server["status"].casefold() == "pending"
+        for server in summary["mcp_servers"]
+    )
+
+
+def _bridge_is_unavailable(summary: dict[str, Any]) -> bool:
+    return not summary["browser_actions"] and any(
+        server["name"] == _PLAYWRIGHT_SERVER_NAME
+        and server["status"].casefold() != "connected"
+        for server in summary["mcp_servers"]
+    )
 
 
 def _failure_detail(output: str, *, returncode: int) -> str:
@@ -421,22 +516,33 @@ def _run_agent(
     environment.pop("CLAUDECODE", None)
     environment.pop("CLAUDE_CODE_ENTRYPOINT", None)
     try:
-        process = subprocess.run(
-            command,
-            input=prompt,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=worker_dir,
-            env=environment,
-            timeout=timeout,
-            check=False,
-        )
+        for agent_launch in range(2):
+            process = subprocess.run(
+                command,
+                input=prompt,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=worker_dir,
+                env=environment,
+                timeout=timeout,
+                check=False,
+            )
+            summary = _stream_summary(process.stdout, returncode=process.returncode)
+            if agent_launch == 0 and _bridge_needs_retry(summary):
+                log.warning(
+                    "Browser bridge was still pending for worker-%s; retrying Claude once",
+                    worker_id,
+                )
+                time.sleep(0.5)
+                continue
+            break
     except subprocess.TimeoutExpired:
         return AgentResult("failed", f"agent timed out after {timeout}s")
 
+    summary = _stream_summary(process.stdout, returncode=process.returncode)
     agent_text = _extract_agent_text(process.stdout)
     if os.environ.get("TIAAA_DEBUG_AGENT_OUTPUT") == "1":
         attempt = max(1, int(job.get("apply_attempts") or 1))
@@ -447,7 +553,11 @@ def _run_agent(
         with suppress(OSError):
             debug_path.chmod(0o600)
     parsed = _parse_agent_result(agent_text, submit=submit)
-    if process.returncode != 0 or parsed.detail == _MISSING_RESULT:
+    if (
+        process.returncode != 0
+        or parsed.detail == _MISSING_RESULT
+        or _bridge_is_unavailable(summary)
+    ):
         parsed = AgentResult(
             "failed",
             _failure_detail(process.stdout, returncode=process.returncode),
@@ -477,6 +587,7 @@ def _worker(
     automation = settings.get("automation", {})
     connection = get_connection(db_path)
     chrome_process = None
+    mcp_process = None
     preview: PreviewCapture | None = None
     worker_name = f"worker-{worker_id}"
     preview_path = paths.previews / f"{worker_name}.jpg"
@@ -497,6 +608,15 @@ def _worker(
                 or os.environ.get("TIAAA_FORCE_HEADLESS") == "1"
             ),
         )
+        mcp_port = BASE_MCP_PORT + worker_id
+        update_worker_state(
+            connection,
+            worker_name,
+            status="starting",
+            message="Connecting the browser controls",
+            screenshot_path=str(preview_path.resolve()),
+        )
+        mcp_process = _launch_mcp_bridge(cdp_port=port, mcp_port=mcp_port)
         preview = PreviewCapture(port=port, output_path=preview_path)
         preview.start()
         update_worker_state(
@@ -529,7 +649,7 @@ def _worker(
                     profile=profile,
                     paths=paths,
                     worker_id=worker_id,
-                    port=port,
+                    port=mcp_port,
                     model=str(automation.get("claude_model", "sonnet")),
                     timeout=int(automation.get("timeout_seconds", 600)),
                     submit=submit,
@@ -607,6 +727,7 @@ def _worker(
     finally:
         if preview is not None:
             preview.stop()
+        stop_process_tree(mcp_process)
         stop_chrome(chrome_process)
         current = connection.execute(
             "SELECT job_id, company, role, message FROM worker_state WHERE worker_id = ?",

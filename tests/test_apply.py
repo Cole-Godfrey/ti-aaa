@@ -4,10 +4,13 @@ import tiaaa.apply.runner as runner
 from tiaaa.apply.preview import PreviewCapture
 from tiaaa.apply.prompt import build_prompt
 from tiaaa.apply.runner import (
+    _bridge_is_unavailable,
+    _bridge_needs_retry,
     _claude_command,
     _extract_agent_text,
     _failure_detail,
     _mcp_config,
+    _mcp_server_command,
     _parse_agent_result,
     _parse_result,
     _stream_summary,
@@ -101,7 +104,7 @@ def test_stream_json_ignores_intermediate_result_in_assistant_text() -> None:
 def test_missing_result_reports_pre_navigation_failure_without_retaining_text() -> None:
     output = (
         '{"type":"system","subtype":"init","mcp_servers":'
-        '[{"name":"playwright","status":"connected"}]}\n'
+        '[{"name":"tiaaa_browser","status":"connected"}]}\n'
         '{"type":"assistant","message":{"content":[{"type":"text",'
         '"text":"Candidate email nobody@example.com"}]}}\n'
         '{"type":"result","subtype":"success","is_error":false,'
@@ -138,7 +141,7 @@ def test_stream_error_and_permission_denial_are_actionable() -> None:
 def test_safe_stream_summary_counts_only_browser_actions() -> None:
     output = (
         '{"type":"assistant","message":{"content":['
-        '{"type":"tool_use","name":"mcp__playwright__browser_navigate"},'
+        '{"type":"tool_use","name":"mcp__tiaaa_browser__browser_navigate"},'
         '{"type":"tool_use","name":"StructuredOutput"}]}}\n'
     )
 
@@ -150,37 +153,57 @@ def test_safe_stream_summary_counts_only_browser_actions() -> None:
 def test_claude_session_is_restricted_to_safe_playwright_tools(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("TIAAA_PLAYWRIGHT_MCP_PACKAGE", raising=False)
     monkeypatch.delenv("TIAAA_PLAYWRIGHT_MCP_COMMAND", raising=False)
-    config = _mcp_config(9330, windows=False)
+    config = _mcp_config(9430)
+    bridge = _mcp_server_command(9330, 9430, windows=False)
     command = _claude_command(model="sonnet", config_path=tmp_path / "mcp.json")
     allowed = command[command.index("--allowedTools") + 1]
 
-    assert config["mcpServers"]["playwright"]["args"][1] == "@playwright/mcp@0.0.78"
+    assert config["mcpServers"]["tiaaa_browser"] == {
+        "type": "sse",
+        "url": "http://localhost:9430/sse",
+    }
+    assert bridge[:3] == ["npx", "-y", "@playwright/mcp@0.0.78"]
+    assert "--allowed-hosts=*" in bridge
+    assert "--port=9430" in bridge
     assert "--strict-mcp-config" in command
     assert command[command.index("--tools") + 1] == ""
     assert command[command.index("--permission-mode") + 1] == "dontAsk"
     schema = command[command.index("--json-schema") + 1]
     assert '"REVIEW_READY"' in schema
     assert '"additionalProperties":false' in schema
-    assert "mcp__playwright__browser_navigate" in allowed
+    assert "mcp__tiaaa_browser__browser_navigate" in allowed
     assert "run_code" not in allowed
 
 
-def test_windows_mcp_config_wraps_npx_with_cmd(monkeypatch) -> None:
+def test_windows_mcp_server_wraps_npx_with_cmd(monkeypatch) -> None:
     monkeypatch.delenv("TIAAA_PLAYWRIGHT_MCP_PACKAGE", raising=False)
     monkeypatch.delenv("TIAAA_PLAYWRIGHT_MCP_COMMAND", raising=False)
-    server = _mcp_config(9330, windows=True)["mcpServers"]["playwright"]
+    command = _mcp_server_command(9330, 9430, windows=True)
 
-    assert server["command"] == "cmd"
-    assert server["args"][:4] == ["/c", "npx", "-y", "@playwright/mcp@0.0.78"]
+    assert command[:5] == ["cmd", "/c", "npx", "-y", "@playwright/mcp@0.0.78"]
 
 
 def test_container_can_use_preinstalled_playwright_mcp(monkeypatch) -> None:
     monkeypatch.setenv("TIAAA_PLAYWRIGHT_MCP_COMMAND", "playwright-mcp")
-    server = _mcp_config(9330, windows=False)["mcpServers"]["playwright"]
+    command = _mcp_server_command(9330, 9430, windows=False)
 
-    assert server["command"] == "playwright-mcp"
-    assert server["args"][0] == "--cdp-endpoint=http://127.0.0.1:9330"
-    assert "@playwright/mcp@0.0.78" not in server["args"]
+    assert command[0] == "playwright-mcp"
+    assert command[1] == "--cdp-endpoint=http://127.0.0.1:9330"
+    assert "@playwright/mcp@0.0.78" not in command
+
+
+def test_pending_browser_bridge_is_retried_and_reported_as_unavailable() -> None:
+    summary = {
+        "mcp_servers": [{"name": "tiaaa_browser", "status": "pending"}],
+        "browser_actions": [],
+    }
+
+    assert _bridge_needs_retry(summary) is True
+    assert _bridge_is_unavailable(summary) is True
+
+    summary["browser_actions"] = ["browser:browser_navigate"]
+    assert _bridge_needs_retry(summary) is False
+    assert _bridge_is_unavailable(summary) is False
 
 
 def test_prompt_is_truth_constrained_and_stops_before_submit(tmp_path, profile) -> None:

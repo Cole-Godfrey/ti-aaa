@@ -275,3 +275,6 @@ def test_agent_ui_declares_half_second_refresh_and_input_channel(tmp_path) -> No
     assert "0.5 second snapshots" in index
     assert "}, 500);" in javascript
     assert "Save answers & continue" in javascript
+    assert "function listingDate(postingDate, firstSeenAt)" in javascript
+    assert "job.posting_date || shortDate(job.first_seen_at)" not in javascript
+    assert javascript.count("listingDate(job.posting_date, job.first_seen_at)") == 2

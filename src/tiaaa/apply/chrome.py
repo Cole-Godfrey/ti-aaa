@@ -189,5 +189,11 @@ def launch_chrome(
 
 
 def stop_chrome(process: subprocess.Popen[bytes] | None) -> None:
+    stop_process_tree(process)
+
+
+def stop_process_tree(process: subprocess.Popen[bytes] | None) -> None:
+    """Stop a managed subprocess and any children it created."""
+
     if process is not None:
         _terminate_tree(process)

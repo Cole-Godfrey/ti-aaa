@@ -90,6 +90,18 @@ function shortDate(raw) {
   return Number.isNaN(time.getTime()) ? "—" : time.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "2-digit" });
 }
 
+function listingDate(postingDate, firstSeenAt) {
+  const raw = postingDate || firstSeenAt;
+  if (!raw) return "DATE NOT LISTED";
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(raw));
+  const time = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+    : new Date(raw);
+  return Number.isNaN(time.getTime())
+    ? "DATE NOT LISTED"
+    : time.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 function showToast(message, error = false) {
   const toast = element("toast");
   toast.textContent = message;
@@ -305,7 +317,7 @@ function renderLatestJobs() {
     return;
   }
   body.innerHTML = jobs.map(job => `<tr data-job-id="${job.id}">
-    <td class="date-cell">${escapeHtml(job.posting_date || shortDate(job.first_seen_at))}</td>
+    <td class="date-cell">${escapeHtml(listingDate(job.posting_date, job.first_seen_at))}</td>
     <td class="role-cell"><button class="row-detail" type="button"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)}</span></button></td>
     <td>${escapeHtml(job.location || "Not listed")}</td>
     <td><span class="fit-mark ${job.eligibility === "eligible" ? "good" : "warn"}">${escapeHtml(job.fit_score ?? "—")}/10</span></td>
@@ -341,7 +353,7 @@ async function openJobDetail(jobId) {
     const sources = String(job.source_labels || "Repository source").split(",");
     const events = (job.events || []).slice(0, 6);
     element("jobDetailContent").innerHTML = `
-      <p class="drawer-kicker">${escapeHtml(job.posting_date || "DATE NOT LISTED")}</p>
+      <p class="drawer-kicker">${escapeHtml(listingDate(job.posting_date, job.first_seen_at))}</p>
       <h2 id="jobDetailTitle">${escapeHtml(job.role)}</h2><h3>${escapeHtml(job.company)}</h3>
       <dl class="job-facts">
         <div><dt>Location</dt><dd>${escapeHtml(job.location || "Not listed")}</dd></div>
