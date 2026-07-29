@@ -4,6 +4,18 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-28
+
+### Added
+
+- application outcome analytics by resume, role family, source repository, location, and portal
+- configurable browser and SMTP email alerts for agent input, submissions, failures, OAs, interviews, and offers
+- a persistent DevTools screencast delivered to the Agent view over a local WebSocket
+
+### Changed
+
+- the Agent view now paints frames into a stable canvas and retains the private JPEG endpoint as a fallback
+
 ## [0.4.0] - 2026-07-25
 
 ### Added

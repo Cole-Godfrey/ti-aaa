@@ -37,6 +37,7 @@ from tiaaa.database import (
     source_status,
     update_tracker,
 )
+from tiaaa.notifications import NotificationDispatcher
 from tiaaa.resumes import import_legacy_resume
 
 logging.basicConfig(
@@ -530,6 +531,10 @@ def mark(
     if row is None:
         console.print(f"[red]Job ID {job_id} was not found.[/red]")
         raise typer.Exit(code=1)
+    try:
+        NotificationDispatcher(paths).flush()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Notification delivery skipped: %s", exc)
     console.print(f"[green]Updated[/green] {row['company']} · {row['role']}")
 
 

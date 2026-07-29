@@ -20,9 +20,10 @@
         <button class="nav-item active" data-view-target="overview"><span>01</span>Overview</button>
         <button class="nav-item" data-view-target="latest"><span>02</span>Latest jobs</button>
         <button class="nav-item" data-view-target="applications"><span>03</span>Applications</button>
-        <button class="nav-item" data-view-target="live"><span>04</span>Agent</button>
-        <button class="nav-item" data-view-target="resumes"><span>05</span>Resumes</button>
-        <button class="nav-item" data-view-target="settings"><span>06</span>Settings</button>
+        <button class="nav-item" data-view-target="analytics"><span>04</span>Analytics</button>
+        <button class="nav-item" data-view-target="live"><span>05</span>Agent</button>
+        <button class="nav-item" data-view-target="resumes"><span>06</span>Resumes</button>
+        <button class="nav-item" data-view-target="settings"><span>07</span>Settings</button>
       </nav>
 
       <div class="rail-card">
@@ -130,10 +131,39 @@
         </article>
       </section>
 
+      <section class="view" data-view="analytics">
+        <div class="analytics-intro">
+          <div><p class="kicker">RESPONSE NOTEBOOK</p><h2>What is converting</h2><p>Compare outcomes by the resume sent, role family, source repository, location, or application portal. Only submitted applications count.</p></div>
+          <p class="sample-note">Rates are directional. A small sample can move sharply after one response.</p>
+        </div>
+        <div class="analytics-summary">
+          <div><span>Submitted</span><strong id="analyticsApplications">—</strong></div>
+          <div><span>OA rate</span><strong id="analyticsOaRate">—</strong></div>
+          <div><span>Interview rate</span><strong id="analyticsInterviewRate">—</strong></div>
+          <div><span>Offer rate</span><strong id="analyticsOfferRate">—</strong></div>
+        </div>
+        <article class="panel analytics-panel">
+          <div class="analytics-switcher" role="tablist" aria-label="Analytics breakdown">
+            <button class="active" data-analytics-dimension="resume" type="button">Resume</button>
+            <button data-analytics-dimension="role_family" type="button">Role family</button>
+            <button data-analytics-dimension="source" type="button">Source repo</button>
+            <button data-analytics-dimension="location" type="button">Location</button>
+            <button data-analytics-dimension="portal" type="button">Portal</button>
+          </div>
+          <div class="table-wrap">
+            <table class="analytics-table">
+              <thead><tr><th id="analyticsDimensionHeading">Resume</th><th>Applications</th><th>OA</th><th>OA rate</th><th>Interviews</th><th>Interview rate</th><th>Offers</th></tr></thead>
+              <tbody id="analyticsBody"><tr><td colspan="7" class="loading">Reading submitted application outcomes…</td></tr></tbody>
+            </table>
+          </div>
+          <p id="analyticsSummary" class="table-summary"></p>
+        </article>
+      </section>
+
       <section class="view" data-view="live">
         <div class="live-intro">
-          <div><p class="kicker">BROWSER WORKERS</p><h2>Watch the agent work</h2><p>Local snapshots refresh while a form is being filled. They can contain personal information, so they never leave this machine.</p></div>
-          <span class="tag">0.5 second snapshots</span>
+          <div><p class="kicker">BROWSER WORKERS</p><h2>Watch the agent work</h2><p>The browser is streamed into a stable canvas while a form is being filled. Frames can contain personal information, so they never leave this machine.</p></div>
+          <span class="tag">Local browser stream</span>
         </div>
         <div id="workerGrid" class="worker-grid"></div>
         <div id="agentInputPanel" class="agent-input-stack"></div>
@@ -261,6 +291,37 @@
             <div id="claudeCodePanel" class="auth-code-panel hidden">
               <p><a id="claudeLoginLink" target="_blank" rel="noopener noreferrer">Open Claude sign-in</a>, finish signing in, then paste its one-time code here.</p>
               <div class="auth-code-row"><input id="claudeLoginCode" autocomplete="one-time-code" placeholder="Paste one-time code"><button id="completeClaude" class="button terracotta" type="button">Complete connection</button></div>
+            </div>
+          </article>
+          <article class="panel settings-card notifications-card">
+            <p class="kicker">NOTIFICATIONS</p><h2>Alerts that matter</h2>
+            <p class="fine-print">Browser alerts work while this dashboard is open. Email alerts are sent by the background service even when the dashboard is closed.</p>
+            <div class="notification-browser-row">
+              <label><input id="browserNotifications" type="checkbox"><span>Show local browser alerts</span></label>
+              <button id="enableBrowserNotifications" class="button ghost" type="button">Grant permission</button>
+              <span id="browserNotificationState">Permission not requested</span>
+            </div>
+            <div class="toggle-list notification-events">
+              <label><input id="notifyAgentInput" type="checkbox"><span>Agent needs input or review</span></label>
+              <label><input id="notifyApplicationApplied" type="checkbox"><span>Application submitted</span></label>
+              <label><input id="notifyApplicationFailed" type="checkbox"><span>Application attempt failed</span></label>
+              <label><input id="notifyOa" type="checkbox"><span>OA recorded</span></label>
+              <label><input id="notifyInterview" type="checkbox"><span>Interview recorded</span></label>
+              <label><input id="notifyOffer" type="checkbox"><span>Offer recorded</span></label>
+            </div>
+            <div class="notification-email">
+              <label class="email-enable"><input id="emailNotifications" type="checkbox"><span>Send email alerts</span></label>
+              <div class="field-grid">
+                <label>Send alerts to<input id="notificationEmailTo" type="email" placeholder="you@example.com"></label>
+                <label>From address<input id="notificationEmailFrom" type="email" placeholder="you@example.com"></label>
+                <label>SMTP host<input id="smtpHost" placeholder="smtp.example.com"></label>
+                <label>SMTP port<input id="smtpPort" type="number" min="1" max="65535"></label>
+                <label>Security<select id="smtpSecurity"><option value="starttls">STARTTLS</option><option value="ssl">SSL / TLS</option><option value="none">None (local relay)</option></select></label>
+                <label>SMTP username<input id="smtpUsername" autocomplete="username"></label>
+                <label>SMTP password <span id="smtpPasswordState"></span><input id="smtpPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep saved"><button class="clear-secret" data-secret="TIAAA_SMTP_PASSWORD" type="button">Forget saved value</button></label>
+              </div>
+              <button id="testEmailNotification" class="button ghost" type="button">Send test email</button>
+              <p class="fine-print">Save settings before sending a test. Providers such as Gmail may require an app password.</p>
             </div>
           </article>
           <article class="panel settings-card keys-card">

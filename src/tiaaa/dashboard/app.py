@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import (
+    BackgroundTasks,
     FastAPI,
     File,
     Form,
@@ -15,12 +17,15 @@ from fastapi import (
     Query,
     Request,
     UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from tiaaa import __version__
+from tiaaa.apply.preview import preview_frame_hub
 from tiaaa.claude_auth import ClaudeAuthManager
 from tiaaa.config import (
     SOURCE_DOCUMENTS,
@@ -39,20 +44,24 @@ from tiaaa.config import (
 )
 from tiaaa.database import (
     archive_resume,
+    get_analytics,
     get_app_state,
     get_connection,
     get_job,
     get_stats,
     get_worker_states,
     init_db,
+    latest_notification_id,
     list_agent_inputs,
     list_jobs,
+    list_notifications,
     list_resumes,
     set_app_state,
     source_baseline_complete,
     source_status,
     update_tracker,
 )
+from tiaaa.notifications import NotificationDispatcher
 from tiaaa.resumes import MAX_RESUME_BYTES, store_resume
 from tiaaa.service import AutomationService, service_for
 
@@ -144,6 +153,7 @@ def create_app(
     database_path = Path(db_path).resolve() if db_path is not None else paths.database
     init_db(database_path)
     claude_auth = ClaudeAuthManager(paths)
+    notification_dispatcher = NotificationDispatcher(paths, database_path)
     background_service: AutomationService | None = (
         service_for(paths, database_path) if start_service else None
     )
@@ -170,6 +180,7 @@ def create_app(
     app.state.paths = paths
     app.state.service = background_service
     app.state.claude_auth = claude_auth
+    app.state.notification_dispatcher = notification_dispatcher
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.middleware("http")
@@ -295,6 +306,29 @@ def create_app(
     def stats() -> dict[str, Any]:
         return get_stats(connection())
 
+    @app.get("/api/analytics")
+    def analytics() -> dict[str, Any]:
+        return get_analytics(connection())
+
+    @app.get("/api/notifications")
+    def notifications(
+        after_id: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        database = connection()
+        return {
+            "items": list_notifications(database, after_id=after_id, limit=limit),
+            "latest_id": latest_notification_id(database),
+        }
+
+    @app.post("/api/notifications/test")
+    def test_notification() -> dict[str, str]:
+        try:
+            app.state.notification_dispatcher.send_test()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"status": "sent"}
+
     @app.get("/api/jobs")
     def jobs(
         status: str | None = None,
@@ -377,7 +411,11 @@ def create_app(
         return {"status": "queued", "job": _public_job(row)}
 
     @app.patch("/api/jobs/{job_id}")
-    def patch_job(job_id: int, update: TrackerUpdate) -> dict[str, Any]:
+    def patch_job(
+        job_id: int,
+        update: TrackerUpdate,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
         try:
             row = update_tracker(
                 connection(),
@@ -392,6 +430,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Job not found")
         if update.pipeline_status == "queued" and app.state.service is not None:
             app.state.service.trigger()
+        background_tasks.add_task(app.state.notification_dispatcher.flush)
         return _public_job(row)
 
     @app.get("/api/jobs/{job_id}/resume")
@@ -500,6 +539,7 @@ def create_app(
             item["preview_url"] = (
                 f"/api/workers/{item['worker_id']}/preview" if item["preview_available"] else None
             )
+            item["stream_active"] = preview_frame_hub.is_active(str(item["worker_id"]))
             job_row = get_job(connection(), int(item["job_id"])) if item.get("job_id") else None
             item["questions"] = (
                 list_agent_inputs(connection(), int(item["job_id"]), pending_only=True)
@@ -529,6 +569,29 @@ def create_app(
         response = FileResponse(path, media_type="image/jpeg")
         response.headers["Cache-Control"] = "no-store, max-age=0"
         return response
+
+    @app.websocket("/api/workers/{worker_id}/stream")
+    async def worker_stream(websocket: WebSocket, worker_id: str) -> None:
+        if not worker_id.startswith("worker-") or not worker_id[7:].isdigit():
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        sequence = -1
+        try:
+            while True:
+                frame = await asyncio.to_thread(
+                    preview_frame_hub.wait_for_frame,
+                    worker_id,
+                    sequence,
+                    10,
+                )
+                if frame is None:
+                    await websocket.send_json({"type": "heartbeat"})
+                    continue
+                sequence, data = frame
+                await websocket.send_bytes(data)
+        except (RuntimeError, WebSocketDisconnect):
+            return
 
     @app.get("/api/sources")
     def sources() -> dict[str, Any]:

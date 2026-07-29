@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from tiaaa.config import SOURCE_DOCUMENTS, get_paths
 from tiaaa.discovery.parser import canonicalize_url, listing_fingerprint
@@ -213,6 +214,22 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS notifications (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id      INTEGER NOT NULL UNIQUE REFERENCES events(id) ON DELETE CASCADE,
+            job_id        INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+            category      TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            body          TEXT NOT NULL,
+            created_at    TEXT NOT NULL,
+            email_status  TEXT NOT NULL DEFAULT 'pending',
+            email_error   TEXT,
+            email_sent_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_notifications_delivery
+            ON notifications(email_status, id);
 
         CREATE TABLE IF NOT EXISTS app_state (
             key         TEXT PRIMARY KEY,
@@ -763,10 +780,144 @@ def add_event(
     event_type: str,
     detail: str | None = None,
 ) -> None:
-    connection.execute(
+    created_at = utc_now()
+    cursor = connection.execute(
         "INSERT INTO events (job_id, event_type, detail, created_at) VALUES (?, ?, ?, ?)",
-        (job_id, event_type, detail, utc_now()),
+        (job_id, event_type, detail, created_at),
     )
+    notification = _notification_for_event(connection, job_id, event_type, detail)
+    if notification is not None:
+        category, title, body = notification
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO notifications (
+                event_id, job_id, category, title, body, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (int(cursor.lastrowid), job_id, category, title, body, created_at),
+        )
+
+
+def _notification_for_event(
+    connection: sqlite3.Connection,
+    job_id: int | None,
+    event_type: str,
+    detail: str | None,
+) -> tuple[str, str, str] | None:
+    if job_id is None:
+        return None
+    event_detail = str(detail or "").casefold()
+    mapping: tuple[str, str, str] | None = None
+    if event_type == "applied" or (
+        event_type == "status" and event_detail == "applied"
+    ):
+        mapping = (
+            "application_applied",
+            "Application submitted",
+            "The application was recorded as submitted.",
+        )
+    elif event_type == "failed" or (
+        event_type == "status" and event_detail == "failed"
+    ):
+        mapping = (
+            "application_failed",
+            "Application attempt failed",
+            "Open the Agent view for the failure details and retry options.",
+        )
+    elif event_type in {"needs_review", "captcha", "review_ready"} or (
+        event_type == "status" and event_detail == "manual_review"
+    ):
+        mapping = (
+            "agent_input",
+            "Agent needs your attention",
+            "Open the Agent view to answer a question or complete a manual checkpoint.",
+        )
+    elif event_type == "outcome" and event_detail in {"oa", "interview", "offer"}:
+        titles = {
+            "oa": "Online assessment received",
+            "interview": "Interview recorded",
+            "offer": "Offer recorded",
+        }
+        mapping = (
+            event_detail,
+            titles[event_detail],
+            "The application tracker has a new outcome.",
+        )
+    if mapping is None:
+        return None
+
+    job = connection.execute(
+        "SELECT company, role FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    if job is None:
+        return None
+    category, title, body = mapping
+    label = f"{job['company']} · {job['role']}"
+    return category, title, f"{label}. {body}"
+
+
+def list_notifications(
+    connection: sqlite3.Connection,
+    *,
+    after_id: int = 0,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT id, job_id, category, title, body, created_at
+        FROM notifications
+        WHERE id > ?
+        ORDER BY id
+        LIMIT ?
+        """,
+        (max(0, after_id), max(1, min(limit, 200))),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def latest_notification_id(connection: sqlite3.Connection) -> int:
+    return int(
+        connection.execute("SELECT COALESCE(MAX(id), 0) FROM notifications").fetchone()[0]
+    )
+
+
+def pending_notifications(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT id, job_id, category, title, body, created_at
+            FROM notifications
+            WHERE email_status = 'pending'
+            ORDER BY id
+            LIMIT ?
+            """,
+            (max(1, min(limit, 500)),),
+        ).fetchall()
+    ]
+
+
+def mark_notification_delivery(
+    connection: sqlite3.Connection,
+    notification_id: int,
+    *,
+    status: str,
+    error: str | None = None,
+) -> None:
+    connection.execute(
+        """
+        UPDATE notifications
+        SET email_status = ?, email_error = ?,
+            email_sent_at = CASE WHEN ? = 'sent' THEN ? ELSE email_sent_at END
+        WHERE id = ?
+        """,
+        (status, error[:500] if error else None, status, utc_now(), notification_id),
+    )
+    connection.commit()
 
 
 def reconcile_source_registry(
@@ -1334,6 +1485,190 @@ def get_stats(connection: sqlite3.Connection) -> dict[str, Any]:
     return data
 
 
+def _role_family(role: str) -> str:
+    lowered = role.casefold()
+    if any(term in lowered for term in ("quant", "trading", "research scientist")):
+        return "Quantitative & research"
+    if any(
+        term in lowered
+        for term in (
+            "machine learning",
+            "artificial intelligence",
+            " ai ",
+            "ai/",
+            "ai intern",
+            "computer vision",
+        )
+    ) or re.search(r"\b(?:ai|ml|nlp)\b", lowered):
+        return "Machine learning & AI"
+    if any(term in lowered for term in ("data ", "analytics", "business intelligence")):
+        return "Data & analytics"
+    if any(term in lowered for term in ("security", "cyber", "privacy")):
+        return "Security"
+    if any(
+        term in lowered
+        for term in ("hardware", "embedded", "firmware", "fpga", "silicon", "electrical")
+    ):
+        return "Hardware & embedded"
+    if any(term in lowered for term in ("product manager", "product management")):
+        return "Product"
+    if any(
+        term in lowered
+        for term in (
+            "software",
+            "developer",
+            "frontend",
+            "front end",
+            "backend",
+            "back end",
+            "full stack",
+            "web ",
+            "mobile",
+            "platform",
+            "devops",
+            "site reliability",
+            "cloud",
+        )
+    ) or re.search(r"\bswe\b", lowered):
+        return "Software engineering"
+    if any(term in lowered for term in ("information technology", " it ", "systems")):
+        return "IT & infrastructure"
+    return "Other tech"
+
+
+def _application_portal(url: str) -> str:
+    hostname = (urlparse(url).hostname or "").casefold()
+    known_portals = (
+        (
+            (
+                "myworkdayjobs.com",
+                "myworkdaysite.com",
+                "workday.com",
+                "workdayjobs.com",
+            ),
+            "Workday",
+        ),
+        (("greenhouse.io", "greenhouse.com"), "Greenhouse"),
+        (("lever.co",), "Lever"),
+        (("ashbyhq.com",), "Ashby"),
+        (("smartrecruiters.com",), "SmartRecruiters"),
+        (("icims.com",), "iCIMS"),
+        (("taleo.net",), "Taleo"),
+        (("oraclecloud.com",), "Oracle Recruiting"),
+        (("successfactors.com",), "SAP SuccessFactors"),
+        (("jobvite.com",), "Jobvite"),
+        (("eightfold.ai",), "Eightfold"),
+        (("ripplematch.com",), "RippleMatch"),
+    )
+    for domains, label in known_portals:
+        if any(hostname == domain or hostname.endswith(f".{domain}") for domain in domains):
+            return label
+    return "Company site" if hostname else "Portal not recorded"
+
+
+def _analytics_segment_rows(
+    applications: list[dict[str, Any]],
+    label_for: Any,
+) -> list[dict[str, Any]]:
+    segments: dict[str, dict[str, Any]] = {}
+    for application in applications:
+        label = str(label_for(application) or "Not recorded").strip() or "Not recorded"
+        segment = segments.setdefault(
+            label,
+            {
+                "label": label,
+                "applications": 0,
+                "oas": 0,
+                "interviews": 0,
+                "offers": 0,
+                "rejections": 0,
+            },
+        )
+        segment["applications"] += 1
+        segment["oas"] += int(bool(application.get("oa_at")))
+        segment["interviews"] += int(bool(application.get("interview_at")))
+        segment["offers"] += int(bool(application.get("offer_at")))
+        segment["rejections"] += int(bool(application.get("rejected_at")))
+    for segment in segments.values():
+        denominator = segment["applications"]
+        segment["oa_rate"] = round(segment["oas"] / denominator * 100, 1)
+        segment["interview_rate"] = round(
+            segment["interviews"] / denominator * 100, 1
+        )
+        segment["offer_rate"] = round(segment["offers"] / denominator * 100, 1)
+    return sorted(
+        segments.values(),
+        key=lambda item: (-item["applications"], item["label"].casefold()),
+    )
+
+
+def get_analytics(connection: sqlite3.Connection) -> dict[str, Any]:
+    """Break response rates down across only applications that were submitted."""
+
+    rows = connection.execute(
+        """
+        SELECT j.id, j.role, j.location, j.application_url, j.applied_at,
+               j.oa_at, j.interview_at, j.offer_at, j.rejected_at,
+               COALESCE(sr.name, 'Resume not recorded') AS resume_name,
+               COALESCE(
+                   (
+                       SELECT js.source_label
+                       FROM job_sources js
+                       WHERE js.job_id = j.id
+                       ORDER BY js.first_seen_at, js.document_key
+                       LIMIT 1
+                   ),
+                   'Source not recorded'
+               ) AS source_label
+        FROM jobs j
+        LEFT JOIN resumes sr ON sr.id = j.submitted_resume_id
+        WHERE j.applied_at IS NOT NULL
+        ORDER BY j.applied_at DESC
+        """
+    ).fetchall()
+    applications = [dict(row) for row in rows]
+    total = len(applications)
+    summary = {
+        "applications": total,
+        "oas": sum(bool(row["oa_at"]) for row in applications),
+        "interviews": sum(bool(row["interview_at"]) for row in applications),
+        "offers": sum(bool(row["offer_at"]) for row in applications),
+        "rejections": sum(bool(row["rejected_at"]) for row in applications),
+    }
+    summary["oa_rate"] = round(summary["oas"] / total * 100, 1) if total else 0.0
+    summary["interview_rate"] = (
+        round(summary["interviews"] / total * 100, 1) if total else 0.0
+    )
+    summary["offer_rate"] = (
+        round(summary["offers"] / total * 100, 1) if total else 0.0
+    )
+    return {
+        "summary": summary,
+        "dimensions": {
+            "resume": _analytics_segment_rows(
+                applications, lambda row: row["resume_name"]
+            ),
+            "role_family": _analytics_segment_rows(
+                applications, lambda row: _role_family(row["role"])
+            ),
+            "source": _analytics_segment_rows(
+                applications, lambda row: row["source_label"]
+            ),
+            "location": _analytics_segment_rows(
+                applications,
+                lambda row: (
+                    "Remote"
+                    if "remote" in str(row["location"] or "").casefold()
+                    else str(row["location"] or "Location not recorded").strip()
+                ),
+            ),
+            "portal": _analytics_segment_rows(
+                applications, lambda row: _application_portal(row["application_url"])
+            ),
+        },
+    }
+
+
 def update_tracker(
     connection: sqlite3.Connection,
     job_id: int,
@@ -1353,7 +1688,13 @@ def update_tracker(
     updates: list[str] = []
     values: list[Any] = []
     now = utc_now()
-    if pipeline_status is not None:
+    pipeline_changed = (
+        pipeline_status is not None and pipeline_status != row.get("pipeline_status")
+    )
+    if pipeline_status is not None and (
+        pipeline_changed
+        or (pipeline_status == "applied" and not row.get("applied_at"))
+    ):
         updates.append("pipeline_status = ?")
         values.append(pipeline_status)
         if pipeline_status == "applied" and not row.get("applied_at"):
@@ -1370,8 +1711,12 @@ def update_tracker(
             updates.append("outcome_status = 'withdrawn'")
             updates.append("withdrawn_at = COALESCE(withdrawn_at, ?)")
             values.append(now)
-        add_event(connection, job_id, "status", pipeline_status)
-    if outcome_status is not None:
+        if pipeline_changed:
+            add_event(connection, job_id, "status", pipeline_status)
+    outcome_changed = (
+        outcome_status is not None and outcome_status != row.get("outcome_status")
+    )
+    if outcome_status is not None and outcome_changed:
         updates.append("outcome_status = ?")
         values.append(outcome_status)
         milestone_columns = {

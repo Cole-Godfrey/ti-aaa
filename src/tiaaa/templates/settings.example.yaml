@@ -33,6 +33,26 @@ automation:
   headless: false
   timeout_seconds: 600
 
+notifications:
+  # Browser alerts appear only while the dashboard is open and permission is granted.
+  browser_enabled: false
+  # Email alerts keep working when the dashboard is closed. The SMTP password is
+  # stored separately as TIAAA_SMTP_PASSWORD in the private .env file.
+  email_enabled: false
+  email_to: ""
+  email_from: ""
+  smtp_host: ""
+  smtp_port: 587
+  smtp_security: starttls
+  smtp_username: ""
+  events:
+    agent_input: true
+    application_applied: true
+    application_failed: true
+    oa: true
+    interview: true
+    offer: true
+
 dashboard:
   host: 127.0.0.1
   port: 8787

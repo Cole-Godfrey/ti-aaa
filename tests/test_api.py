@@ -26,4 +26,5 @@ def test_public_python_facade_initializes_and_configures_workspace(
     assert resume["name"] == "Backend"
     assert agent.resumes()[0]["tags"] == ["python"]
     assert agent.stats()["applications"] == 0
+    assert agent.analytics()["summary"]["applications"] == 0
     assert agent.jobs() == []

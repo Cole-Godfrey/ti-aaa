@@ -36,7 +36,9 @@ It does **not** search or scrape LinkedIn, Indeed, Glassdoor, Google Jobs, or em
 - A latest-jobs table with job dossiers and explicit manual application actions
 - An application tracker with the exact selected/submitted resume
 - Total application, OA, interview, offer, and pipeline statistics
-- Live worker status and local browser snapshots
+- Outcome analytics by resume, role family, source repository, location, and portal
+- Configurable browser and email alerts for agent checkpoints and application outcomes
+- Smooth local browser streams with a private JPEG fallback
 - CLI and Python APIs for scripted use
 
 ## Beginner setup: Docker + website
@@ -98,6 +100,7 @@ Use **Settings** for:
 - daily and per-cycle limits;
 - optional automatic application to future matching roles;
 - review-only versus final submission.
+- browser/email notifications and which events should trigger them.
 
 Keys are write-only in the UI. They are stored in the private Docker volume rather than returned by the API.
 
@@ -108,7 +111,7 @@ Open **Latest jobs**. This is the live catalog from the three repositories, incl
 1. Search or filter the table, then select a company or **Details**.
 2. Review the location, fit explanation, eligibility note, source, and application boundary in the dossier.
 3. Select **Apply with agent** (or **Apply** in the table) and confirm.
-4. Open **Agent** to follow browser status and the latest local snapshot. The worker continues if you close the dashboard.
+4. Open **Agent** to follow the local browser stream. The worker continues if you close the dashboard.
 5. In review mode, finish the final submission yourself. In submit mode, TI-AAA may submit only after you enable that boundary in Settings.
 
 Nothing is applied to automatically by default. If you later enable **Automatically apply to new matching roles**, it applies only to matching roles discovered after you enable it; every catalog role remains available for an explicit manual request.
@@ -308,6 +311,7 @@ agent.request(job_id)  # selects and fact-safely tailors the best resume
 application = agent.apply(job_id=job_id, submit=False)
 
 print(agent.stats())
+print(agent.analytics())
 print(agent.jobs(status="manual_review"))
 ```
 
@@ -334,9 +338,21 @@ Each isolated browser worker publishes:
 - current state (`starting`, `applying`, review, failure, or idle);
 - company and role;
 - a short status message;
-- a low-frequency local screenshot.
+- an event-driven local browser stream, plus a private JPEG fallback.
 
-The **Agent** screen refreshes those snapshots about every 2.5 seconds. This is an observation view, not remote browser control. A snapshot can contain form answers and personal details, so files remain in the local data directory and the Docker port is bound to `127.0.0.1` by default.
+The **Agent** screen keeps one canvas mounted and paints DevTools screencast frames into it, so status polling no longer replaces the image element. This is an observation view, not remote browser control. Frames can contain form answers and personal details, so the stream stays process-local, fallback files remain in the local data directory, and the Docker port is bound to `127.0.0.1` by default.
+
+## Analytics and notifications
+
+The **Analytics** desk uses submitted applications only. It compares application count, OA rate, interview rate, and offer rate by:
+
+- submitted resume;
+- role family;
+- primary source repository;
+- location;
+- application portal.
+
+Browser alerts are opt-in and require browser permission; they work while the dashboard is open. Optional SMTP email alerts are delivered by the background service even when the dashboard is closed. You can independently enable agent-input, submission, failure, OA, interview, and offer events. SMTP passwords are stored write-only as `TIAAA_SMTP_PASSWORD`.
 
 ## Configuration and API keys
 
@@ -366,6 +382,16 @@ automation:
   max_attempts: 3
   claude_model: sonnet
   headless: false
+
+notifications:
+  browser_enabled: false
+  email_enabled: false
+  email_to: ""
+  email_from: ""
+  smtp_host: ""
+  smtp_port: 587
+  smtp_security: starttls
+  smtp_username: ""
 ```
 
 Supported secret fields in the web app:
@@ -375,6 +401,7 @@ Supported secret fields in the web app:
 - `GITHUB_TOKEN` — optional extra GitHub request allowance
 - `GEMINI_API_KEY` or `OPENAI_API_KEY` — optional scoring and cover letters
 - `TIAAA_APPLICATION_PASSWORD` — optional employer-owned ATS account creation
+- `TIAAA_SMTP_PASSWORD` — optional SMTP/app password for background email alerts
 
 API keys are not required for GitHub discovery, heuristic scoring, resume ranking, the tracker, or dashboard analytics. An Anthropic API key is also unnecessary for browser automation when Claude Code is connected to a Claude subscription.
 
@@ -413,7 +440,7 @@ OA and interview rates use submitted applications as the denominator. Milestones
 ## Privacy and safety
 
 - Native data stays under `~/.tiaaa`; Docker data stays in the `tiaaa-data` volume.
-- Uploaded PDFs, extracted text, generated packets, snapshots, the database, and `.env` use private permissions where the OS supports them.
+- Uploaded PDFs, extracted text, generated packets, fallback frames, the database, and `.env` use private permissions where the OS supports them.
 - Secret values are never returned by the configuration API.
 - The dashboard binds to loopback by default and has no user authentication. Do not expose port 8787 publicly without an authenticated reverse proxy.
 - Debug agent output is off by default because form output can contain personal data.
@@ -449,6 +476,7 @@ src/tiaaa/
 ├── config.py        fixed sources, paths, profile/settings/secrets
 ├── database.py      SQLite catalog, manual/automatic queue, tracker, and analytics
 ├── eligibility.py   internship filters and heuristic scoring
+├── notifications.py browser event feed and optional SMTP delivery
 ├── preparation.py   score and application-packet preparation
 ├── resumes.py       upload, extraction, selection, and safe tailoring
 └── service.py       always-on background lifecycle

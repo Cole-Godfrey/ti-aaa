@@ -18,6 +18,7 @@ from tiaaa.config import (
     update_secrets,
 )
 from tiaaa.database import (
+    get_analytics,
     get_connection,
     get_job,
     get_stats,
@@ -155,6 +156,11 @@ class TIAAA:
 
     def stats(self) -> dict[str, Any]:
         return get_stats(get_connection(self.paths.database))
+
+    def analytics(self) -> dict[str, Any]:
+        """Return submitted-application outcomes across each dashboard dimension."""
+
+        return get_analytics(get_connection(self.paths.database))
 
     def jobs(
         self,

@@ -5,6 +5,7 @@ import io
 from fastapi.testclient import TestClient
 from reportlab.pdfgen import canvas
 
+from tiaaa.apply.preview import preview_frame_hub
 from tiaaa.config import SOURCE_DOCUMENTS, AppPaths
 from tiaaa.dashboard.app import create_app
 from tiaaa.database import (
@@ -53,6 +54,15 @@ def test_dashboard_stats_jobs_and_tracker_updates(tmp_path, profile, settings) -
     stats = client.get("/api/stats").json()
     assert stats["applications"] == 1
     assert stats["oa_rate"] == 100.0
+    analytics = client.get("/api/analytics").json()
+    assert analytics["summary"]["applications"] == 1
+    assert analytics["dimensions"]["role_family"][0]["label"] == "Software engineering"
+    notices = client.get("/api/notifications").json()
+    assert [item["category"] for item in notices["items"]] == [
+        "application_applied",
+        "oa",
+    ]
+    assert notices["latest_id"] == notices["items"][-1]["id"]
     health = client.get("/api/health")
     assert health.json()["status"] == "ok"
     assert health.headers["x-content-type-options"] == "nosniff"
@@ -62,25 +72,40 @@ def test_dashboard_stats_jobs_and_tracker_updates(tmp_path, profile, settings) -
 
 def test_web_onboarding_stores_write_only_keys_and_resume(tmp_path, profile, monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("TIAAA_SMTP_PASSWORD", raising=False)
     paths = AppPaths(tmp_path)
     path = tmp_path / "tiaaa.db"
     client = TestClient(create_app(path, paths=paths))
     secret = "sk-ant-test-secret-1234"
+    smtp_secret = "smtp-app-password"
 
     response = client.put(
         "/api/config",
-        json={"profile": profile, "secrets": {"ANTHROPIC_API_KEY": secret}},
+        json={
+            "profile": profile,
+            "secrets": {
+                "ANTHROPIC_API_KEY": secret,
+                "TIAAA_SMTP_PASSWORD": smtp_secret,
+            },
+        },
     )
     assert response.status_code == 200
     assert secret not in response.text
+    assert smtp_secret not in response.text
     assert response.json()["secrets"]["ANTHROPIC_API_KEY"] == {
         "configured": True,
         "suffix": "1234",
     }
     assert secret in paths.env.read_text(encoding="utf-8")
+    assert smtp_secret in paths.env.read_text(encoding="utf-8")
+    assert response.json()["secrets"]["TIAAA_SMTP_PASSWORD"] == {
+        "configured": True,
+        "suffix": "",
+    }
     assert paths.env.stat().st_mode & 0o077 == 0
     cleared = client.put(
-        "/api/config", json={"clear_secrets": ["ANTHROPIC_API_KEY"]}
+        "/api/config",
+        json={"clear_secrets": ["ANTHROPIC_API_KEY", "TIAAA_SMTP_PASSWORD"]},
     )
     assert cleared.json()["secrets"]["ANTHROPIC_API_KEY"]["configured"] is False
     assert secret not in paths.env.read_text(encoding="utf-8")
@@ -106,6 +131,7 @@ def test_web_onboarding_stores_write_only_keys_and_resume(tmp_path, profile, mon
 
 
 def test_live_worker_preview_is_served_only_from_preview_directory(tmp_path) -> None:
+    preview_frame_hub.clear()
     paths = AppPaths(tmp_path)
     paths.previews.mkdir(parents=True)
     preview = paths.previews / "worker-0.jpg"
@@ -118,14 +144,20 @@ def test_live_worker_preview_is_served_only_from_preview_directory(tmp_path) -> 
         message="Filling the application",
         screenshot_path=str(preview),
     )
+    preview_frame_hub.set_active("worker-0", True)
     client = TestClient(create_app(paths.database, paths=paths))
 
     workers = client.get("/api/workers").json()["items"]
     assert workers[0]["preview_available"] is True
+    assert workers[0]["stream_active"] is True
     response = client.get("/api/workers/worker-0/preview")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store, max-age=0"
     assert client.get("/api/workers/../../profile/preview").status_code == 404
+    preview_frame_hub.publish("worker-0", b"\xff\xd8stream\xff\xd9")
+    with client.websocket_connect("/api/workers/worker-0/stream") as websocket:
+        assert websocket.receive_bytes() == b"\xff\xd8stream\xff\xd9"
+    preview_frame_hub.clear()
 
 
 def test_latest_jobs_detail_and_manual_apply_action(tmp_path, profile, settings) -> None:
@@ -264,7 +296,7 @@ def test_agent_page_accepts_requested_input_and_requeues_job(
     assert get_job(connection, 1)["manual_requested"] == 1
 
 
-def test_agent_ui_declares_half_second_refresh_and_input_channel(tmp_path) -> None:
+def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     paths = AppPaths(tmp_path)
     client = TestClient(create_app(paths.database, paths=paths))
 
@@ -272,8 +304,11 @@ def test_agent_ui_declares_half_second_refresh_and_input_channel(tmp_path) -> No
     javascript = client.get("/static/app.js").text
 
     assert 'id="agentInputPanel"' in index
-    assert "0.5 second snapshots" in index
-    assert "}, 500);" in javascript
+    assert "Local browser stream" in index
+    assert "new WebSocket" in javascript
+    assert "data-preview-canvas" in javascript
+    assert "}, 500);" not in javascript
+    assert "}, 1000);" in javascript
     assert "Save answers & continue" in javascript
     assert "function listingDate(postingDate, firstSeenAt)" in javascript
     assert "job.posting_date || shortDate(job.first_seen_at)" not in javascript

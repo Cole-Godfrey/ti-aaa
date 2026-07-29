@@ -35,6 +35,7 @@ from tiaaa.database import (
     store_agent_inputs,
     update_worker_state,
 )
+from tiaaa.notifications import NotificationDispatcher
 
 log = logging.getLogger(__name__)
 _RESULT_PATTERN = re.compile(
@@ -617,7 +618,11 @@ def _worker(
             screenshot_path=str(preview_path.resolve()),
         )
         mcp_process = _launch_mcp_bridge(cdp_port=port, mcp_port=mcp_port)
-        preview = PreviewCapture(port=port, output_path=preview_path)
+        preview = PreviewCapture(
+            port=port,
+            output_path=preview_path,
+            worker_id=worker_name,
+        )
         preview.start()
         update_worker_state(
             connection,
@@ -824,4 +829,8 @@ def run_applications(
             with lock:
                 for key in totals:
                     totals[key] += result[key]
+    try:
+        NotificationDispatcher(paths, db_path).flush()
+    except Exception as exc:
+        log.warning("Notification delivery skipped after application run: %s", exc)
     return totals

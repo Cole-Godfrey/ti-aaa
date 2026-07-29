@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
+
 import tiaaa.apply.runner as runner
-from tiaaa.apply.preview import PreviewCapture
+from tiaaa.apply.preview import PreviewCapture, preview_frame_hub
 from tiaaa.apply.prompt import build_prompt
 from tiaaa.apply.runner import (
     _bridge_is_unavailable,
@@ -262,7 +264,14 @@ def test_empty_application_queue_does_not_require_browser_tools(
     assert totals == {"applied": 0, "review": 0, "failed": 0, "expired": 0}
 
 
-def test_live_preview_defaults_to_half_second_capture(tmp_path) -> None:
-    preview = PreviewCapture(port=9330, output_path=tmp_path / "preview.jpg")
+def test_live_preview_publishes_frames_and_keeps_a_private_jpeg_fallback(tmp_path) -> None:
+    preview_frame_hub.clear()
+    output = tmp_path / "worker-0.jpg"
+    preview = PreviewCapture(port=9330, output_path=output)
+    frame = b"\xff\xd8persistent-frame\xff\xd9"
 
-    assert preview.interval == 0.5
+    preview._publish_encoded_frame(base64.b64encode(frame).decode())
+
+    assert preview.reconnect_delay == 0.5
+    assert output.read_bytes() == frame
+    assert preview_frame_hub.wait_for_frame("worker-0", 0, timeout=0) == (1, frame)

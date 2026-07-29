@@ -77,6 +77,24 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "headless": False,
         "timeout_seconds": 600,
     },
+    "notifications": {
+        "browser_enabled": False,
+        "email_enabled": False,
+        "email_to": "",
+        "email_from": "",
+        "smtp_host": "",
+        "smtp_port": 587,
+        "smtp_security": "starttls",
+        "smtp_username": "",
+        "events": {
+            "agent_input": True,
+            "application_applied": True,
+            "application_failed": True,
+            "oa": True,
+            "interview": True,
+            "offer": True,
+        },
+    },
     "dashboard": {"host": "127.0.0.1", "port": 8787},
 }
 
@@ -234,6 +252,14 @@ def save_settings(settings: dict[str, Any], paths: AppPaths | None = None) -> Pa
     automation["timeout_seconds"] = max(
         60, min(3600, int(automation.get("timeout_seconds", 600)))
     )
+    notifications = merged["notifications"]
+    notifications["smtp_port"] = max(
+        1, min(65535, int(notifications.get("smtp_port", 587)))
+    )
+    security = str(notifications.get("smtp_security", "starttls")).casefold()
+    notifications["smtp_security"] = (
+        security if security in {"starttls", "ssl", "none"} else "starttls"
+    )
     paths.settings.write_text(
         yaml.safe_dump(merged, sort_keys=False, allow_unicode=True), encoding="utf-8"
     )
@@ -248,6 +274,7 @@ SECRET_NAMES = (
     "OPENAI_API_KEY",
     "GITHUB_TOKEN",
     "TIAAA_APPLICATION_PASSWORD",
+    "TIAAA_SMTP_PASSWORD",
 )
 
 
@@ -263,7 +290,8 @@ def secret_status(paths: AppPaths | None = None) -> dict[str, dict[str, str | bo
             "configured": bool(value),
             "suffix": (
                 value[-4:]
-                if name != "TIAAA_APPLICATION_PASSWORD" and len(value) >= 4
+                if name not in {"TIAAA_APPLICATION_PASSWORD", "TIAAA_SMTP_PASSWORD"}
+                and len(value) >= 4
                 else ""
             ),
         }

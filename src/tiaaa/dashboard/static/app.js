@@ -11,15 +11,22 @@ const state = {
   onboardingStep: 0,
   claudeAuth: null,
   agentInputSignature: null,
+  workerSignature: null,
+  previewSockets: new Map(),
+  analytics: null,
+  analyticsDimension: "resume",
+  notificationCursor: null,
+  notificationCursorWasSaved: false,
 };
 
 const viewCopy = {
   overview: ["DESK / 01", "Situation report", "Signals from the repository feed and your application register."],
   latest: ["DESK / 02", "Repository inbox", "Inspect current internship listings, open a dossier, and choose what the agent works on."],
   applications: ["DESK / 03", "Application register", "A spreadsheet-style record of submitted applications, resumes, and outcomes."],
-  live: ["DESK / 04", "Agent wire", "A live trace of the browser worker without keeping this page open."],
-  resumes: ["DESK / 05", "Fact archive", "Source resumes the agent may select and tailor without inventing claims."],
-  settings: ["DESK / 06", "Operating rules", "Change polling, matching, application boundaries, and local credentials."],
+  analytics: ["DESK / 04", "Response notebook", "Compare application outcomes across resumes, roles, sources, locations, and portals."],
+  live: ["DESK / 05", "Agent wire", "A live trace of the browser worker without keeping this page open."],
+  resumes: ["DESK / 06", "Fact archive", "Source resumes the agent may select and tailor without inventing claims."],
+  settings: ["DESK / 07", "Operating rules", "Change polling, matching, application boundaries, and local credentials."],
 };
 const applicationPipelineOptions = [
   ["applied", "Applied"], ["withdrawn", "Withdrawn"],
@@ -185,6 +192,7 @@ async function completeClaudeLogin(inputId, button) {
 
 function setView(view) {
   if (!viewCopy[view]) return;
+  if (state.activeView === "live" && view !== "live") closePreviewStreams();
   state.activeView = view;
   const url = new URL(window.location.href);
   if (view === "overview") url.searchParams.delete("view");
@@ -199,6 +207,7 @@ function setView(view) {
   window.scrollTo({ top: 0, behavior: "smooth" });
   if (view === "live") refreshLive().catch(error => showToast(error.message, true));
   if (view === "latest") loadLatestJobs().catch(error => showToast(error.message, true));
+  if (view === "analytics") loadAnalytics().catch(error => showToast(error.message, true));
 }
 
 function renderStats(stats) {
@@ -230,6 +239,55 @@ function renderStats(stats) {
       <div class="recent-copy"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)}</span>
       <span class="recent-resume">${escapeHtml(job.submitted_resume_name || "Resume not recorded")}</span></div>
       <time>${escapeHtml(relativeTime(job.applied_at))}</time></div>`).join("") : '<div class="empty">No applications yet. Choose a role from Latest jobs when you are ready.</div>';
+}
+
+const analyticsDimensionLabels = {
+  resume: "Resume",
+  role_family: "Role family",
+  source: "Source repository",
+  location: "Location",
+  portal: "Application portal",
+};
+
+function renderAnalyticsBreakdown() {
+  const analytics = state.analytics;
+  if (!analytics) return;
+  const dimension = state.analyticsDimension;
+  const rows = analytics.dimensions?.[dimension] || [];
+  const total = Math.max(1, analytics.summary?.applications || 0);
+  element("analyticsDimensionHeading").textContent = analyticsDimensionLabels[dimension];
+  document.querySelectorAll("[data-analytics-dimension]").forEach(button => {
+    button.classList.toggle("active", button.dataset.analyticsDimension === dimension);
+  });
+  element("analyticsBody").innerHTML = rows.length ? rows.map(row => {
+    const share = Math.max(2, row.applications / total * 100);
+    return `<tr>
+      <td><span class="segment-label" style="--segment-share:${share}%"><i></i><span>${escapeHtml(row.label)}</span></span></td>
+      <td>${row.applications.toLocaleString()}</td>
+      <td>${row.oas.toLocaleString()}</td>
+      <td class="rate-cell"><strong>${row.oa_rate}%</strong></td>
+      <td>${row.interviews.toLocaleString()}</td>
+      <td class="rate-cell"><strong>${row.interview_rate}%</strong></td>
+      <td>${row.offers.toLocaleString()} <span class="rate-cell">· ${row.offer_rate}%</span></td>
+    </tr>`;
+  }).join("") : '<tr><td colspan="7" class="loading">No submitted applications to analyze yet.</td></tr>';
+  element("analyticsSummary").textContent = rows.length
+    ? `${rows.length} ${analyticsDimensionLabels[dimension].toLowerCase()} segment${rows.length === 1 ? "" : "s"} · rates use submitted applications as the denominator`
+    : "Submit an application to begin this breakdown.";
+}
+
+function renderAnalytics(analytics) {
+  state.analytics = analytics;
+  const summary = analytics.summary || {};
+  element("analyticsApplications").textContent = (summary.applications || 0).toLocaleString();
+  element("analyticsOaRate").textContent = `${summary.oa_rate || 0}%`;
+  element("analyticsInterviewRate").textContent = `${summary.interview_rate || 0}%`;
+  element("analyticsOfferRate").textContent = `${summary.offer_rate || 0}%`;
+  renderAnalyticsBreakdown();
+}
+
+async function loadAnalytics() {
+  renderAnalytics(await api("/api/analytics"));
 }
 
 function optionsMarkup(options, current, disabled = []) {
@@ -269,6 +327,7 @@ async function updateJob(jobId, payload) {
     await api(`/api/jobs/${jobId}`, { method: "PATCH", body: JSON.stringify(payload) });
     showToast("Application tracker updated");
     renderStats(await api("/api/stats"));
+    await loadAnalytics();
   } catch (error) {
     showToast(error.message, true);
     await loadJobs();
@@ -462,12 +521,152 @@ async function loadResumes() {
   renderResumes(response.items);
 }
 
+async function drawPreviewBlob(workerId, blob, record) {
+  const canvas = document.querySelector(`[data-preview-canvas="${workerId}"]`);
+  if (!canvas) return;
+  const drawSequence = (record.drawSequence || 0) + 1;
+  record.drawSequence = drawSequence;
+  try {
+    if ("createImageBitmap" in window) {
+      const bitmap = await createImageBitmap(blob);
+      if (drawSequence !== record.drawSequence) { bitmap.close(); return; }
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext("2d").drawImage(bitmap, 0, 0);
+      bitmap.close();
+    } else {
+      const url = URL.createObjectURL(blob);
+      try {
+        const image = new Image();
+        await new Promise((resolve, reject) => {
+          image.onload = resolve;
+          image.onerror = reject;
+          image.src = url;
+        });
+        if (drawSequence !== record.drawSequence) return;
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        canvas.getContext("2d").drawImage(image, 0, 0);
+      } finally { URL.revokeObjectURL(url); }
+    }
+    const frame = canvas.closest(".preview-frame");
+    const streaming = Boolean(record.receivedStream && record.worker.stream_active);
+    frame.classList.add("has-frame");
+    frame.classList.toggle("streaming", streaming);
+    frame.classList.toggle("fallback", !streaming);
+  } catch (_) { /* keep the previous frame visible when one decode fails */ }
+}
+
+async function loadPreviewFallback(worker, record) {
+  if (!worker.preview_available || !worker.preview_url || record.receivedStream) return;
+  try {
+    const response = await fetch(`${worker.preview_url}?t=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) return;
+    record.lastBlob = await response.blob();
+    await drawPreviewBlob(worker.worker_id, record.lastBlob, record);
+  } catch (_) { /* the worker may not have emitted its first JPEG yet */ }
+}
+
+function closePreviewStreams() {
+  state.previewSockets.forEach(record => {
+    record.closedByClient = true;
+    clearTimeout(record.fallbackTimer);
+    clearInterval(record.fallbackInterval);
+    clearTimeout(record.reconnectTimer);
+    try { record.socket.close(); } catch (_) { /* already closed */ }
+  });
+  state.previewSockets.clear();
+}
+
+function openPreviewStream(worker) {
+  if (state.activeView !== "live" || state.previewSockets.has(worker.worker_id)) return;
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(`${protocol}//${window.location.host}/api/workers/${worker.worker_id}/stream`);
+  socket.binaryType = "arraybuffer";
+  const record = {
+    socket,
+    worker,
+    receivedStream: false,
+    closedByClient: false,
+    lastBlob: null,
+    drawSequence: 0,
+    fallbackTimer: null,
+    fallbackInterval: null,
+    reconnectTimer: null,
+  };
+  state.previewSockets.set(worker.worker_id, record);
+  record.fallbackTimer = setTimeout(() => {
+    loadPreviewFallback(record.worker, record);
+    record.fallbackInterval = setInterval(() => loadPreviewFallback(record.worker, record), 2000);
+  }, 900);
+  socket.addEventListener("message", async event => {
+    if (typeof event.data === "string") return;
+    record.receivedStream = true;
+    clearTimeout(record.fallbackTimer);
+    clearInterval(record.fallbackInterval);
+    record.lastBlob = new Blob([event.data], { type: "image/jpeg" });
+    await drawPreviewBlob(worker.worker_id, record.lastBlob, record);
+  });
+  socket.addEventListener("close", () => {
+    clearTimeout(record.fallbackTimer);
+    clearInterval(record.fallbackInterval);
+    if (state.previewSockets.get(worker.worker_id) === record) {
+      state.previewSockets.delete(worker.worker_id);
+    }
+    if (!record.closedByClient && state.activeView === "live") {
+      loadPreviewFallback(record.worker, record);
+      record.reconnectTimer = setTimeout(() => openPreviewStream(record.worker), 1500);
+    }
+  });
+}
+
+function syncPreviewStreams(items) {
+  if (state.activeView !== "live") return;
+  const activeIds = new Set(items.map(worker => worker.worker_id));
+  state.previewSockets.forEach((record, workerId) => {
+    if (!activeIds.has(workerId)) {
+      record.closedByClient = true;
+      clearTimeout(record.fallbackTimer);
+      clearInterval(record.fallbackInterval);
+      record.socket.close();
+      state.previewSockets.delete(workerId);
+    }
+  });
+  items.forEach(worker => {
+    const record = state.previewSockets.get(worker.worker_id);
+    if (record) {
+      record.worker = worker;
+      if (record.lastBlob) drawPreviewBlob(worker.worker_id, record.lastBlob, record);
+    } else {
+      openPreviewStream(worker);
+    }
+  });
+}
+
 function renderWorkers(items) {
-  element("workerGrid").innerHTML = items.length ? items.map(worker => `
-    <article class="worker-card"><div class="worker-head"><div class="worker-title"><strong>${escapeHtml(worker.company || worker.worker_id)}</strong><span>${escapeHtml(worker.role || "Waiting for a prepared application")}</span></div>
-      <span class="worker-state ${escapeHtml(worker.status)}">${escapeHtml(worker.status)}</span></div>
-      <div class="preview-frame">${worker.preview_available ? `<img src="${escapeHtml(worker.preview_url)}?t=${Date.now()}" alt="Current browser snapshot for ${escapeHtml(worker.worker_id)}">` : '<p class="preview-empty">A browser snapshot appears here when a worker starts.</p>'}</div>
-      <p class="worker-message">${escapeHtml(worker.message || "Waiting for the next cycle")}</p></article>`).join("") : '<div class="empty tall">No browser worker has run yet. Enable browser automation in Settings, or keep watch-and-prepare mode.</div>';
+  const signature = JSON.stringify(items.map(worker => ({
+    worker_id: worker.worker_id,
+    status: worker.status,
+    job_id: worker.job_id,
+    company: worker.company,
+    role: worker.role,
+    message: worker.message,
+    preview_available: worker.preview_available,
+    stream_active: worker.stream_active,
+    updated_at: worker.updated_at,
+  })));
+  if (signature !== state.workerSignature) {
+    state.workerSignature = signature;
+    element("workerGrid").innerHTML = items.length ? items.map(worker => `
+      <article class="worker-card"><div class="worker-head"><div class="worker-title"><strong>${escapeHtml(worker.company || worker.worker_id)}</strong><span>${escapeHtml(worker.role || "Waiting for a prepared application")}</span></div>
+        <span class="worker-state ${escapeHtml(worker.status)}">${escapeHtml(worker.status)}</span></div>
+        <div class="preview-frame" data-preview-frame="${escapeHtml(worker.worker_id)}">
+          <canvas data-preview-canvas="${escapeHtml(worker.worker_id)}" aria-label="Live local browser view for ${escapeHtml(worker.worker_id)}"></canvas>
+          <p class="preview-empty">The live browser view appears here when a worker starts.</p>
+        </div>
+        <p class="worker-message">${escapeHtml(worker.message || "Waiting for the next cycle")}</p></article>`).join("") : '<div class="empty tall">No browser worker has run yet. Enable browser automation in Settings, or keep watch-and-prepare mode.</div>';
+  }
+  syncPreviewStreams(items);
   renderAgentInputs(items);
 }
 
@@ -576,6 +775,24 @@ function secretLabel(status) {
   return status?.configured ? `saved${status.suffix ? ` ···${status.suffix}` : ""}` : "not set";
 }
 
+function renderBrowserNotificationPermission() {
+  const button = element("enableBrowserNotifications");
+  const label = element("browserNotificationState");
+  if (!("Notification" in window)) {
+    label.textContent = "This browser does not support system alerts";
+    button.disabled = true;
+    return;
+  }
+  const descriptions = {
+    granted: "Permission granted",
+    denied: "Permission blocked in browser settings",
+    default: "Permission not requested",
+  };
+  label.textContent = descriptions[Notification.permission] || Notification.permission;
+  button.disabled = Notification.permission === "granted";
+  button.textContent = Notification.permission === "granted" ? "Permission granted" : "Grant permission";
+}
+
 function populateConfiguration(config) {
   state.config = config;
   const profile = config.profile;
@@ -590,6 +807,8 @@ function populateConfiguration(config) {
   const preparation = settings.preparation || {};
   const service = settings.service || {};
   const filters = settings.filters || {};
+  const notifications = settings.notifications || {};
+  const notificationEvents = notifications.events || {};
   setValue("fullName", personal.full_name); setValue("preferredName", personal.preferred_name);
   setValue("email", personal.email); setValue("phone", personal.phone);
   setValue("city", personal.city); setValue("state", personal.state); setValue("country", personal.country);
@@ -614,6 +833,19 @@ function populateConfiguration(config) {
   setChecked("generateCoverLetters", preparation.generate_cover_letters);
   setChecked("autoApplyNew", automation.auto_apply_new); setChecked("allowSubmission", automation.allow_submission);
   setChecked("headless", automation.headless);
+  setChecked("browserNotifications", notifications.browser_enabled);
+  setChecked("emailNotifications", notifications.email_enabled);
+  setValue("notificationEmailTo", notifications.email_to || personal.email);
+  setValue("notificationEmailFrom", notifications.email_from);
+  setValue("smtpHost", notifications.smtp_host); setValue("smtpPort", notifications.smtp_port || 587);
+  setValue("smtpSecurity", notifications.smtp_security || "starttls");
+  setValue("smtpUsername", notifications.smtp_username);
+  setChecked("notifyAgentInput", notificationEvents.agent_input);
+  setChecked("notifyApplicationApplied", notificationEvents.application_applied);
+  setChecked("notifyApplicationFailed", notificationEvents.application_failed);
+  setChecked("notifyOa", notificationEvents.oa);
+  setChecked("notifyInterview", notificationEvents.interview);
+  setChecked("notifyOffer", notificationEvents.offer);
   setValue("availableStartDate", answers.available_start_date); setValue("howHeard", answers.how_heard);
   setChecked("age18", answers.age_18_or_older); setChecked("previouslyWorked", answers.previously_worked_here);
   setValue("eeoGender", eeo.gender); setValue("eeoRace", eeo.race_ethnicity);
@@ -623,6 +855,8 @@ function populateConfiguration(config) {
   element("openaiState").textContent = secretLabel(config.secrets.OPENAI_API_KEY);
   element("geminiState").textContent = secretLabel(config.secrets.GEMINI_API_KEY);
   element("applicationPasswordState").textContent = secretLabel(config.secrets.TIAAA_APPLICATION_PASSWORD);
+  element("smtpPasswordState").textContent = secretLabel(config.secrets.TIAAA_SMTP_PASSWORD);
+  renderBrowserNotificationPermission();
 
   setValue("onboardName", personal.full_name?.startsWith("YOUR ") ? "" : personal.full_name);
   setValue("onboardEmail", personal.email === "you@example.com" ? "" : personal.email);
@@ -686,12 +920,32 @@ function configurationPayload() {
     max_applications_per_cycle: Number(value("cycleCap")) || 5, max_attempts: Number(value("maxAttempts")) || 3,
     timeout_seconds: Number(value("workerTimeout")) || 600, claude_model: value("claudeModel") || "sonnet",
   });
+  settings.notifications = settings.notifications || {};
+  Object.assign(settings.notifications, {
+    browser_enabled: checked("browserNotifications"),
+    email_enabled: checked("emailNotifications"),
+    email_to: value("notificationEmailTo"),
+    email_from: value("notificationEmailFrom"),
+    smtp_host: value("smtpHost"),
+    smtp_port: Number(value("smtpPort")) || 587,
+    smtp_security: value("smtpSecurity") || "starttls",
+    smtp_username: value("smtpUsername"),
+    events: {
+      agent_input: checked("notifyAgentInput"),
+      application_applied: checked("notifyApplicationApplied"),
+      application_failed: checked("notifyApplicationFailed"),
+      oa: checked("notifyOa"),
+      interview: checked("notifyInterview"),
+      offer: checked("notifyOffer"),
+    },
+  });
   const secrets = {};
   if (value("anthropicKey")) secrets.ANTHROPIC_API_KEY = value("anthropicKey");
   if (value("githubToken")) secrets.GITHUB_TOKEN = value("githubToken");
   if (value("openaiKey")) secrets.OPENAI_API_KEY = value("openaiKey");
   if (value("geminiKey")) secrets.GEMINI_API_KEY = value("geminiKey");
   if (value("applicationPassword")) secrets.TIAAA_APPLICATION_PASSWORD = value("applicationPassword");
+  if (value("smtpPassword")) secrets.TIAAA_SMTP_PASSWORD = value("smtpPassword");
   return { profile, settings, secrets };
 }
 
@@ -706,7 +960,7 @@ async function saveConfiguration(event) {
   try {
     const config = await api("/api/config", { method: "PUT", body: JSON.stringify(configurationPayload()) });
     populateConfiguration(config);
-    ["anthropicKey", "githubToken", "openaiKey", "geminiKey", "applicationPassword"].forEach(id => setValue(id, ""));
+    ["anthropicKey", "githubToken", "openaiKey", "geminiKey", "applicationPassword", "smtpPassword"].forEach(id => setValue(id, ""));
     await refreshClaudeAuth();
     showToast("Settings saved; the background agent has been notified");
   } catch (error) { showToast(error.message, true); }
@@ -781,9 +1035,79 @@ async function finishOnboarding() {
   finally { button.disabled = false; }
 }
 
+function saveNotificationCursor(cursor) {
+  state.notificationCursor = cursor;
+  try { window.localStorage.setItem("tiaaaNotificationCursor", String(cursor)); }
+  catch (_) { /* browser storage can be disabled without breaking alerts */ }
+}
+
+function initializeNotificationCursor() {
+  if (state.notificationCursor !== null) return;
+  try {
+    const stored = Number(window.localStorage.getItem("tiaaaNotificationCursor"));
+    if (Number.isSafeInteger(stored) && stored > 0) {
+      state.notificationCursor = stored;
+      state.notificationCursorWasSaved = true;
+      return;
+    }
+  } catch (_) { /* use an in-memory cursor */ }
+  state.notificationCursor = 0;
+  state.notificationCursorWasSaved = false;
+}
+
+function notificationEnabled(category) {
+  const settings = state.config?.settings?.notifications || {};
+  return Boolean(settings.browser_enabled && (settings.events || {})[category] !== false);
+}
+
+function showLocalNotification(item) {
+  if (!notificationEnabled(item.category)) return;
+  const isFailure = item.category === "application_failed";
+  showToast(`${item.title} · ${item.body}`, isFailure);
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const notice = new Notification(item.title, {
+      body: item.body,
+      tag: `tiaaa-${item.id}`,
+    });
+    notice.onclick = () => {
+      window.focus();
+      setView(["agent_input", "application_failed"].includes(item.category) ? "live" : "applications");
+      notice.close();
+    };
+  } catch (_) { /* the in-app alert above is still available */ }
+}
+
+async function refreshNotifications() {
+  if (!state.config) return;
+  initializeNotificationCursor();
+  const response = await api(`/api/notifications?after_id=${state.notificationCursor}&limit=100`);
+  if (response.latest_id < state.notificationCursor) {
+    saveNotificationCursor(response.latest_id);
+    state.notificationCursorWasSaved = true;
+    return;
+  }
+  if (!state.notificationCursorWasSaved) {
+    saveNotificationCursor(response.latest_id);
+    state.notificationCursorWasSaved = true;
+    return;
+  }
+  (response.items || []).forEach(showLocalNotification);
+  if (response.items?.length) {
+    saveNotificationCursor(response.items.at(-1).id);
+  }
+}
+
 async function refreshAll() {
-  const [stats, sources, service] = await Promise.all([api("/api/stats"), api("/api/sources"), api("/api/service"), loadJobs(), loadLatestJobs()]);
-  renderStats(stats); renderSources(sources.items); renderService(service);
+  const [stats, analytics, sources, service] = await Promise.all([
+    api("/api/stats"),
+    api("/api/analytics"),
+    api("/api/sources"),
+    api("/api/service"),
+    loadJobs(),
+    loadLatestJobs(),
+  ]);
+  renderStats(stats); renderAnalytics(analytics); renderSources(sources.items); renderService(service);
   element("lastUpdated").textContent = `Local state · ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
   if (state.activeView === "live") await refreshLive();
 }
@@ -800,6 +1124,7 @@ async function initialize() {
       setOnboardingStep(0);
     }
     await refreshAll();
+    await refreshNotifications();
     const requestedView = new URLSearchParams(window.location.search).get("view");
     if (requestedView && viewCopy[requestedView]) setView(requestedView);
   } catch (error) {
@@ -809,6 +1134,10 @@ async function initialize() {
 }
 
 document.querySelectorAll("[data-view-target]").forEach(button => button.addEventListener("click", () => setView(button.dataset.viewTarget)));
+document.querySelectorAll("[data-analytics-dimension]").forEach(button => button.addEventListener("click", () => {
+  state.analyticsDimension = button.dataset.analyticsDimension;
+  renderAnalyticsBreakdown();
+}));
 element("settingsForm").addEventListener("submit", saveConfiguration);
 element("resumeForm").addEventListener("submit", event => { event.preventDefault(); uploadResume(event.currentTarget); });
 element("onboardResumeForm").addEventListener("submit", event => { event.preventDefault(); uploadResume(event.currentTarget, true); });
@@ -829,6 +1158,27 @@ element("disconnectClaude").addEventListener("click", async event => {
   event.currentTarget.disabled = true;
   try { renderClaudeAuth(await api("/api/claude-auth", { method: "DELETE" })); showToast("Claude account disconnected"); }
   catch (error) { showToast(error.message, true); }
+  finally { event.currentTarget.disabled = false; }
+});
+element("enableBrowserNotifications").addEventListener("click", async () => {
+  if (!("Notification" in window)) return;
+  try {
+    const permission = await Notification.requestPermission();
+    renderBrowserNotificationPermission();
+    if (permission === "granted") {
+      setChecked("browserNotifications", true);
+      showToast("Browser permission granted; save Settings to turn alerts on");
+    } else {
+      showToast("Browser alerts remain blocked", true);
+    }
+  } catch (error) { showToast(error.message, true); }
+});
+element("testEmailNotification").addEventListener("click", async event => {
+  event.currentTarget.disabled = true;
+  try {
+    await api("/api/notifications/test", { method: "POST" });
+    showToast("Test email sent");
+  } catch (error) { showToast(error.message, true); }
   finally { event.currentTarget.disabled = false; }
 });
 document.querySelectorAll(".clear-secret").forEach(button => button.addEventListener("click", async () => {
@@ -875,7 +1225,8 @@ initialize();
 setInterval(() => refreshAll().catch(error => showToast(error.message, true)), 15000);
 setInterval(() => {
   if (state.activeView === "live") refreshWorkers().catch(() => {});
-}, 500);
+}, 1000);
 setInterval(() => {
   if (state.activeView === "live") refreshEvents().catch(() => {});
 }, 2500);
+setInterval(() => refreshNotifications().catch(() => {}), 5000);

@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.database import (
+    add_resume_record,
     answer_agent_inputs,
     answered_agent_inputs,
     claim_next_job,
     claimable_application_count,
     close_connection,
+    get_analytics,
     get_stats,
     ingest_listings,
     init_db,
     list_agent_inputs,
     list_jobs,
+    list_notifications,
     mark_apply_result,
     mark_prepared,
     reconcile_source_registry,
@@ -269,6 +272,100 @@ def test_tracker_milestones_drive_rates_and_are_retained(tmp_path, profile, sett
     assert stats["interview_rate"] == 100.0
     assert row["oa_at"] is not None
     assert row["interview_at"] is not None
+    close_connection(path)
+
+
+def test_analytics_break_down_submitted_applications_and_notifications_are_unique(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "analytics.db"
+    connection = init_db(path)
+    source_one, source_two = SOURCE_DOCUMENTS[:2]
+    listings = [
+        make_listing(
+            source_one,
+            "Acme",
+            "Machine Learning Intern",
+            "https://boards.greenhouse.io/acme/jobs/1",
+            "Remote - US",
+        ),
+        make_listing(
+            source_two,
+            "Beta",
+            "Data Engineering Intern",
+            "https://beta.wd5.myworkdayjobs.com/jobs/2",
+            "New York, NY",
+        ),
+    ]
+    ingest_listings(
+        connection,
+        source_one,
+        [listings[0]],
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    ingest_listings(
+        connection,
+        source_two,
+        [listings[1]],
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    general = add_resume_record(
+        connection,
+        name="General",
+        original_filename="general.pdf",
+        pdf_path=str(tmp_path / "general.pdf"),
+        text_path=str(tmp_path / "general.txt"),
+    )
+    data = add_resume_record(
+        connection,
+        name="Data",
+        original_filename="data.pdf",
+        pdf_path=str(tmp_path / "data.pdf"),
+        text_path=str(tmp_path / "data.txt"),
+    )
+    connection.execute("UPDATE jobs SET base_resume_id = ? WHERE id = 1", (general["id"],))
+    connection.execute("UPDATE jobs SET base_resume_id = ? WHERE id = 2", (data["id"],))
+    connection.commit()
+
+    update_tracker(connection, 1, pipeline_status="applied")
+    update_tracker(connection, 1, outcome_status="oa")
+    update_tracker(connection, 1, outcome_status="oa")
+    update_tracker(connection, 2, pipeline_status="applied")
+    update_tracker(connection, 2, outcome_status="interview")
+
+    analytics = get_analytics(connection)
+    assert analytics["summary"]["applications"] == 2
+    assert analytics["summary"]["oa_rate"] == 50.0
+    assert {row["label"] for row in analytics["dimensions"]["resume"]} == {
+        "General",
+        "Data",
+    }
+    assert {row["label"] for row in analytics["dimensions"]["role_family"]} == {
+        "Machine learning & AI",
+        "Data & analytics",
+    }
+    assert {row["label"] for row in analytics["dimensions"]["portal"]} == {
+        "Greenhouse",
+        "Workday",
+    }
+    assert {row["label"] for row in analytics["dimensions"]["location"]} == {
+        "Remote",
+        "New York, NY",
+    }
+    assert {row["label"] for row in analytics["dimensions"]["source"]} == {
+        source_one.label,
+        source_two.label,
+    }
+    assert [item["category"] for item in list_notifications(connection)] == [
+        "application_applied",
+        "oa",
+        "application_applied",
+        "interview",
+    ]
     close_connection(path)
 
 
