@@ -4,6 +4,18 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-02
+
+### Added
+
+- a separate fit limit for automatic applications
+- an email and browser alert when an application starts
+
+### Changed
+
+- manual Apply actions ignore the automatic fit limit
+- the README now has shorter setup and use instructions
+
 ## [0.5.0] - 2026-07-28
 
 ### Added

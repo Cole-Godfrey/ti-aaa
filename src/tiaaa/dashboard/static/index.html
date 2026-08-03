@@ -240,7 +240,8 @@
             <p class="kicker">AUTOMATION</p><h2>Background behavior</h2>
             <div class="field-grid">
               <label>Poll every (seconds)<input id="pollInterval" type="number" min="30"></label>
-              <label>Minimum fit (1–10)<input id="minimumFit" type="number" min="1" max="10"></label>
+              <label>Minimum fit to prepare (1–10)<input id="minimumFit" type="number" min="1" max="10"></label>
+              <label>Minimum fit to auto-apply (1–10)<input id="autoApplyMinimumFit" type="number" min="1" max="10"></label>
               <label>Workers<input id="workerCount" type="number" min="1" max="8"></label>
               <label>Daily application cap<input id="dayCap" type="number" min="1" max="200"></label>
               <label>Per-cycle cap<input id="cycleCap" type="number" min="1" max="50"></label>
@@ -258,6 +259,7 @@
               <label class="danger-toggle"><input id="allowSubmission" type="checkbox"><span>Allow workers to click final Submit</span></label>
               <label><input id="headless" type="checkbox"><span>Run browser windows headlessly</span></label>
             </div>
+            <p class="fine-print">A job must pass both fit limits before automatic apply starts. A manual Apply action ignores these limits.</p>
           </article>
           <article class="panel settings-card">
             <p class="kicker">COMMON ANSWERS</p><h2>Screening defaults</h2>
@@ -295,7 +297,7 @@
           </article>
           <article class="panel settings-card notifications-card">
             <p class="kicker">NOTIFICATIONS</p><h2>Alerts that matter</h2>
-            <p class="fine-print">Browser alerts work while this dashboard is open. Email alerts are sent by the background service even when the dashboard is closed.</p>
+            <p class="fine-print">Browser alerts need an open dashboard. The background service sends email alerts when the dashboard is closed.</p>
             <div class="notification-browser-row">
               <label><input id="browserNotifications" type="checkbox"><span>Show local browser alerts</span></label>
               <button id="enableBrowserNotifications" class="button ghost" type="button">Grant permission</button>
@@ -303,6 +305,7 @@
             </div>
             <div class="toggle-list notification-events">
               <label><input id="notifyAgentInput" type="checkbox"><span>Agent needs input or review</span></label>
+              <label><input id="notifyApplicationStarted" type="checkbox"><span>Application started</span></label>
               <label><input id="notifyApplicationApplied" type="checkbox"><span>Application submitted</span></label>
               <label><input id="notifyApplicationFailed" type="checkbox"><span>Application attempt failed</span></label>
               <label><input id="notifyOa" type="checkbox"><span>OA recorded</span></label>

@@ -825,6 +825,7 @@ function populateConfiguration(config) {
   setValue("includeKeywords", joinList(filters.include_role_keywords)); setValue("excludeKeywords", joinList(filters.exclude_keywords));
   setValue("allowedLocations", joinList(filters.allowed_locations)); setChecked("remoteOnly", filters.remote_only);
   setValue("pollInterval", settings.poll_interval_seconds); setValue("minimumFit", settings.minimum_fit_score);
+  setValue("autoApplyMinimumFit", automation.auto_apply_minimum_fit_score ?? 7);
   setValue("workerCount", automation.workers); setValue("dayCap", automation.max_applications_per_day);
   setValue("cycleCap", automation.max_applications_per_cycle); setValue("claudeModel", automation.claude_model);
   setValue("maxAttempts", automation.max_attempts); setValue("workerTimeout", automation.timeout_seconds);
@@ -841,6 +842,7 @@ function populateConfiguration(config) {
   setValue("smtpSecurity", notifications.smtp_security || "starttls");
   setValue("smtpUsername", notifications.smtp_username);
   setChecked("notifyAgentInput", notificationEvents.agent_input);
+  setChecked("notifyApplicationStarted", notificationEvents.application_started);
   setChecked("notifyApplicationApplied", notificationEvents.application_applied);
   setChecked("notifyApplicationFailed", notificationEvents.application_failed);
   setChecked("notifyOa", notificationEvents.oa);
@@ -916,6 +918,7 @@ function configurationPayload() {
   settings.automation = settings.automation || {};
   Object.assign(settings.automation, {
     auto_apply_new: checked("autoApplyNew"), allow_submission: checked("allowSubmission"), headless: checked("headless"),
+    auto_apply_minimum_fit_score: Number(value("autoApplyMinimumFit")) || 7,
     workers: Number(value("workerCount")) || 1, max_applications_per_day: Number(value("dayCap")) || 25,
     max_applications_per_cycle: Number(value("cycleCap")) || 5, max_attempts: Number(value("maxAttempts")) || 3,
     timeout_seconds: Number(value("workerTimeout")) || 600, claude_model: value("claudeModel") || "sonnet",
@@ -932,6 +935,7 @@ function configurationPayload() {
     smtp_username: value("smtpUsername"),
     events: {
       agent_input: checked("notifyAgentInput"),
+      application_started: checked("notifyApplicationStarted"),
       application_applied: checked("notifyApplicationApplied"),
       application_failed: checked("notifyApplicationFailed"),
       oa: checked("notifyOa"),

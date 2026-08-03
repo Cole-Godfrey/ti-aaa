@@ -304,6 +304,8 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     javascript = client.get("/static/app.js").text
 
     assert 'id="agentInputPanel"' in index
+    assert 'id="autoApplyMinimumFit"' in index
+    assert 'id="notifyApplicationStarted"' in index
     assert "Local browser stream" in index
     assert "new WebSocket" in javascript
     assert "data-preview-canvas" in javascript
@@ -313,3 +315,19 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert "function listingDate(postingDate, firstSeenAt)" in javascript
     assert "job.posting_date || shortDate(job.first_seen_at)" not in javascript
     assert javascript.count("listingDate(job.posting_date, job.first_seen_at)") == 2
+    assert "automation.auto_apply_minimum_fit_score ?? 7" in javascript
+
+
+def test_web_settings_clamp_the_auto_apply_fit_limit(tmp_path) -> None:
+    paths = AppPaths(tmp_path)
+    client = TestClient(create_app(paths.database, paths=paths))
+
+    response = client.put(
+        "/api/config",
+        json={"settings": {"automation": {"auto_apply_minimum_fit_score": 99}}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["settings"]["automation"][
+        "auto_apply_minimum_fit_score"
+    ] == 10

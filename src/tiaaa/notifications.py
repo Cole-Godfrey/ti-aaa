@@ -20,15 +20,22 @@ from tiaaa.database import (
 )
 
 log = logging.getLogger(__name__)
+_DELIVERY_LOCKS: dict[Path, threading.Lock] = {}
+_DELIVERY_LOCKS_GUARD = threading.Lock()
+
+
+def _delivery_lock(db_path: Path) -> threading.Lock:
+    with _DELIVERY_LOCKS_GUARD:
+        return _DELIVERY_LOCKS.setdefault(db_path, threading.Lock())
 
 
 class NotificationDispatcher:
-    """Deliver queued event notices without ever blocking the automation daemon."""
+    """Deliver queued event notices in one ordered sequence per database."""
 
     def __init__(self, paths: AppPaths, db_path: str | Path | None = None) -> None:
         self.paths = paths
         self.db_path = Path(db_path or paths.database).expanduser().resolve()
-        self._lock = threading.Lock()
+        self._lock = _delivery_lock(self.db_path)
 
     def _email_configuration(self) -> dict[str, Any]:
         load_environment(self.paths)
@@ -113,10 +120,8 @@ class NotificationDispatcher:
         )
 
     def flush(self) -> dict[str, int]:
-        if not self._lock.acquire(blocking=False):
-            return {"sent": 0, "failed": 0, "skipped": 0}
         totals = {"sent": 0, "failed": 0, "skipped": 0}
-        try:
+        with self._lock:
             connection = get_connection(self.db_path)
             config = self._email_configuration()
             for notification in pending_notifications(connection):
@@ -162,6 +167,4 @@ class NotificationDispatcher:
                         status="sent",
                     )
                     totals["sent"] += 1
-            return totals
-        finally:
-            self._lock.release()
+        return totals

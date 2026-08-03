@@ -584,6 +584,7 @@ def _worker(
     paths: AppPaths,
     db_path: str | Path | None,
     submit: bool,
+    notification_dispatcher: NotificationDispatcher,
 ) -> dict[str, int]:
     automation = settings.get("automation", {})
     connection = get_connection(db_path)
@@ -637,6 +638,9 @@ def _worker(
                 worker_id=worker_name,
                 max_attempts=int(automation.get("max_attempts", 3)),
                 target_job_id=target_job_id,
+                minimum_fit_score=int(
+                    automation.get("auto_apply_minimum_fit_score", 7)
+                ),
             )
             if job is None:
                 break
@@ -648,6 +652,14 @@ def _worker(
                 message="Filling the application in the browser",
                 screenshot_path=str(preview_path.resolve()),
             )
+            try:
+                notification_dispatcher.flush()
+            except Exception as exc:
+                log.warning(
+                    "Notification delivery skipped when application %s started: %s",
+                    job["id"],
+                    exc,
+                )
             try:
                 agent_result = _run_agent(
                     job=job,
@@ -772,6 +784,9 @@ def run_applications(
     """Run a bounded batch; continuous polling is orchestrated by `tiaaa watch`."""
 
     automation = settings.get("automation", {})
+    auto_apply_minimum_fit_score = max(
+        1, min(10, int(automation.get("auto_apply_minimum_fit_score", 7)))
+    )
     if submit and not bool(automation.get("allow_submission")):
         raise PermissionError(
             "Submission is disabled in settings.yaml. Set automation.allow_submission: true "
@@ -795,6 +810,7 @@ def run_applications(
             connection,
             max_attempts=int(automation.get("max_attempts", 3)),
             target_job_id=target_job_id,
+            minimum_fit_score=auto_apply_minimum_fit_score,
         ),
     )
     if requested <= 0:
@@ -808,6 +824,7 @@ def run_applications(
     quotas = [base + (1 if worker_id < extra else 0) for worker_id in range(workers)]
     totals = {"applied": 0, "review": 0, "failed": 0, "expired": 0}
     lock = threading.Lock()
+    notification_dispatcher = NotificationDispatcher(paths, db_path)
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tiaaa-apply") as executor:
         futures = [
             executor.submit(
@@ -820,6 +837,7 @@ def run_applications(
                 paths=paths,
                 db_path=db_path,
                 submit=submit,
+                notification_dispatcher=notification_dispatcher,
             )
             for worker_id, quota in enumerate(quotas)
             if quota > 0
@@ -830,7 +848,7 @@ def run_applications(
                 for key in totals:
                     totals[key] += result[key]
     try:
-        NotificationDispatcher(paths, db_path).flush()
+        notification_dispatcher.flush()
     except Exception as exc:
         log.warning("Notification delivery skipped after application run: %s", exc)
     return totals

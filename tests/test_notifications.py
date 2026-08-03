@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tiaaa.config import SOURCE_DOCUMENTS, AppPaths, save_settings
 from tiaaa.database import (
+    add_event,
     get_connection,
     ingest_listings,
     init_db,
@@ -48,6 +49,8 @@ def test_email_dispatcher_respects_event_toggles_and_sends_a_test(
         settings=settings,
         include_existing=True,
     )
+    add_event(connection, 1, "applying", "worker-0")
+    connection.commit()
     update_tracker(connection, 1, pipeline_status="applied")
     update_tracker(connection, 1, outcome_status="oa")
 
@@ -59,15 +62,18 @@ def test_email_dispatcher_respects_event_toggles_and_sends_a_test(
     )
     dispatcher = NotificationDispatcher(paths)
 
-    assert dispatcher.flush() == {"sent": 1, "failed": 0, "skipped": 1}
-    assert sent[0]["Subject"] == "[TI-AAA] Application submitted"
+    assert dispatcher.flush() == {"sent": 2, "failed": 0, "skipped": 1}
+    assert [message["Subject"] for message in sent] == [
+        "[TI-AAA] Application started",
+        "[TI-AAA] Application submitted",
+    ]
     statuses = [
         row["email_status"]
         for row in get_connection(paths.database)
         .execute("SELECT email_status FROM notifications ORDER BY id")
         .fetchall()
     ]
-    assert statuses == ["sent", "skipped"]
+    assert statuses == ["sent", "sent", "skipped"]
 
     dispatcher.send_test()
     assert sent[-1]["Subject"] == "[TI-AAA] Notification test"

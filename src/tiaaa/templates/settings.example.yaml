@@ -23,6 +23,9 @@ automation:
   # Opt in to browser workers for matching roles discovered after this is enabled.
   # Current and previously discovered roles remain available for manual Apply actions.
   auto_apply_new: false
+  # Automatic workers only claim jobs at or above this fit score.
+  # Manual Apply actions ignore this limit.
+  auto_apply_minimum_fit_score: 7
   # False fills forms for review; true lets the background service click final Submit.
   allow_submission: false
   workers: 1
@@ -47,6 +50,7 @@ notifications:
   smtp_username: ""
   events:
     agent_input: true
+    application_started: true
     application_applied: true
     application_failed: true
     oa: true

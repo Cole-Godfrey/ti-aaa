@@ -106,6 +106,56 @@ def test_first_sync_listing_can_be_explicitly_sent_to_agent(tmp_path, profile, s
     close_connection(path)
 
 
+def test_auto_apply_fit_limit_blocks_low_fit_jobs_but_manual_apply_bypasses_it(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "auto-fit-limit.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    jobs = [
+        make_listing(source, "Low Fit", "Software Intern", "https://jobs.test/low"),
+        make_listing(source, "High Fit", "Backend Intern", "https://jobs.test/high"),
+    ]
+    ingest_listings(
+        connection, source, jobs, profile=profile, settings=settings, include_existing=True
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'ready', eligibility = 'eligible',
+                        discovered_as_new = 1,
+                        fit_score = CASE WHEN company = 'Low Fit' THEN 6 ELSE 8 END
+        """
+    )
+    connection.commit()
+
+    assert claimable_application_count(
+        connection, max_attempts=3, minimum_fit_score=7
+    ) == 1
+    automatic = claim_next_job(
+        connection,
+        worker_id="worker-0",
+        max_attempts=3,
+        minimum_fit_score=7,
+    )
+    assert automatic is not None
+    assert automatic["company"] == "High Fit"
+
+    manual = claim_next_job(
+        connection,
+        worker_id="worker-1",
+        max_attempts=3,
+        target_job_id=1,
+        minimum_fit_score=10,
+    )
+    assert manual is not None
+    assert manual["company"] == "Low Fit"
+    assert [item["category"] for item in list_notifications(connection)] == [
+        "application_started",
+        "application_started",
+    ]
+    close_connection(path)
+
+
 def test_same_role_from_second_repo_is_deduplicated_by_fingerprint(tmp_path, profile, settings) -> None:
     path = tmp_path / "dedupe.db"
     connection = init_db(path)

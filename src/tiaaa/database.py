@@ -808,7 +808,13 @@ def _notification_for_event(
         return None
     event_detail = str(detail or "").casefold()
     mapping: tuple[str, str, str] | None = None
-    if event_type == "applied" or (
+    if event_type == "applying":
+        mapping = (
+            "application_started",
+            "Application started",
+            "The agent started this application.",
+        )
+    elif event_type == "applied" or (
         event_type == "status" and event_detail == "applied"
     ):
         mapping = (
@@ -1867,6 +1873,7 @@ def claim_next_job(
     worker_id: str,
     max_attempts: int,
     target_job_id: int | None = None,
+    minimum_fit_score: int = 1,
 ) -> dict[str, Any] | None:
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -1886,6 +1893,9 @@ def claim_next_job(
             )
         clauses.append("apply_attempts < ?")
         parameters: list[Any] = [max_attempts]
+        if target_job_id is None:
+            clauses.append("COALESCE(fit_score, 0) >= ?")
+            parameters.append(max(1, min(10, int(minimum_fit_score))))
         if target_job_id is not None:
             clauses.append("id = ?")
             parameters.append(target_job_id)
@@ -1922,6 +1932,7 @@ def claimable_application_count(
     *,
     max_attempts: int,
     target_job_id: int | None = None,
+    minimum_fit_score: int = 1,
 ) -> int:
     """Count jobs that an application worker could atomically claim."""
 
@@ -1941,6 +1952,9 @@ def claimable_application_count(
         )
     clauses.append("apply_attempts < ?")
     parameters: list[Any] = [max_attempts]
+    if target_job_id is None:
+        clauses.append("COALESCE(fit_score, 0) >= ?")
+        parameters.append(max(1, min(10, int(minimum_fit_score))))
     if target_job_id is not None:
         clauses.append("id = ?")
         parameters.append(target_job_id)

@@ -68,6 +68,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "automation": {
         "auto_apply_new": False,
+        "auto_apply_minimum_fit_score": 7,
         "allow_submission": False,
         "workers": 1,
         "max_applications_per_cycle": 5,
@@ -88,6 +89,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "smtp_username": "",
         "events": {
             "agent_input": True,
+            "application_started": True,
             "application_applied": True,
             "application_failed": True,
             "oa": True,
@@ -241,6 +243,9 @@ def save_settings(settings: dict[str, Any], paths: AppPaths | None = None) -> Pa
     merged["poll_interval_seconds"] = max(30, int(merged.get("poll_interval_seconds", 300)))
     merged["minimum_fit_score"] = max(1, min(10, int(merged.get("minimum_fit_score", 5))))
     automation = merged["automation"]
+    automation["auto_apply_minimum_fit_score"] = max(
+        1, min(10, int(automation.get("auto_apply_minimum_fit_score", 7)))
+    )
     automation["workers"] = max(1, min(8, int(automation.get("workers", 1))))
     automation["max_applications_per_cycle"] = max(
         1, min(50, int(automation.get("max_applications_per_cycle", 5)))
