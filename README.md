@@ -20,10 +20,16 @@ TI-AAA reads these repositories:
 - Automatic apply is off by default.
 - Automatic apply considers only jobs that arrive after the baseline.
 - The default automatic fit limit is 7 out of 10.
-- A job must pass the preparation limit and the automatic fit limit.
-- A manual **Apply** action ignores both fit limits.
-- Final submission is off by default. The agent stops for review.
-- Resume tailoring can reorder facts. It does not add skills, work, or results.
+- The fit score measures candidate qualifications. It does not use role or location preferences.
+- Strict role, location, and authorization rules can stop an application. They do not change the fit score.
+- You can use preferences as an extra automatic application rule. This rule is off by default.
+- Auto mode applies to one best-fit role for each company.
+- New job batches stay in a visible queue. One browser applies to them in order.
+- A manual **Apply** action ignores the automatic fit limit.
+- A manual application stops on the completed form. You confirm final submission in **Agent**.
+- Auto mode does not wait for user input. It submits safe applications and records why it stops others.
+- Optional Web Push alerts report new Auto-mode jobs. They require Auto mode and browser permission.
+- TI-AAA does not rewrite a resume. It submits an unchanged copy named `First_Last_Resume.pdf`.
 - The service continues to work when the dashboard is closed.
 - The computer and Docker must stay on.
 
@@ -34,14 +40,19 @@ TI-AAA reads these repositories:
 - A latest-jobs table with search and job details
 - Manual and automatic application modes
 - A separate fit limit for automatic applications
+- An optional preference gate for automatic applications
+- One best-fit automatic application per company
+- A visible serial application queue in the Agent tab
+- Built-in browser alerts for new Auto-mode queue entries
 - Multiple resumes with job-specific selection
-- Fact-preserving resume tailoring
+- Byte-preserved application resume copies
 - A live view of the browser worker
 - Input fields for agent questions
+- Final submission confirmation on the live completed form
 - A spreadsheet-style application tracker
 - Resume records for each submitted application
 - Application, online assessment (OA), interview, and offer statistics
-- Browser alerts and email alerts
+- A welcome-back summary of applications and stopped Auto mode attempts
 - A command-line interface (CLI) and a Python API
 
 ## Quick start with Docker
@@ -52,12 +63,13 @@ Docker is the recommended setup. It includes Python, Chromium, Node.js, Claude C
 
 Install [Docker Desktop](https://www.docker.com/products/docker-desktop/). Start Docker before you run TI-AAA.
 
-### 2. Start TI-AAA
+### 2. Download and start TI-AAA
 
-Open a terminal in this repository. Run:
+Run:
 
 ```bash
-cd TI-AAA
+git clone https://github.com/Cole-Godfrey/ti-aaa.git
+cd ti-aaa
 docker compose up -d --build
 ```
 
@@ -72,42 +84,31 @@ Complete these setup tasks:
 1. Enter your profile and education facts.
 2. Upload at least one PDF resume.
 3. Connect your Claude account if you want browser automation.
-4. Select review mode or submit mode.
 
 Use **Connect Claude account** with a Claude Pro or Max account. You do not need an Anthropic API key for this method. An Anthropic API key is an optional alternative.
 
+Claude subscription login is a Claude Code compatibility path. Anthropic may change or discontinue subscription login for this workflow in the future; if it stops working, use `ANTHROPIC_API_KEY` instead.
+
 The first repository check creates the baseline. You can close the dashboard after setup. The Docker service continues to poll.
 
-### 4. Set the application limits
+### 4. Set automatic application rules
 
 Open **Settings**. Use these controls:
 
-- **Minimum fit to prepare** controls automatic file preparation. Its default is 5.
-- **Minimum fit to auto-apply** controls automatic application claims. Its default is 7.
-- **Automatically apply to new matching roles** turns automatic apply on or off.
-- **Allow workers to click final Submit** controls final submission.
+- **Auto mode** turns unattended applications on or off. It is off by default.
+- **Minimum qualification fit** controls automatic applications. Its default is 7.
+- **Use my preferences as an application gate** can also require your role, location, and term preferences. It is off by default.
+- **Notify this browser when new jobs enter the queue** appears only when Auto mode is on. Select it once, allow the browser prompt, then select **Save all settings**. It does not use email or SMS.
 - **Daily application cap** limits submissions for one day.
 - **Per-cycle cap** limits one poll cycle.
 
-If the preparation limit is higher than the automatic limit, the preparation limit controls the result. Manual **Apply** actions ignore the two fit limits.
+Auto mode submits one best-fit role for each company. It does not ask for user input. If a required personal fact is not available, it stops the application and adds the reason to the next welcome-back summary. Manual **Apply** actions ignore the automatic fit limit.
 
-### 5. Set the start email alert
+Browser alerts work on `localhost` and use the browser's Web Push service. TI-AAA creates and stores the required keys in its private data volume. It does not ask you to configure a notification account or key.
 
-Open **Settings**, then find **Notifications**.
+### 5. Apply to a job now
 
-1. Select **Send email alerts**.
-2. Keep **Application started** selected.
-3. Enter the destination and sender addresses.
-4. Enter the SMTP host, port, security type, and user name.
-5. Enter the SMTP password or app password.
-6. Save the settings.
-7. Select **Send test email**.
-
-The background service sends the start email after a worker claims a job. The dashboard does not need to be open.
-
-### 6. Apply to a job now
-
-Open **Latest jobs**. Select a job, then select **Apply**. Open **Agent** to watch the browser and answer agent questions.
+Open **Latest jobs**. Select a job, then select **Apply**. Open **Agent** to watch the browser and answer factual questions. When the form is complete, review the live view and select **Submit application**.
 
 The manual action does not require automatic apply. It also does not use the automatic fit limit.
 
@@ -157,7 +158,8 @@ You need:
 Create an environment and install TI-AAA:
 
 ```bash
-cd TI-AAA
+git clone https://github.com/Cole-Godfrey/ti-aaa.git
+cd ti-aaa
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -172,7 +174,7 @@ On Windows PowerShell, use this activation command:
 Install Claude Code if you want browser automation:
 
 ```bash
-npm install -g @anthropic-ai/claude-code@2.1.215
+npm install -g @anthropic-ai/claude-code@2.1.226
 ```
 
 Start the website and background service:
@@ -238,7 +240,7 @@ tiaaa watch --apply --submit
 Install the package in your environment:
 
 ```bash
-pip install -e ./TI-AAA
+pip install ti-aaa
 ```
 
 Use the public API:
@@ -265,7 +267,6 @@ The web app manages these settings. Terminal users can edit `settings.yaml`.
 
 ```yaml
 poll_interval_seconds: 300
-minimum_fit_score: 5
 
 service:
   enabled: true
@@ -274,42 +275,54 @@ service:
 automation:
   auto_apply_new: false
   auto_apply_minimum_fit_score: 7
+  auto_apply_use_preferences: false
   allow_submission: false
-  workers: 1
   max_applications_per_cycle: 5
   max_applications_per_day: 25
 
-notifications:
-  email_enabled: false
-  email_to: ""
-  email_from: ""
-  smtp_host: ""
-  smtp_port: 587
-  smtp_security: starttls
-  smtp_username: ""
-  events:
-    application_started: true
 ```
 
-The web app stores secret values in a private `.env` file. It does not return secret values through the configuration API.
+The dashboard does not show API key fields. Add optional secrets to the private `.env` file in the TI-AAA data directory, or pass them as environment variables.
+
+For Docker, copy the example file in the repository. Then uncomment only the values that you need:
+
+```bash
+cp .env.example .env
+```
+
+Restart the container after you edit `.env`:
+
+```bash
+docker compose up -d
+```
+
+For a native install, add the same values to `~/.tiaaa/.env` and restart `tiaaa serve`.
 
 These secrets are optional:
 
 - `ANTHROPIC_API_KEY` for API-based Claude access
 - `GITHUB_TOKEN` for a higher GitHub request limit
 - `OPENAI_API_KEY` or `GEMINI_API_KEY` for optional scoring and cover letters
-- `TIAAA_APPLICATION_PASSWORD` for an employer application account
-- `TIAAA_SMTP_PASSWORD` for email alerts
 
 ## Data and safety
 
 - Docker stores data in the `tiaaa-data` volume.
 - Native mode stores data in `~/.tiaaa`.
+- TI-AAA has no developer-operated server and sends no product telemetry.
+- Repository sync sends requests to GitHub. A configured `GITHUB_TOKEN` is sent only to GitHub.
+- Claude browser automation receives the selected resume text, candidate profile, prepared answers, and job metadata. It interacts with the employer site, which receives the fields and files entered for that application.
+- Optional OpenAI, Gemini, or custom LLM preparation sends resume text and job metadata to the provider you configure.
+- Optional Web Push sends the company and role in an encrypted notification through your browser vendor's push service.
 - The dashboard binds to `127.0.0.1` by default.
 - Do not expose the dashboard to the public internet without access control.
+- If you use an authenticated reverse proxy, set `TIAAA_TRUSTED_HOSTS` to a comma-separated list of its public hostnames.
+- Community internship lists and their outbound links are third-party data. TI-AAA rejects listed links that directly target local/private-network addresses, but you should review the sources and employers before enabling Auto mode.
 - The agent does not invent candidate facts.
-- Unknown required answers stop the agent for review.
+- Manual applications ask for unknown, ordinary candidate facts.
+- Auto mode does not ask for input. A missing required personal fact stops that application and is recorded.
+- Auto mode can answer subjective questions and compensation questions without inventing candidate facts.
 - CAPTCHA, MFA, SSO, assessments, and identity checks require manual action.
+- Employer account creation and passwords require manual action; TI-AAA does not store or send an application-site password.
 - The agent refuses payment, bank, government ID, and biometric requests.
 - Application limits stay active in automatic mode.
 
@@ -318,7 +331,8 @@ Job applications have real effects. Check your facts, limits, employer rules, sc
 ## Development
 
 ```bash
-cd TI-AAA
+git clone https://github.com/Cole-Godfrey/ti-aaa.git
+cd ti-aaa
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'

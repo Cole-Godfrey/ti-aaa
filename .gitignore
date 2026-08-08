@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .DS_Store
 .idea/
 .venv/
@@ -19,3 +21,17 @@ dist/
 *.sqlite
 *.sqlite3
 *.log
+web-push-private.pem
+*.key
+*.pem
+/profile.json
+/settings.yaml
+/resume.pdf
+/resume.txt
+/application-packets/
+/browser-profiles/
+/live-previews/
+/resumes/
+/workers/
+/logs/
+/.claude/

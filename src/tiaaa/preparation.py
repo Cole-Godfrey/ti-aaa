@@ -12,7 +12,7 @@ from typing import Any
 from tiaaa.config import AppPaths
 from tiaaa.database import add_event, get_connection, mark_prepared, pending_preparation, utc_now
 from tiaaa.llm import get_client
-from tiaaa.resumes import choose_and_tailor_resume, import_legacy_resume
+from tiaaa.resumes import choose_resume, import_legacy_resume, prepare_resume_copy
 
 log = logging.getLogger(__name__)
 
@@ -66,15 +66,15 @@ def score_jobs_with_llm(
     client = get_client()
     try:
         for job in jobs:
-            _, _, _, resume = choose_and_tailor_resume(
+            _, _, _, resume = choose_resume(
                 job=job,
                 paths=paths,
                 profile={},
-                tailor=False,
                 db_path=db_path,
             )
             prompt = f"""Evaluate this student's fit for a technology internship using ONLY the facts below.
 The listing came from a curated GitHub repository; no full job description is available.
+Score only how qualified the student is. Do not use role, location, term, or work-style preferences.
 Do not infer credentials that are absent. Return JSON only:
 {{"score": 1-10, "reasoning": "one concise sentence"}}
 
@@ -159,31 +159,27 @@ def prepare_jobs(
     target_job_id: int | None = None,
     db_path: str | Path | None = None,
 ) -> dict[str, int]:
-    """Select the best resume, tailor it fact-safely, and prepare application packets."""
+    """Select the best resume and prepare a byte-preserving application copy."""
 
     import_legacy_resume(paths=paths, db_path=db_path)
-    minimum_score = int(settings.get("minimum_fit_score", 5))
     connection = get_connection(db_path)
     jobs = pending_preparation(
         connection,
-        minimum_score,
         limit,
         target_job_id=target_job_id,
     )
     use_llm = bool(settings.get("preparation", {}).get("use_llm"))
     generate_cover = bool(settings.get("preparation", {}).get("generate_cover_letters", True))
-    tailor = bool(settings.get("preparation", {}).get("tailor_resumes", True))
     prepared = errors = 0
 
     for job in jobs:
         cover_path: Path | None = None
         notes = "Repository metadata retained for the browser agent."
         try:
-            selected, resume_path, tailoring_reason, resume = choose_and_tailor_resume(
+            selected, resume_path, tailoring_reason, resume = prepare_resume_copy(
                 job=job,
                 paths=paths,
                 profile=profile,
-                tailor=tailor,
                 db_path=db_path,
             )
             if use_llm and generate_cover:

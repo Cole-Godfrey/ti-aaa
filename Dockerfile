@@ -1,7 +1,7 @@
 FROM node:22-bookworm-slim
 
-ARG CLAUDE_CODE_VERSION=2.1.215
-ARG PLAYWRIGHT_MCP_VERSION=0.0.78
+ARG CLAUDE_CODE_VERSION=2.1.226
+ARG PLAYWRIGHT_MCP_VERSION=0.0.79
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -32,6 +32,7 @@ COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY src ./src
 
 RUN python3 -m venv /opt/venv \
+    && pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir . \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin tiaaa \
     && mkdir -p /data \

@@ -15,8 +15,10 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 ruff check .
-pytest
+pytest --cov=tiaaa --cov-report=term-missing --cov-fail-under=65
+pip-audit
 python -m build
+python -m twine check dist/*
 ```
 
 The test suite must run without network access. Live-source checks may be performed manually, but CI fixtures should be small representative excerpts rather than copies of upstream lists.
@@ -54,7 +56,9 @@ The browser agent must:
 - stop on CAPTCHA, MFA, SSO, or email verification
 - avoid sensitive financial, identity, biometric, and device-permission flows
 - verify visible confirmation before recording an application
-- require explicit manual intent or `automation.auto_apply_new`; final submission also requires `automation.allow_submission`, and terminal batches require `--submit`
+- require an explicit manual Apply action followed by dashboard confirmation, or an enabled `automation.auto_apply_new` unattended mode
+- keep terminal final submission behind both `automation.allow_submission` and `--submit`
+- stop for manual action instead of creating an employer account or handling its password
 
 ## Licensing
 

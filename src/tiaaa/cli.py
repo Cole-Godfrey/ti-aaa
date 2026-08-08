@@ -37,7 +37,6 @@ from tiaaa.database import (
     source_status,
     update_tracker,
 )
-from tiaaa.notifications import NotificationDispatcher
 from tiaaa.resumes import import_legacy_resume
 
 logging.basicConfig(
@@ -277,7 +276,7 @@ def _run_apply(
     from tiaaa.apply import run_applications
 
     mode = "SUBMIT" if submit else "REVIEW ONLY"
-    console.print(f"\n[bold]Launching browser workers[/bold] · {mode} · {workers} worker(s)")
+    console.print(f"\n[bold]Launching serial application queue[/bold] · {mode} · one browser")
     result = run_applications(
         profile=profile,
         settings=settings,
@@ -301,7 +300,16 @@ def apply(
         int | None,
         typer.Option("--limit", "-l", min=1, help="Maximum jobs in this batch."),
     ] = None,
-    workers: Annotated[int, typer.Option("--workers", "-w", min=1, max=8)] = 1,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            "-w",
+            min=1,
+            max=8,
+            help="Deprecated compatibility option; the queue always uses one browser.",
+        ),
+    ] = 1,
     submit: Annotated[
         bool,
         typer.Option(help="Allow the browser agent to click the final Submit button."),
@@ -356,7 +364,16 @@ def run(
         bool,
         typer.Option(help="Permit final submission (also requires settings opt-in)."),
     ] = False,
-    workers: Annotated[int, typer.Option("--workers", "-w", min=1, max=8)] = 1,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            "-w",
+            min=1,
+            max=8,
+            help="Deprecated compatibility option; the queue always uses one browser.",
+        ),
+    ] = 1,
 ) -> None:
     """Run one full sync → score → prepare → optional apply cycle."""
 
@@ -405,7 +422,16 @@ def watch(
         int | None,
         typer.Option(min=30, help="Override polling interval in seconds."),
     ] = None,
-    workers: Annotated[int, typer.Option("--workers", "-w", min=1, max=8)] = 1,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            "-w",
+            min=1,
+            max=8,
+            help="Deprecated compatibility option; the queue always uses one browser.",
+        ),
+    ] = 1,
 ) -> None:
     """Continuously poll for newly added internships and process only the new queue."""
 
@@ -531,10 +557,6 @@ def mark(
     if row is None:
         console.print(f"[red]Job ID {job_id} was not found.[/red]")
         raise typer.Exit(code=1)
-    try:
-        NotificationDispatcher(paths).flush()
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Notification delivery skipped: %s", exc)
     console.print(f"[green]Updated[/green] {row['company']} · {row['role']}")
 
 
@@ -573,7 +595,10 @@ def _serve_dashboard(
     bind_host = host or str(dashboard_settings.get("host", "127.0.0.1"))
     bind_port = port or int(dashboard_settings.get("port", 8787))
     if bind_host not in {"127.0.0.1", "localhost", "::1"}:
-        console.print("[yellow]Warning:[/yellow] the dashboard has no authentication; use a firewall.")
+        console.print(
+            "[yellow]Warning:[/yellow] the dashboard has no authentication. Put it behind an "
+            "authenticated proxy and set TIAAA_TRUSTED_HOSTS to the public hostname."
+        )
     url_host = "127.0.0.1" if bind_host in {"0.0.0.0", "::"} else bind_host
     url = f"http://{url_host}:{bind_port}"
     mode = "dashboard + background agent" if background else "dashboard only"
@@ -581,7 +606,12 @@ def _serve_dashboard(
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     uvicorn.run(
-        create_app(paths.database, paths=paths, start_service=background),
+        create_app(
+            paths.database,
+            paths=paths,
+            start_service=background,
+            trusted_hosts=(bind_host,) if bind_host not in {"0.0.0.0", "::"} else (),
+        ),
         host=bind_host,
         port=bind_port,
         log_level="info",

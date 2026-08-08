@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse, urlsplit
 
 from fastapi import (
-    BackgroundTasks,
     FastAPI,
     File,
     Form,
@@ -20,7 +21,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -44,6 +45,7 @@ from tiaaa.config import (
 )
 from tiaaa.database import (
     archive_resume,
+    close_all_connections,
     get_analytics,
     get_app_state,
     get_connection,
@@ -51,21 +53,100 @@ from tiaaa.database import (
     get_stats,
     get_worker_states,
     init_db,
-    latest_notification_id,
     list_agent_inputs,
+    list_application_queue,
     list_jobs,
-    list_notifications,
     list_resumes,
+    record_dashboard_visit,
     set_app_state,
     source_baseline_complete,
     source_status,
     update_tracker,
 )
-from tiaaa.notifications import NotificationDispatcher
 from tiaaa.resumes import MAX_RESUME_BYTES, store_resume
 from tiaaa.service import AutomationService, service_for
+from tiaaa.web_push import (
+    push_subscription_count,
+    remove_push_subscription,
+    store_push_subscription,
+    vapid_public_key,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+DEFAULT_TRUSTED_HOSTS = {"127.0.0.1", "::1", "localhost", "testserver"}
+
+
+def _authority(value: str) -> tuple[str, int | None] | None:
+    """Return a normalized Host/Origin authority without accepting URL components."""
+
+    try:
+        parsed = urlsplit(f"//{value}")
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return hostname.casefold().rstrip("."), port
+
+
+def _trusted_host_patterns(extra: tuple[str, ...] | None) -> tuple[str, ...]:
+    configured = os.environ.get("TIAAA_TRUSTED_HOSTS", "")
+    values = set(DEFAULT_TRUSTED_HOSTS)
+    values.update(item.strip() for item in configured.split(",") if item.strip())
+    values.update(item.strip() for item in (extra or ()) if item.strip())
+    return tuple(sorted(values))
+
+
+def _host_matches(hostname: str, patterns: tuple[str, ...]) -> bool:
+    for raw_pattern in patterns:
+        pattern = raw_pattern.casefold().strip().strip("[]").rstrip(".")
+        if pattern.startswith("*."):
+            suffix = pattern[1:]
+            if hostname.endswith(suffix) and hostname != suffix[1:]:
+                return True
+        elif hostname == pattern:
+            return True
+    return False
+
+
+def _host_is_trusted(host_header: str, patterns: tuple[str, ...]) -> bool:
+    authority = _authority(host_header)
+    return bool(authority and _host_matches(authority[0], patterns))
+
+
+def _origin_matches_host(origin: str, host_header: str) -> bool:
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    return _authority(parsed.netloc) == _authority(host_header)
+
+
+def _browser_request_is_same_origin(
+    *, host_header: str, origin: str | None, fetch_site: str | None
+) -> bool:
+    if (fetch_site or "").casefold() == "cross-site":
+        return False
+    return origin is None or _origin_matches_host(origin, host_header)
 
 
 class TrackerUpdate(BaseModel):
@@ -109,6 +190,26 @@ class AgentInputAnswers(BaseModel):
     answers: dict[str, Any] = Field(default_factory=dict)
 
 
+class WebPushKeys(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    p256dh: str = Field(min_length=16, max_length=1024)
+    auth: str = Field(min_length=8, max_length=512)
+
+
+class WebPushSubscription(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(min_length=16, max_length=4096)
+    keys: WebPushKeys
+
+
+class WebPushRemoval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(min_length=16, max_length=4096)
+
+
 def _public_resume(row: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
@@ -144,6 +245,7 @@ def create_app(
     *,
     paths: AppPaths | None = None,
     start_service: bool = False,
+    trusted_hosts: tuple[str, ...] | None = None,
 ) -> FastAPI:
     if paths is None:
         paths = get_paths(Path(db_path).parent if db_path is not None else None)
@@ -153,10 +255,10 @@ def create_app(
     database_path = Path(db_path).resolve() if db_path is not None else paths.database
     init_db(database_path)
     claude_auth = ClaudeAuthManager(paths)
-    notification_dispatcher = NotificationDispatcher(paths, database_path)
     background_service: AutomationService | None = (
         service_for(paths, database_path) if start_service else None
     )
+    allowed_hosts = _trusted_host_patterns(trusted_hosts)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -168,6 +270,7 @@ def create_app(
             if background_service is not None:
                 background_service.stop()
             claude_auth.close()
+            close_all_connections(database_path)
 
     app = FastAPI(
         title="TI-AAA Dashboard",
@@ -180,11 +283,19 @@ def create_app(
     app.state.paths = paths
     app.state.service = background_service
     app.state.claude_auth = claude_auth
-    app.state.notification_dispatcher = notification_dispatcher
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
+        host_header = request.headers.get("host", "")
+        if not _host_is_trusted(host_header, allowed_hosts):
+            return JSONResponse(status_code=400, content={"detail": "Invalid host header"})
+        if request.method in UNSAFE_HTTP_METHODS and not _browser_request_is_same_origin(
+            host_header=host_header,
+            origin=request.headers.get("origin"),
+            fetch_site=request.headers.get("sec-fetch-site"),
+        ):
+            return JSONResponse(status_code=403, content={"detail": "Cross-origin request blocked"})
         response = await call_next(request)
         if request.url.path == "/api/docs":
             script_sources = "'self' 'unsafe-inline' https://cdn.jsdelivr.net"
@@ -198,6 +309,8 @@ def create_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
+        if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     def connection():
@@ -206,6 +319,13 @@ def create_app(
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker() -> FileResponse:
+        response = FileResponse(STATIC_DIR / "sw.js", media_type="application/javascript")
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Service-Worker-Allowed"] = "/"
+        return response
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -243,6 +363,43 @@ def create_app(
             "settings": load_settings(paths),
             "secrets": secret_status(paths),
         }
+
+    def push_status() -> dict[str, Any]:
+        automation = load_settings(paths).get("automation", {})
+        return {
+            "public_key": vapid_public_key(paths),
+            "subscription_count": push_subscription_count(connection()),
+            "enabled": bool(
+                automation.get("auto_apply_new", False)
+                and automation.get("web_push_notifications", False)
+            ),
+        }
+
+    @app.get("/api/push")
+    def get_push_status() -> dict[str, Any]:
+        return push_status()
+
+    @app.post("/api/push/subscriptions", status_code=201)
+    def subscribe_to_push(
+        payload: WebPushSubscription, request: Request
+    ) -> dict[str, Any]:
+        endpoint = payload.endpoint.strip()
+        parsed = urlparse(endpoint)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise HTTPException(status_code=422, detail="Push endpoint must use HTTPS")
+        store_push_subscription(
+            connection(),
+            endpoint=endpoint,
+            p256dh=payload.keys.p256dh,
+            auth=payload.keys.auth,
+            user_agent=request.headers.get("user-agent", "")[:500],
+        )
+        return push_status()
+
+    @app.delete("/api/push/subscriptions")
+    def unsubscribe_from_push(payload: WebPushRemoval) -> dict[str, Any]:
+        remove_push_subscription(connection(), payload.endpoint.strip())
+        return push_status()
 
     @app.get("/api/claude-auth")
     def claude_auth_status() -> dict[str, Any]:
@@ -310,24 +467,9 @@ def create_app(
     def analytics() -> dict[str, Any]:
         return get_analytics(connection())
 
-    @app.get("/api/notifications")
-    def notifications(
-        after_id: int = Query(default=0, ge=0),
-        limit: int = Query(default=50, ge=1, le=200),
-    ) -> dict[str, Any]:
-        database = connection()
-        return {
-            "items": list_notifications(database, after_id=after_id, limit=limit),
-            "latest_id": latest_notification_id(database),
-        }
-
-    @app.post("/api/notifications/test")
-    def test_notification() -> dict[str, str]:
-        try:
-            app.state.notification_dispatcher.send_test()
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {"status": "sent"}
+    @app.post("/api/dashboard/visit")
+    def dashboard_visit() -> dict[str, Any]:
+        return record_dashboard_visit(connection())
 
     @app.get("/api/jobs")
     def jobs(
@@ -364,9 +506,9 @@ def create_app(
         ).fetchall()
         result["events"] = [dict(item) for item in events]
         result["application_mode"] = (
-            "submit"
-            if bool(load_settings(paths).get("automation", {}).get("allow_submission"))
-            else "review"
+            "auto"
+            if result.get("apply_origin") == "auto"
+            else "manual_confirm"
         )
         return result
 
@@ -392,11 +534,7 @@ def create_app(
         return {
             "status": "queued",
             "job": _public_job(row),
-            "mode": (
-                "submit"
-                if bool(load_settings(paths).get("automation", {}).get("allow_submission"))
-                else "review"
-            ),
+            "mode": "manual_confirm",
         }
 
     @app.post("/api/jobs/{job_id}/inputs", status_code=202)
@@ -410,11 +548,21 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "queued", "job": _public_job(row)}
 
+    @app.post("/api/jobs/{job_id}/submit", status_code=202)
+    def confirm_job_submission(job_id: int) -> dict[str, Any]:
+        service = require_service()
+        try:
+            row = service.confirm_submission(job_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "submitting", "job": _public_job(row)}
+
     @app.patch("/api/jobs/{job_id}")
     def patch_job(
         job_id: int,
         update: TrackerUpdate,
-        background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
         try:
             row = update_tracker(
@@ -430,7 +578,6 @@ def create_app(
             raise HTTPException(status_code=404, detail="Job not found")
         if update.pipeline_status == "queued" and app.state.service is not None:
             app.state.service.trigger()
-        background_tasks.add_task(app.state.notification_dispatcher.flush)
         return _public_job(row)
 
     @app.get("/api/jobs/{job_id}/resume")
@@ -445,7 +592,7 @@ def create_app(
         return FileResponse(
             path,
             media_type="application/pdf",
-            filename=f"tiaaa-job-{job_id}-resume.pdf",
+            filename=path.name,
         )
 
     @app.get("/api/resumes")
@@ -532,7 +679,8 @@ def create_app(
 
     @app.get("/api/workers")
     def workers() -> dict[str, Any]:
-        items = get_worker_states(connection())
+        database = connection()
+        items = get_worker_states(database)
         for item in items:
             screenshot = item.pop("screenshot_path", None)
             item["preview_available"] = bool(screenshot and Path(screenshot).is_file())
@@ -540,9 +688,9 @@ def create_app(
                 f"/api/workers/{item['worker_id']}/preview" if item["preview_available"] else None
             )
             item["stream_active"] = preview_frame_hub.is_active(str(item["worker_id"]))
-            job_row = get_job(connection(), int(item["job_id"])) if item.get("job_id") else None
+            job_row = get_job(database, int(item["job_id"])) if item.get("job_id") else None
             item["questions"] = (
-                list_agent_inputs(connection(), int(item["job_id"]), pending_only=True)
+                list_agent_inputs(database, int(item["job_id"]), pending_only=True)
                 if item.get("job_id")
                 else []
             )
@@ -559,7 +707,37 @@ def create_app(
                     if job_row.get("resume_path") or job_row.get("submitted_resume_path")
                     else None
                 )
-        return {"items": items}
+                item["apply_origin"] = job_row.get("apply_origin")
+                item["submission_ready"] = bool(
+                    job_row.get("pipeline_status") == "manual_review"
+                    and job_row.get("worker_id") == item.get("worker_id")
+                    and item.get("status") == "review_ready"
+                    and not item["questions"]
+                    and job_row.get("availability_status") != "manual_only"
+                )
+        settings = load_settings(paths)
+        automation = settings.get("automation", {})
+        queue = list_application_queue(
+            database,
+            auto_enabled=bool(automation.get("auto_apply_new", False)),
+            max_attempts=int(automation.get("max_attempts", 3)),
+            minimum_fit_score=int(
+                automation.get("auto_apply_minimum_fit_score", 7)
+            ),
+            profile=load_profile(paths),
+            use_preferences=bool(
+                automation.get("auto_apply_use_preferences", False)
+            ),
+        )
+        return {
+            "items": items,
+            "queue": queue,
+            "queue_summary": {
+                "serial": True,
+                "active": sum(item["queue_state"] == "active" for item in queue),
+                "waiting": sum(item["queue_state"] != "active" for item in queue),
+            },
+        }
 
     @app.get("/api/workers/{worker_id}/preview")
     def worker_preview(worker_id: str) -> FileResponse:
@@ -572,7 +750,17 @@ def create_app(
 
     @app.websocket("/api/workers/{worker_id}/stream")
     async def worker_stream(websocket: WebSocket, worker_id: str) -> None:
-        if not worker_id.startswith("worker-") or not worker_id[7:].isdigit():
+        host_header = websocket.headers.get("host", "")
+        if (
+            not _host_is_trusted(host_header, allowed_hosts)
+            or not _browser_request_is_same_origin(
+                host_header=host_header,
+                origin=websocket.headers.get("origin"),
+                fetch_site=websocket.headers.get("sec-fetch-site"),
+            )
+            or not worker_id.startswith("worker-")
+            or not worker_id[7:].isdigit()
+        ):
             await websocket.close(code=1008)
             return
         await websocket.accept()

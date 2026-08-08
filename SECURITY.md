@@ -20,6 +20,7 @@ Include a minimal reproduction, affected version/commit, impact, and any suggest
 ## Operational guidance
 
 - Bind the dashboard to loopback unless it is behind an authenticated proxy.
+- When reverse proxying, set `TIAAA_TRUSTED_HOSTS` to the comma-separated public hostnames.
 - Keep `~/.tiaaa` readable only by your user account.
 - Do not enable `TIAAA_DEBUG_AGENT_OUTPUT` unless necessary; browser-agent output may contain personal information.
 - Use restricted API keys and rotate a key after accidental logging or commit.

@@ -4,8 +4,8 @@ services:
     build:
       context: .
       args:
-        CLAUDE_CODE_VERSION: "2.1.215"
-        PLAYWRIGHT_MCP_VERSION: "0.0.78"
+        CLAUDE_CODE_VERSION: "2.1.226"
+        PLAYWRIGHT_MCP_VERSION: "0.0.79"
     container_name: tiaaa
     init: true
     restart: unless-stopped
@@ -13,6 +13,9 @@ services:
       - "127.0.0.1:8787:8787"
     volumes:
       - tiaaa-data:/data
+    env_file:
+      - path: .env
+        required: false
     shm_size: "1gb"
     cap_drop:
       - ALL

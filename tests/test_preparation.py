@@ -49,6 +49,9 @@ def make_paths(tmp_path) -> AppPaths:
 def test_prepare_without_llm_attaches_base_resume(tmp_path, profile, settings) -> None:
     paths = make_paths(tmp_path)
     seed_job(paths.database, profile, settings)
+    connection = get_connection(paths.database)
+    connection.execute("UPDATE jobs SET fit_score = 0")
+    connection.commit()
 
     result = prepare_jobs(
         paths=paths,
@@ -61,9 +64,9 @@ def test_prepare_without_llm_attaches_base_resume(tmp_path, profile, settings) -
     assert result == {"prepared": 1, "errors": 0}
     assert row["pipeline_status"] == "ready"
     assert row["base_resume_id"] is not None
-    assert row["resume_path"].endswith("tailored-resume.pdf")
-    assert (tmp_path / row["resume_path"]).is_file()
-    assert "verbatim lines" in row["tailoring_reason"]
+    assert row["resume_path"].endswith("Avery_Student_Resume.pdf")
+    assert (tmp_path / row["resume_path"]).read_bytes() == paths.resume_pdf.read_bytes()
+    assert "preserved the original PDF" in row["tailoring_reason"]
     assert row["cover_letter_path"] is None
 
 

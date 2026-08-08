@@ -87,6 +87,14 @@ def test_canonical_url_preserves_spa_job_route_and_rejects_non_web_links() -> No
     assert canonicalize_url("mailto:recruiting@example.com") == ""
 
 
+def test_canonical_url_rejects_local_network_and_credentialed_targets() -> None:
+    assert canonicalize_url("http://localhost:8787/api/config") == ""
+    assert canonicalize_url("http://127.0.0.1/private") == ""
+    assert canonicalize_url("http://2130706433/private") == ""
+    assert canonicalize_url("http://[::1]/private") == ""
+    assert canonicalize_url("https://user:password@jobs.example.com/apply") == ""
+
+
 def test_fingerprint_normalizes_common_title_and_location_variants() -> None:
     one = listing_fingerprint("Acme", "Software Engineering Intern", "San Francisco")
     two = listing_fingerprint("acme", "Software Engineer Intern", "SF")

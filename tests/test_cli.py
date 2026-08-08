@@ -24,7 +24,7 @@ def test_init_can_import_files_into_a_fresh_workspace(tmp_path, monkeypatch) -> 
         encoding="utf-8",
     )
     settings = source / "settings.yaml"
-    settings.write_text("minimum_fit_score: 6\n", encoding="utf-8")
+    settings.write_text("poll_interval_seconds: 600\n", encoding="utf-8")
     resume_txt = source / "resume.txt"
     resume_txt.write_text("resume facts", encoding="utf-8")
     resume_pdf = source / "resume.pdf"

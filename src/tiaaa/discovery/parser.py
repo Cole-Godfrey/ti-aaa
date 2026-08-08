@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import html
+import ipaddress
 import re
-from datetime import date, timedelta
+import socket
+from contextlib import suppress
+from datetime import date, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup, Tag
@@ -14,6 +17,7 @@ from tiaaa.models import InternshipListing, SourceDocument
 
 _FLAGS = ("🔒", "🛂", "🇺🇸", "🔥", "🎓")
 _IGNORED_URL_HOSTS = {"i.imgur.com", "imgur.com"}
+_LOCAL_HOST_SUFFIXES = (".internal", ".lan", ".local", ".localhost")
 _TRACKING_KEYS = {
     "embed",
     "iis",
@@ -75,13 +79,35 @@ def _is_separator_row(line: str) -> bool:
 
 
 def canonicalize_url(value: str) -> str:
-    """Remove known tracking parameters while preserving job identifiers."""
+    """Validate job URLs and remove tracking parameters while preserving identifiers."""
 
     value = html.unescape(value or "").strip().strip("<>")
     if not value:
         return ""
     parts = urlsplit(value)
     if parts.scheme.casefold() not in {"http", "https"} or not parts.netloc:
+        return ""
+    try:
+        hostname = (parts.hostname or "").casefold().rstrip(".")
+        _ = parts.port
+    except ValueError:
+        return ""
+    if (
+        not hostname
+        or parts.username is not None
+        or parts.password is not None
+        or "%" in hostname
+        or hostname == "localhost"
+        or hostname.endswith(_LOCAL_HOST_SUFFIXES)
+    ):
+        return ""
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        with suppress(OSError):
+            address = ipaddress.ip_address(socket.inet_aton(hostname))
+    if address is not None and not address.is_global:
         return ""
 
     query: list[tuple[str, str]] = []
@@ -166,9 +192,7 @@ def _parse_posting_date(raw: str, today: date) -> str | None:
             return None
     for pattern in ("%b %d", "%B %d"):
         try:
-            import datetime as _datetime
-
-            parsed = _datetime.datetime.strptime(value, pattern)
+            parsed = datetime.strptime(f"{value} 2000", f"{pattern} %Y")
             candidate = date(today.year, parsed.month, parsed.day)
             # A posting date cannot meaningfully be in the future. Allow one day
             # for upstream UTC/local-time differences; otherwise the row belongs

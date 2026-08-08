@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import re
 import sqlite3
@@ -16,10 +17,12 @@ from urllib.parse import urlparse
 
 from tiaaa.config import SOURCE_DOCUMENTS, get_paths
 from tiaaa.discovery.parser import canonicalize_url, listing_fingerprint
-from tiaaa.eligibility import evaluate_listing
+from tiaaa.eligibility import evaluate_listing, matches_preferences
 from tiaaa.models import InternshipListing, SourceDocument
 
 _local = threading.local()
+_connection_registry: dict[str, list[sqlite3.Connection]] = {}
+_connection_registry_lock = threading.Lock()
 
 PIPELINE_STATUSES = {
     "discovered",
@@ -52,6 +55,16 @@ _SENSITIVE_INPUT_PATTERN = re.compile(
     r"driver.?s license|government id|biometric)\b",
     re.IGNORECASE,
 )
+_AUTO_TERMINAL_REASON_CODES = {
+    "access_blocked",
+    "assessment_required",
+    "captcha",
+    "eligibility_conflict",
+    "login_required",
+    "missing_input",
+    "sensitive_information",
+    "verification_required",
+}
 
 
 def utc_now() -> str:
@@ -79,6 +92,8 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     with suppress(OSError):
         Path(path).chmod(0o600)
     _local.connections[path] = connection
+    with _connection_registry_lock:
+        _connection_registry.setdefault(path, []).append(connection)
     return connection
 
 
@@ -88,6 +103,41 @@ def close_connection(db_path: Path | str | None = None) -> None:
         connection = _local.connections.pop(path, None)
         if connection is not None:
             connection.close()
+            with _connection_registry_lock:
+                registered = _connection_registry.get(path, [])
+                if connection in registered:
+                    registered.remove(connection)
+                if not registered:
+                    _connection_registry.pop(path, None)
+
+
+def close_all_connections(db_path: Path | str | None = None) -> None:
+    """Close registered connections for one database, or every database at process exit."""
+
+    requested_path = (
+        str(Path(db_path).expanduser().resolve()) if db_path is not None else None
+    )
+    with _connection_registry_lock:
+        if requested_path is None:
+            registered = [
+                connection
+                for connections in _connection_registry.values()
+                for connection in connections
+            ]
+            _connection_registry.clear()
+        else:
+            registered = _connection_registry.pop(requested_path, [])
+    for connection in registered:
+        with suppress(sqlite3.ProgrammingError):
+            connection.close()
+    if hasattr(_local, "connections"):
+        if requested_path is None:
+            _local.connections.clear()
+        else:
+            _local.connections.pop(requested_path, None)
+
+
+atexit.register(close_all_connections)
 
 
 def _ensure_column(
@@ -169,6 +219,9 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             preparation_notes     TEXT,
             prepared_at           TEXT,
             apply_attempts        INTEGER NOT NULL DEFAULT 0,
+            apply_origin          TEXT,
+            apply_reason_code     TEXT,
+            submission_requested  INTEGER NOT NULL DEFAULT 0,
             applied_at            TEXT,
             apply_error           TEXT,
             last_attempted_at      TEXT,
@@ -215,22 +268,6 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
 
         CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, created_at DESC);
 
-        CREATE TABLE IF NOT EXISTS notifications (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_id      INTEGER NOT NULL UNIQUE REFERENCES events(id) ON DELETE CASCADE,
-            job_id        INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
-            category      TEXT NOT NULL,
-            title         TEXT NOT NULL,
-            body          TEXT NOT NULL,
-            created_at    TEXT NOT NULL,
-            email_status  TEXT NOT NULL DEFAULT 'pending',
-            email_error   TEXT,
-            email_sent_at TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_notifications_delivery
-            ON notifications(email_status, id);
-
         CREATE TABLE IF NOT EXISTS app_state (
             key         TEXT PRIMARY KEY,
             value       TEXT NOT NULL,
@@ -267,6 +304,29 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
 
         CREATE INDEX IF NOT EXISTS idx_agent_inputs_job
             ON agent_inputs(job_id, status, id);
+
+        CREATE TABLE IF NOT EXISTS web_push_subscriptions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            endpoint        TEXT NOT NULL UNIQUE,
+            p256dh           TEXT NOT NULL,
+            auth             TEXT NOT NULL,
+            user_agent       TEXT,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            last_success_at  TEXT,
+            last_error       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS web_push_deliveries (
+            subscription_id INTEGER NOT NULL
+                            REFERENCES web_push_subscriptions(id) ON DELETE CASCADE,
+            job_id           INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            delivered_at     TEXT NOT NULL,
+            PRIMARY KEY (subscription_id, job_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_web_push_deliveries_job
+            ON web_push_deliveries(job_id, subscription_id);
         """
     )
     _ensure_column(connection, "sources", "enabled", "INTEGER NOT NULL DEFAULT 1")
@@ -276,6 +336,11 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     _ensure_column(connection, "jobs", "tailoring_reason", "TEXT")
     _ensure_column(connection, "jobs", "manual_requested", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "jobs", "manual_requested_at", "TEXT")
+    _ensure_column(connection, "jobs", "apply_origin", "TEXT")
+    _ensure_column(connection, "jobs", "apply_reason_code", "TEXT")
+    _ensure_column(
+        connection, "jobs", "submission_requested", "INTEGER NOT NULL DEFAULT 0"
+    )
     _ensure_column(
         connection, "jobs", "availability_status", "TEXT NOT NULL DEFAULT 'unknown'"
     )
@@ -293,6 +358,20 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
           AND pipeline_status = 'expired'
           AND apply_error IS NOT NULL
         """
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'queued', resume_path = NULL,
+                        tailoring_reason = NULL, prepared_at = NULL,
+                        updated_at = ?
+        WHERE applied_at IS NULL
+          AND pipeline_status IN ('ready', 'failed')
+          AND (
+              lower(COALESCE(resume_path, '')) LIKE '%tailored-resume.pdf'
+              OR lower(COALESCE(tailoring_reason, '')) LIKE '%reprioritized%verbatim%'
+          )
+        """,
+        (utc_now(),),
     )
     connection.execute(
         """
@@ -355,6 +434,70 @@ def get_app_state(connection: sqlite3.Connection) -> dict[str, Any]:
         except (TypeError, json.JSONDecodeError):
             result[row["key"]] = row["value"]
     return result
+
+
+def record_dashboard_visit(connection: sqlite3.Connection) -> dict[str, Any]:
+    """Return unattended results since the prior visit, then record this visit."""
+
+    now = utc_now()
+    row = connection.execute(
+        "SELECT value FROM app_state WHERE key = 'dashboard_last_viewed_at'"
+    ).fetchone()
+    previous_visit_at: str | None = None
+    if row is not None:
+        try:
+            stored = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError):
+            stored = row["value"]
+        if isinstance(stored, str) and stored:
+            previous_visit_at = stored
+
+    applications: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    if previous_visit_at is not None:
+        applications = [
+            dict(item)
+            for item in connection.execute(
+                """
+                SELECT j.id, j.company, j.role, j.location, j.application_url,
+                       j.applied_at, r.name AS submitted_resume_name
+                FROM jobs j
+                LEFT JOIN resumes r ON r.id = j.submitted_resume_id
+                WHERE j.applied_at > ? AND j.applied_at <= ?
+                ORDER BY j.applied_at DESC, j.id DESC
+                """,
+                (previous_visit_at, now),
+            ).fetchall()
+        ]
+        failures = [
+            dict(item)
+            for item in connection.execute(
+                """
+                SELECT j.id, j.company, j.role, j.location, j.application_url,
+                       j.pipeline_status, j.apply_error, j.apply_reason_code,
+                       j.last_attempted_at, j.updated_at,
+                       r.name AS base_resume_name
+                FROM jobs j
+                LEFT JOIN resumes r ON r.id = j.base_resume_id
+                WHERE j.apply_origin = 'auto'
+                  AND j.applied_at IS NULL
+                  AND j.pipeline_status IN ('failed', 'expired', 'manual_review')
+                  AND j.updated_at > ? AND j.updated_at <= ?
+                ORDER BY j.updated_at DESC, j.id DESC
+                """,
+                (previous_visit_at, now),
+            ).fetchall()
+        ]
+    set_app_state(connection, "dashboard_last_viewed_at", now)
+    return {
+        "first_visit": previous_visit_at is None,
+        "previous_visit_at": previous_visit_at,
+        "visited_at": now,
+        "applications": applications,
+        "application_count": len(applications),
+        "failures": failures,
+        "failure_count": len(failures),
+    }
 
 
 def source_baseline_complete(connection: sqlite3.Connection, expected_documents: int = 3) -> bool:
@@ -756,13 +899,53 @@ def answer_agent_inputs(
     return get_job(connection, job_id)
 
 
-def recover_stale_work(connection: sqlite3.Connection) -> int:
+def resume_application_after_input(
+    connection: sqlite3.Connection,
+    job_id: int,
+    worker_id: str,
+) -> bool:
+    """Return an answered checkpoint to its still-live browser worker."""
+
     now = utc_now()
     cursor = connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applying', worker_id = ?,
+                        manual_requested = 0, apply_error = NULL, updated_at = ?,
+                        apply_attempts = apply_attempts + 1
+        WHERE id = ?
+          AND pipeline_status IN ('queued', 'ready')
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_inputs
+              WHERE job_id = ? AND status = 'pending'
+          )
+        """,
+        (worker_id, now, job_id, job_id),
+    )
+    if cursor.rowcount:
+        add_event(
+            connection,
+            job_id,
+            "agent_resumed",
+            f"Continued in the live browser on {worker_id}",
+        )
+    connection.commit()
+    return bool(cursor.rowcount)
+
+
+def recover_stale_work(connection: sqlite3.Connection) -> int:
+    now = utc_now()
+    applying = connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'ready', worker_id = NULL,
                         apply_error = 'Recovered after service restart', updated_at = ?
         WHERE pipeline_status = 'applying'
+        """,
+        (now,),
+    )
+    checkpoints = connection.execute(
+        """
+        UPDATE jobs SET worker_id = NULL, submission_requested = 0, updated_at = ?
+        WHERE pipeline_status = 'manual_review' AND worker_id IS NOT NULL
         """,
         (now,),
     )
@@ -771,7 +954,7 @@ def recover_stale_work(connection: sqlite3.Connection) -> int:
         (now,),
     )
     connection.commit()
-    return cursor.rowcount
+    return applying.rowcount + checkpoints.rowcount
 
 
 def add_event(
@@ -780,150 +963,10 @@ def add_event(
     event_type: str,
     detail: str | None = None,
 ) -> None:
-    created_at = utc_now()
-    cursor = connection.execute(
-        "INSERT INTO events (job_id, event_type, detail, created_at) VALUES (?, ?, ?, ?)",
-        (job_id, event_type, detail, created_at),
-    )
-    notification = _notification_for_event(connection, job_id, event_type, detail)
-    if notification is not None:
-        category, title, body = notification
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO notifications (
-                event_id, job_id, category, title, body, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (int(cursor.lastrowid), job_id, category, title, body, created_at),
-        )
-
-
-def _notification_for_event(
-    connection: sqlite3.Connection,
-    job_id: int | None,
-    event_type: str,
-    detail: str | None,
-) -> tuple[str, str, str] | None:
-    if job_id is None:
-        return None
-    event_detail = str(detail or "").casefold()
-    mapping: tuple[str, str, str] | None = None
-    if event_type == "applying":
-        mapping = (
-            "application_started",
-            "Application started",
-            "The agent started this application.",
-        )
-    elif event_type == "applied" or (
-        event_type == "status" and event_detail == "applied"
-    ):
-        mapping = (
-            "application_applied",
-            "Application submitted",
-            "The application was recorded as submitted.",
-        )
-    elif event_type == "failed" or (
-        event_type == "status" and event_detail == "failed"
-    ):
-        mapping = (
-            "application_failed",
-            "Application attempt failed",
-            "Open the Agent view for the failure details and retry options.",
-        )
-    elif event_type in {"needs_review", "captcha", "review_ready"} or (
-        event_type == "status" and event_detail == "manual_review"
-    ):
-        mapping = (
-            "agent_input",
-            "Agent needs your attention",
-            "Open the Agent view to answer a question or complete a manual checkpoint.",
-        )
-    elif event_type == "outcome" and event_detail in {"oa", "interview", "offer"}:
-        titles = {
-            "oa": "Online assessment received",
-            "interview": "Interview recorded",
-            "offer": "Offer recorded",
-        }
-        mapping = (
-            event_detail,
-            titles[event_detail],
-            "The application tracker has a new outcome.",
-        )
-    if mapping is None:
-        return None
-
-    job = connection.execute(
-        "SELECT company, role FROM jobs WHERE id = ?", (job_id,)
-    ).fetchone()
-    if job is None:
-        return None
-    category, title, body = mapping
-    label = f"{job['company']} · {job['role']}"
-    return category, title, f"{label}. {body}"
-
-
-def list_notifications(
-    connection: sqlite3.Connection,
-    *,
-    after_id: int = 0,
-    limit: int = 50,
-) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """
-        SELECT id, job_id, category, title, body, created_at
-        FROM notifications
-        WHERE id > ?
-        ORDER BY id
-        LIMIT ?
-        """,
-        (max(0, after_id), max(1, min(limit, 200))),
-    ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def latest_notification_id(connection: sqlite3.Connection) -> int:
-    return int(
-        connection.execute("SELECT COALESCE(MAX(id), 0) FROM notifications").fetchone()[0]
-    )
-
-
-def pending_notifications(
-    connection: sqlite3.Connection,
-    *,
-    limit: int = 100,
-) -> list[dict[str, Any]]:
-    return [
-        dict(row)
-        for row in connection.execute(
-            """
-            SELECT id, job_id, category, title, body, created_at
-            FROM notifications
-            WHERE email_status = 'pending'
-            ORDER BY id
-            LIMIT ?
-            """,
-            (max(1, min(limit, 500)),),
-        ).fetchall()
-    ]
-
-
-def mark_notification_delivery(
-    connection: sqlite3.Connection,
-    notification_id: int,
-    *,
-    status: str,
-    error: str | None = None,
-) -> None:
     connection.execute(
-        """
-        UPDATE notifications
-        SET email_status = ?, email_error = ?,
-            email_sent_at = CASE WHEN ? = 'sent' THEN ? ELSE email_sent_at END
-        WHERE id = ?
-        """,
-        (status, error[:500] if error else None, status, utc_now(), notification_id),
+        "INSERT INTO events (job_id, event_type, detail, created_at) VALUES (?, ?, ?, ?)",
+        (job_id, event_type, detail, utc_now()),
     )
-    connection.commit()
 
 
 def reconcile_source_registry(
@@ -1382,6 +1425,83 @@ def get_job(connection: sqlite3.Connection, job_id: int) -> dict[str, Any] | Non
     )
 
 
+def refresh_qualification_scores(
+    connection: sqlite3.Connection,
+    *,
+    profile: dict[str, Any],
+    settings: dict[str, Any],
+) -> int:
+    """Recompute active heuristic scores without role or location preferences."""
+
+    rows = connection.execute(
+        """
+        SELECT j.*,
+               COALESCE(
+                   (SELECT js.source_key FROM job_sources js
+                    WHERE js.job_id = j.id ORDER BY js.first_seen_at LIMIT 1),
+                   'local'
+               ) AS source_key,
+               COALESCE(
+                   (SELECT js.source_label FROM job_sources js
+                    WHERE js.job_id = j.id ORDER BY js.first_seen_at LIMIT 1),
+                   'Repository source'
+               ) AS source_label,
+               COALESCE(
+                   (SELECT js.source_repo_url FROM job_sources js
+                    WHERE js.job_id = j.id ORDER BY js.first_seen_at LIMIT 1),
+                   'https://github.com'
+               ) AS source_repo_url,
+               COALESCE(
+                   (SELECT js.source_path FROM job_sources js
+                    WHERE js.job_id = j.id ORDER BY js.first_seen_at LIMIT 1),
+                   'README.md'
+               ) AS source_path
+        FROM jobs j WHERE j.is_active = 1
+        """
+    ).fetchall()
+    now = utc_now()
+    for row in rows:
+        listing = InternshipListing(
+            company=str(row["company"]),
+            role=str(row["role"]),
+            location=str(row["location"] or ""),
+            application_url=str(row["application_url"]),
+            source_key=str(row["source_key"]),
+            source_label=str(row["source_label"]),
+            source_repo_url=str(row["source_repo_url"]),
+            source_path=str(row["source_path"]),
+            category=str(row["category"] or "Tech"),
+            posting_date=row["posting_date"],
+            closed=bool(row["availability_status"] == "closed"),
+            no_sponsorship=bool(row["no_sponsorship"]),
+            citizenship_required=bool(row["citizenship_required"]),
+        )
+        evaluation = evaluate_listing(listing, profile, settings)
+        connection.execute(
+            """
+            UPDATE jobs SET eligibility = ?, eligibility_reason = ?,
+                            fit_score = ?, score_reasoning = ?, scored_at = ?,
+                            updated_at = CASE
+                                WHEN fit_score != ? OR score_reasoning != ? THEN ?
+                                ELSE updated_at END
+            WHERE id = ?
+            """,
+            (
+                "eligible" if evaluation.eligible else "ineligible",
+                evaluation.reason,
+                evaluation.score,
+                evaluation.score_reasoning,
+                now,
+                evaluation.score,
+                evaluation.score_reasoning,
+                now,
+                row["id"],
+            ),
+        )
+    connection.commit()
+    return len(rows)
+
+
 def list_jobs(
     connection: sqlite3.Connection,
     *,
@@ -1750,7 +1870,6 @@ def update_tracker(
 
 def pending_preparation(
     connection: sqlite3.Connection,
-    minimum_score: int,
     limit: int = 0,
     target_job_id: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -1762,11 +1881,10 @@ def pending_preparation(
             manual_requested = 1
             OR (
               discovered_as_new = 1 AND eligibility = 'eligible'
-              AND COALESCE(fit_score, 0) >= ?
             )
           )
     """
-    parameters: list[Any] = [minimum_score]
+    parameters: list[Any] = []
     if target_job_id is not None:
         query += " AND id = ?"
         parameters.append(target_job_id)
@@ -1831,16 +1949,32 @@ def request_manual_application(
         raise ValueError(
             "This employer blocks the automated browser; open the application manually"
         )
-    if row["pipeline_status"] in {"applied", "applying", "manual_review", "withdrawn"}:
+    worker_id = str(row.get("worker_id") or "")
+    worker = (
+        connection.execute(
+            "SELECT status, job_id FROM worker_state WHERE worker_id = ?",
+            (worker_id,),
+        ).fetchone()
+        if worker_id
+        else None
+    )
+    live_review = bool(
+        row["pipeline_status"] == "manual_review"
+        and worker is not None
+        and worker["status"] in {"needs_review", "review_ready"}
+        and int(worker["job_id"] or 0) == job_id
+    )
+    if row["pipeline_status"] in {"applied", "applying", "withdrawn"} or live_review:
         raise ValueError(
             f"This listing is already {str(row['pipeline_status']).replace('_', ' ')}"
         )
     now = utc_now()
-    next_status = "ready" if row.get("resume_path") else "queued"
+    next_status = "queued"
     connection.execute(
         """
         UPDATE jobs SET pipeline_status = ?, manual_requested = 1,
                         manual_requested_at = ?, apply_error = NULL, updated_at = ?,
+                        apply_reason_code = NULL, submission_requested = 0,
                         apply_attempts = CASE WHEN pipeline_status = 'failed'
                             THEN 0 ELSE apply_attempts END
         WHERE id = ?
@@ -1867,6 +2001,158 @@ def manual_application_ids(connection: sqlite3.Connection) -> list[int]:
     ]
 
 
+def _company_key(company: Any) -> str:
+    """Return a stable comparison key for company-level auto-apply limits."""
+
+    return re.sub(r"[^a-z0-9]+", "", str(company or "").casefold())
+
+
+def _claim_candidates(
+    connection: sqlite3.Connection,
+    *,
+    max_attempts: int,
+    target_job_id: int | None,
+    minimum_fit_score: int,
+    eligible_only: bool,
+    profile: dict[str, Any] | None,
+    use_preferences: bool,
+    include_queued: bool = False,
+) -> list[dict[str, Any]]:
+    candidate_statuses = ("queued", "ready", "failed") if include_queued else ("ready", "failed")
+    status_placeholders = ", ".join("?" for _ in candidate_statuses)
+    clauses = [
+        f"j.pipeline_status IN ({status_placeholders})",
+        "j.is_active = 1",
+        "j.availability_status NOT IN ('closed', 'manual_only')",
+        "j.apply_attempts < ?",
+    ]
+    parameters: list[Any] = [*candidate_statuses, max_attempts]
+    if target_job_id is None:
+        clauses.extend(["j.eligibility = 'eligible'", "j.discovered_as_new = 1"])
+        terminal_reasons = ", ".join(
+            f"'{reason}'" for reason in sorted(_AUTO_TERMINAL_REASON_CODES)
+        )
+        clauses.append(
+            "NOT (j.apply_origin = 'auto' AND j.pipeline_status = 'failed' "
+            f"AND COALESCE(j.apply_reason_code, '') IN ({terminal_reasons}))"
+        )
+        if not eligible_only:
+            clauses.append("COALESCE(j.fit_score, 0) >= ?")
+            parameters.append(max(1, min(10, int(minimum_fit_score))))
+    else:
+        clauses.extend(
+            [
+                "(j.eligibility = 'eligible' OR j.manual_requested = 1)",
+                "(j.discovered_as_new = 1 OR j.manual_requested = 1)",
+                "j.id = ?",
+            ]
+        )
+        parameters.append(target_job_id)
+    rows = [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT j.*,
+                   GROUP_CONCAT(DISTINCT js.source_label) AS source_labels
+            FROM jobs j
+            LEFT JOIN job_sources js ON js.job_id = j.id AND js.active = 1
+            WHERE {' AND '.join(clauses)}
+            GROUP BY j.id
+            ORDER BY j.fit_score DESC, (j.pipeline_status = 'ready') DESC,
+                     j.posting_date DESC,
+                     j.first_seen_at ASC, j.id ASC
+            """,
+            parameters,
+        ).fetchall()
+    ]
+    if target_job_id is not None:
+        return rows[:1]
+
+    history = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT id, company, pipeline_status, applied_at, apply_origin,
+                   apply_attempts
+            FROM jobs
+            WHERE applied_at IS NOT NULL
+               OR pipeline_status IN ('applying', 'manual_review')
+               OR (apply_origin = 'auto' AND apply_attempts > 0)
+            """
+        ).fetchall()
+    ]
+    history_by_company: dict[str, list[dict[str, Any]]] = {}
+    for item in history:
+        history_by_company.setdefault(_company_key(item["company"]), []).append(item)
+
+    selected_companies: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        company = _company_key(row["company"])
+        if company in selected_companies:
+            continue
+        prior = history_by_company.get(company, [])
+        auto_selected_ids = {
+            int(item["id"])
+            for item in prior
+            if item.get("apply_origin") == "auto" and int(item.get("apply_attempts") or 0) > 0
+        }
+        blocked_by_other = any(
+            int(item["id"]) != int(row["id"])
+            and (
+                bool(item.get("applied_at"))
+                or item.get("pipeline_status") in {"applying", "manual_review"}
+            )
+            for item in prior
+        )
+        if blocked_by_other or (auto_selected_ids and int(row["id"]) not in auto_selected_ids):
+            continue
+        if use_preferences and not matches_preferences(row, profile or {})[0]:
+            continue
+        selected_companies.add(company)
+        result.append(row)
+    return result
+
+
+def _skip_auto_company_siblings(
+    connection: sqlite3.Connection,
+    selected: dict[str, Any],
+) -> None:
+    """Keep one best-fit auto application for a company while retaining manual access."""
+
+    company = _company_key(selected["company"])
+    detail = (
+        f"Auto mode selected {selected['role']} as this company's best-fit role"
+    )
+    siblings = connection.execute(
+        """
+        SELECT id, company FROM jobs
+        WHERE id != ? AND discovered_as_new = 1 AND manual_requested = 0
+          AND pipeline_status IN ('queued', 'ready', 'failed')
+        """,
+        (selected["id"],),
+    ).fetchall()
+    now = utc_now()
+    for sibling in siblings:
+        if _company_key(sibling["company"]) != company:
+            continue
+        connection.execute(
+            """
+            UPDATE jobs SET pipeline_status = 'skipped', apply_error = ?,
+                            apply_reason_code = 'company_role_deduplicated',
+                            updated_at = ?
+            WHERE id = ?
+            """,
+            (detail, now, sibling["id"]),
+        )
+        add_event(
+            connection,
+            int(sibling["id"]),
+            "auto_role_skipped",
+            detail,
+        )
+
+
 def claim_next_job(
     connection: sqlite3.Connection,
     *,
@@ -1874,50 +2160,37 @@ def claim_next_job(
     max_attempts: int,
     target_job_id: int | None = None,
     minimum_fit_score: int = 1,
+    eligible_only: bool = False,
+    profile: dict[str, Any] | None = None,
+    use_preferences: bool = False,
 ) -> dict[str, Any] | None:
     connection.execute("BEGIN IMMEDIATE")
     try:
-        clauses = [
-            "pipeline_status IN ('ready', 'failed')",
-            "is_active = 1",
-            "availability_status NOT IN ('closed', 'manual_only')",
-        ]
-        if target_job_id is None:
-            clauses.extend(["eligibility = 'eligible'", "discovered_as_new = 1"])
-        else:
-            clauses.extend(
-                [
-                    "(eligibility = 'eligible' OR manual_requested = 1)",
-                    "(discovered_as_new = 1 OR manual_requested = 1)",
-                ]
-            )
-        clauses.append("apply_attempts < ?")
-        parameters: list[Any] = [max_attempts]
-        if target_job_id is None:
-            clauses.append("COALESCE(fit_score, 0) >= ?")
-            parameters.append(max(1, min(10, int(minimum_fit_score))))
-        if target_job_id is not None:
-            clauses.append("id = ?")
-            parameters.append(target_job_id)
-        row = connection.execute(
-            f"""
-            SELECT * FROM jobs WHERE {' AND '.join(clauses)}
-            ORDER BY (pipeline_status = 'ready') DESC, fit_score DESC,
-                     posting_date DESC, first_seen_at ASC LIMIT 1
-            """,
-            parameters,
-        ).fetchone()
-        if row is None:
+        candidates = _claim_candidates(
+            connection,
+            max_attempts=max_attempts,
+            target_job_id=target_job_id,
+            minimum_fit_score=minimum_fit_score,
+            eligible_only=eligible_only,
+            profile=profile,
+            use_preferences=use_preferences,
+        )
+        if not candidates:
             connection.rollback()
             return None
+        row = candidates[0]
+        if target_job_id is None:
+            _skip_auto_company_siblings(connection, row)
         now = utc_now()
+        origin = "manual" if target_job_id is not None else "auto"
         connection.execute(
             """
             UPDATE jobs SET pipeline_status = 'applying', worker_id = ?,
                             last_attempted_at = ?, apply_attempts = apply_attempts + 1,
-                            updated_at = ? WHERE id = ?
+                            apply_origin = ?, apply_reason_code = NULL,
+                            submission_requested = 0, updated_at = ? WHERE id = ?
             """,
-            (worker_id, now, now, row["id"]),
+            (worker_id, now, origin, now, row["id"]),
         )
         add_event(connection, int(row["id"]), "applying", worker_id)
         connection.commit()
@@ -1933,36 +2206,130 @@ def claimable_application_count(
     max_attempts: int,
     target_job_id: int | None = None,
     minimum_fit_score: int = 1,
+    eligible_only: bool = False,
+    profile: dict[str, Any] | None = None,
+    use_preferences: bool = False,
 ) -> int:
     """Count jobs that an application worker could atomically claim."""
 
-    clauses = [
-        "pipeline_status IN ('ready', 'failed')",
-        "is_active = 1",
-        "availability_status NOT IN ('closed', 'manual_only')",
-    ]
-    if target_job_id is None:
-        clauses.extend(["eligibility = 'eligible'", "discovered_as_new = 1"])
-    else:
-        clauses.extend(
-            [
-                "(eligibility = 'eligible' OR manual_requested = 1)",
-                "(discovered_as_new = 1 OR manual_requested = 1)",
-            ]
+    return len(
+        _claim_candidates(
+            connection,
+            max_attempts=max_attempts,
+            target_job_id=target_job_id,
+            minimum_fit_score=minimum_fit_score,
+            eligible_only=eligible_only,
+            profile=profile,
+            use_preferences=use_preferences,
         )
-    clauses.append("apply_attempts < ?")
-    parameters: list[Any] = [max_attempts]
-    if target_job_id is None:
-        clauses.append("COALESCE(fit_score, 0) >= ?")
-        parameters.append(max(1, min(10, int(minimum_fit_score))))
-    if target_job_id is not None:
-        clauses.append("id = ?")
-        parameters.append(target_job_id)
-    row = connection.execute(
-        f"SELECT COUNT(*) FROM jobs WHERE {' AND '.join(clauses)}",
-        parameters,
-    ).fetchone()
-    return int(row[0])
+    )
+
+
+def list_application_queue(
+    connection: sqlite3.Connection,
+    *,
+    auto_enabled: bool,
+    max_attempts: int,
+    minimum_fit_score: int,
+    profile: dict[str, Any] | None = None,
+    use_preferences: bool = False,
+) -> list[dict[str, Any]]:
+    """Return the persisted serial application order shown on the Agent page."""
+
+    active = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT j.*, w.status AS worker_status
+            FROM jobs j
+            LEFT JOIN worker_state w ON w.worker_id = j.worker_id
+            WHERE j.pipeline_status = 'applying'
+               OR (
+                    j.pipeline_status = 'manual_review'
+                    AND j.worker_id IS NOT NULL
+                    AND w.status IN ('needs_review', 'review_ready')
+               )
+            ORDER BY j.last_attempted_at ASC, j.id ASC
+            """
+        ).fetchall()
+    ]
+    manual = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT j.* FROM jobs j
+            WHERE j.manual_requested = 1 AND j.is_active = 1
+              AND j.availability_status NOT IN ('closed', 'manual_only')
+              AND j.pipeline_status IN ('queued', 'ready', 'failed')
+            ORDER BY j.manual_requested_at ASC, j.id ASC
+            """
+        ).fetchall()
+    ]
+    automatic = (
+        _claim_candidates(
+            connection,
+            max_attempts=max_attempts,
+            target_job_id=None,
+            minimum_fit_score=minimum_fit_score,
+            eligible_only=False,
+            profile=profile,
+            use_preferences=use_preferences,
+            include_queued=True,
+        )
+        if auto_enabled
+        else []
+    )
+
+    seen = {int(row["id"]) for row in active}
+    ordered: list[tuple[dict[str, Any], str]] = [(row, "active") for row in active]
+    for row in manual:
+        job_id = int(row["id"])
+        if job_id not in seen:
+            ordered.append((row, "manual"))
+            seen.add(job_id)
+    manual_companies = {_company_key(row["company"]) for row in manual}
+    for row in automatic:
+        job_id = int(row["id"])
+        if job_id in seen or _company_key(row["company"]) in manual_companies:
+            continue
+        ordered.append((row, "auto"))
+        seen.add(job_id)
+
+    result: list[dict[str, Any]] = []
+    for position, (row, queued_origin) in enumerate(ordered, start=1):
+        pipeline_status = str(row.get("pipeline_status") or "queued")
+        queue_state = (
+            "active"
+            if queued_origin == "active"
+            else {
+                "queued": "preparing",
+                "ready": "ready",
+                "failed": "retry",
+            }.get(pipeline_status, "waiting")
+        )
+        origin = str(row.get("apply_origin") or queued_origin)
+        result.append(
+            {
+                "position": position,
+                "id": int(row["id"]),
+                "company": row["company"],
+                "role": row["role"],
+                "location": row.get("location") or "",
+                "fit_score": row.get("fit_score"),
+                "pipeline_status": pipeline_status,
+                "queue_state": queue_state,
+                "worker_status": row.get("worker_status"),
+                "origin": origin,
+                "first_seen_at": row.get("first_seen_at"),
+                "queued_at": (
+                    row.get("last_attempted_at")
+                    if queue_state == "active"
+                    else row.get("manual_requested_at") or row.get("first_seen_at")
+                ),
+                "detail": row.get("apply_error") if queue_state == "retry" else None,
+            }
+        )
+    return result
 
 
 def mark_apply_result(
@@ -1972,6 +2339,8 @@ def mark_apply_result(
     detail: str | None = None,
     *,
     reason_code: str | None = None,
+    retain_worker: bool = False,
+    manual_handoff: bool = True,
 ) -> None:
     now = utc_now()
     status_map = {
@@ -2001,7 +2370,7 @@ def mark_apply_result(
         availability_detail = detail or "Employer application is no longer available"
         availability_checked_at = now
     elif access_blocked:
-        status = "manual_review"
+        status = "manual_review" if manual_handoff else "failed"
         availability_status = "manual_only"
         availability_detail = detail or "Employer blocks the automated browser"
         availability_checked_at = now
@@ -2027,8 +2396,10 @@ def mark_apply_result(
                         submitted_resume_path = CASE WHEN ? = 'applied'
                             THEN COALESCE(submitted_resume_path, resume_path)
                             ELSE submitted_resume_path END,
-                        apply_error = ?, manual_requested = 0,
-                        worker_id = NULL, updated_at = ?
+                        apply_error = ?, apply_reason_code = ?,
+                        manual_requested = 0, submission_requested = 0,
+                        worker_id = CASE WHEN ? THEN worker_id ELSE NULL END,
+                        updated_at = ?
         WHERE id = ?
         """,
         (
@@ -2042,11 +2413,123 @@ def mark_apply_result(
             result,
             result,
             None if result == "applied" else detail,
+            None if result == "applied" else reason_code,
+            int(retain_worker),
             now,
             job_id,
         ),
     )
     add_event(connection, job_id, result, detail)
+    connection.commit()
+
+
+def request_final_submission(
+    connection: sqlite3.Connection,
+    job_id: int,
+) -> dict[str, Any] | None:
+    """Authorize the still-live review session to click its final Submit button."""
+
+    job = get_job(connection, job_id)
+    if job is None:
+        return None
+    worker_id = str(job.get("worker_id") or "")
+    worker = connection.execute(
+        "SELECT status, job_id FROM worker_state WHERE worker_id = ?",
+        (worker_id,),
+    ).fetchone()
+    if (
+        job.get("pipeline_status") != "manual_review"
+        or job.get("availability_status") == "manual_only"
+        or not worker_id
+        or worker is None
+        or worker["status"] != "review_ready"
+        or int(worker["job_id"] or 0) != job_id
+        or list_agent_inputs(connection, job_id, pending_only=True)
+    ):
+        raise ValueError(
+            "The completed form is no longer open. Start the agent again from Latest jobs."
+        )
+    now = utc_now()
+    connection.execute(
+        """
+        UPDATE jobs SET submission_requested = 1, updated_at = ?
+        WHERE id = ? AND pipeline_status = 'manual_review' AND worker_id = ?
+        """,
+        (now, job_id, worker_id),
+    )
+    add_event(connection, job_id, "submission_confirmed", "Confirmed in the dashboard")
+    connection.commit()
+    return get_job(connection, job_id)
+
+
+def final_submission_requested(
+    connection: sqlite3.Connection,
+    job_id: int,
+    worker_id: str,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT submission_requested FROM jobs
+        WHERE id = ? AND pipeline_status = 'manual_review' AND worker_id = ?
+        """,
+        (job_id, worker_id),
+    ).fetchone()
+    return bool(row and row["submission_requested"])
+
+
+def resume_application_for_submission(
+    connection: sqlite3.Connection,
+    job_id: int,
+    worker_id: str,
+) -> bool:
+    """Move a confirmed final-review checkpoint back to its live worker."""
+
+    now = utc_now()
+    cursor = connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applying', submission_requested = 0,
+                        apply_error = NULL, apply_reason_code = NULL, updated_at = ?
+        WHERE id = ? AND pipeline_status = 'manual_review' AND worker_id = ?
+          AND submission_requested = 1
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_inputs
+              WHERE job_id = ? AND status = 'pending'
+          )
+        """,
+        (now, job_id, worker_id, job_id),
+    )
+    if cursor.rowcount:
+        add_event(
+            connection,
+            job_id,
+            "submission_started",
+            f"Final Submit authorized on {worker_id}",
+        )
+    connection.commit()
+    return bool(cursor.rowcount)
+
+
+def close_live_checkpoint(
+    connection: sqlite3.Connection,
+    job_id: int,
+    worker_id: str,
+) -> None:
+    """Clear a live-session claim after its local wait window ends."""
+
+    cursor = connection.execute(
+        """
+        UPDATE jobs SET worker_id = NULL, submission_requested = 0, updated_at = ?
+        WHERE id = ? AND worker_id = ? AND pipeline_status = 'manual_review'
+        """,
+        (utc_now(), job_id, worker_id),
+    )
+    if cursor.rowcount:
+        add_event(
+            connection,
+            job_id,
+            "review_session_closed",
+            "The local browser wait window ended",
+        )
     connection.commit()
 
 

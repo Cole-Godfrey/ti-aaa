@@ -165,6 +165,11 @@
           <div><p class="kicker">BROWSER WORKERS</p><h2>Watch the agent work</h2><p>The browser is streamed into a stable canvas while a form is being filled. Frames can contain personal information, so they never leave this machine.</p></div>
           <span class="tag">Local browser stream</span>
         </div>
+        <article class="panel agent-queue-panel">
+          <div class="panel-head"><div><p class="kicker">APPLICATION QUEUE</p><h2>One job at a time</h2></div><span id="agentQueueCount" class="tag">0 waiting</span></div>
+          <p class="queue-explainer">Repository batches stay in this local queue. One browser finishes or safely stops the current application before it starts the next one.</p>
+          <div id="agentQueueList" class="agent-queue-list"><div class="empty">No applications are waiting.</div></div>
+        </article>
         <div id="workerGrid" class="worker-grid"></div>
         <div id="agentInputPanel" class="agent-input-stack"></div>
         <article class="panel activity-panel">
@@ -177,7 +182,7 @@
         <div class="two-column resumes-layout">
           <article class="panel upload-panel">
             <p class="kicker">ADD A VERSION</p><h2>Upload a resume</h2>
-            <p class="fine-print">TI-AAA compares role words with factual text in each PDF. Tailoring only reprioritizes verbatim lines—it does not invent or rewrite claims.</p>
+            <p class="fine-print">TI-AAA compares each role with the factual text in your PDFs, selects the best existing version, and submits an unchanged copy named First_Last_Resume.pdf.</p>
             <form id="resumeForm" class="form-stack">
               <label>Label<input name="name" required maxlength="100" placeholder="Backend / systems"></label>
               <label>PDF<input name="file" type="file" accept="application/pdf,.pdf" required></label>
@@ -196,6 +201,23 @@
 
       <section class="view" data-view="settings">
         <form id="settingsForm" class="settings-grid">
+          <article id="autoModePanel" class="panel auto-mode-card">
+            <div class="auto-mode-copy">
+              <p class="kicker">AUTO MODE</p>
+              <h2>Apply while you are away</h2>
+              <p>When new roles reach the fit threshold, TI-AAA queues one best-fit role per company. One browser applies to them in order and never pauses for your input.</p>
+            </div>
+            <label class="auto-mode-switch"><input id="autoMode" type="checkbox"><span><i></i><b>Auto mode</b><small id="autoModeState">Off · manual applications only</small></span></label>
+            <div class="auto-mode-controls">
+              <label>Minimum qualification fit <span id="autoModeFitValue">7 / 10</span><input id="autoModeMinimumFit" type="range" min="1" max="10" step="1"></label>
+              <label class="preference-gate"><input id="autoModeUsePreferences" type="checkbox"><span><b>Use my preferences as an application gate</b><small>Off by default. Preferences never change the qualification score.</small></span></label>
+              <div id="webPushOption" class="web-push-option hidden">
+                <label class="preference-gate"><input id="webPushNotifications" type="checkbox"><span><b>Notify this browser when new jobs enter the queue</b><small>No email, SMS, account, or manually entered key.</small></span></label>
+                <p id="webPushStatus">Turn this on to request browser permission.</p>
+              </div>
+            </div>
+            <p class="auto-mode-warning">Required personal fact missing? Auto mode stops that application and records the reason in your next Welcome back brief.</p>
+          </article>
           <article class="panel settings-card">
             <p class="kicker">PROFILE</p><h2>About you</h2>
             <div class="field-grid">
@@ -224,15 +246,19 @@
             </div>
           </article>
           <article class="panel settings-card">
-            <p class="kicker">TARGETING</p><h2>Internship preferences</h2>
+            <p class="kicker">TARGETING</p><h2>Auto mode preferences</h2>
+            <p class="fine-print">Role, location, and term preferences do not affect the numeric fit score. Auto mode checks them only when you enable its preference gate above. “Any” means no restriction.</p>
             <div class="form-stack compact-form">
               <label>Preferred roles<input id="roles" placeholder="software, backend, machine learning"></label>
               <label>Locations<input id="locations" placeholder="Remote, Seattle, New York"></label>
               <label>Terms<input id="terms" placeholder="Summer 2027, Fall 2026"></label>
+              <p class="settings-subhead">Qualification facts</p>
               <label>Skills / keywords<input id="skills" placeholder="Python, React, Docker, Java"></label>
-              <label>Required role words <span>blank accepts the curated repo scope</span><input id="includeKeywords" placeholder="software, data, machine learning"></label>
+              <p class="settings-subhead">Strict filters</p>
+              <p class="fine-print">These rules always control eligibility, but they never change the qualification score. Leave them blank to accept the curated repository scope.</p>
+              <label>Required role words<input id="includeKeywords" placeholder="software, data, machine learning"></label>
               <label>Exclude keywords<input id="excludeKeywords" placeholder="senior, principal"></label>
-              <label>Allowed locations <span>blank accepts all</span><input id="allowedLocations" placeholder="Remote, Seattle"></label>
+              <label>Allowed locations<input id="allowedLocations" placeholder="Remote, Seattle"></label>
             </div>
             <div class="toggle-list"><label><input id="remoteOnly" type="checkbox"><span>Only accept listings marked remote</span></label></div>
           </article>
@@ -240,9 +266,6 @@
             <p class="kicker">AUTOMATION</p><h2>Background behavior</h2>
             <div class="field-grid">
               <label>Poll every (seconds)<input id="pollInterval" type="number" min="30"></label>
-              <label>Minimum fit to prepare (1–10)<input id="minimumFit" type="number" min="1" max="10"></label>
-              <label>Minimum fit to auto-apply (1–10)<input id="autoApplyMinimumFit" type="number" min="1" max="10"></label>
-              <label>Workers<input id="workerCount" type="number" min="1" max="8"></label>
               <label>Daily application cap<input id="dayCap" type="number" min="1" max="200"></label>
               <label>Per-cycle cap<input id="cycleCap" type="number" min="1" max="50"></label>
               <label>Maximum attempts<input id="maxAttempts" type="number" min="1" max="10"></label>
@@ -252,14 +275,11 @@
             <div class="toggle-list">
               <label><input id="serviceEnabled" type="checkbox"><span>Keep polling in the background</span></label>
               <label><input id="autoPrepare" type="checkbox"><span>Prepare new matching roles automatically</span></label>
-              <label><input id="tailorResumes" type="checkbox"><span>Create fact-preserving tailored PDFs</span></label>
               <label><input id="useLlm" type="checkbox"><span>Use an LLM for scores and cover letters</span></label>
               <label><input id="generateCoverLetters" type="checkbox"><span>Generate factual cover letters when LLM use is on</span></label>
-              <label><input id="autoApplyNew" type="checkbox"><span>Automatically apply to new matching roles</span></label>
-              <label class="danger-toggle"><input id="allowSubmission" type="checkbox"><span>Allow workers to click final Submit</span></label>
               <label><input id="headless" type="checkbox"><span>Run browser windows headlessly</span></label>
             </div>
-            <p class="fine-print">A job must pass both fit limits before automatic apply starts. A manual Apply action ignores these limits.</p>
+            <p class="fine-print">Manual Apply actions always stop on the completed form and wait for your in-app Submit confirmation.</p>
           </article>
           <article class="panel settings-card">
             <p class="kicker">COMMON ANSWERS</p><h2>Screening defaults</h2>
@@ -271,7 +291,7 @@
               <label><input id="age18" type="checkbox"><span>I am 18 or older</span></label>
               <label><input id="previouslyWorked" type="checkbox"><span>I previously worked for the employer</span></label>
             </div>
-            <p class="fine-print">These are defaults, not guesses. Unknown required answers still stop for review.</p>
+            <p class="fine-print">These are facts, not guesses. Manual runs ask for missing facts. Auto mode stops and records an error instead.</p>
           </article>
           <article class="panel settings-card">
             <p class="kicker">VOLUNTARY EEO</p><h2>Self-identification defaults</h2>
@@ -286,6 +306,7 @@
             <p class="kicker">BROWSER AGENT</p><h2>Claude Code connection</h2>
             <div class="auth-status-line"><span id="claudeAuthDot" class="auth-dot"></span><strong id="claudeAuthState">Checking connection…</strong></div>
             <p id="claudeAuthDetail" class="fine-print">Use the Claude account included with a Pro or Max subscription. No API key or separate API billing is required.</p>
+            <p class="fine-print"><strong>Compatibility note:</strong> Anthropic may change or discontinue subscription login for this workflow. An Anthropic API key is the fallback.</p>
             <div class="auth-actions">
               <button id="connectClaude" class="button ink" type="button">Connect Claude account</button>
               <button id="disconnectClaude" class="button ghost hidden" type="button">Disconnect account</button>
@@ -295,54 +316,11 @@
               <div class="auth-code-row"><input id="claudeLoginCode" autocomplete="one-time-code" placeholder="Paste one-time code"><button id="completeClaude" class="button terracotta" type="button">Complete connection</button></div>
             </div>
           </article>
-          <article class="panel settings-card notifications-card">
-            <p class="kicker">NOTIFICATIONS</p><h2>Alerts that matter</h2>
-            <p class="fine-print">Browser alerts need an open dashboard. The background service sends email alerts when the dashboard is closed.</p>
-            <div class="notification-browser-row">
-              <label><input id="browserNotifications" type="checkbox"><span>Show local browser alerts</span></label>
-              <button id="enableBrowserNotifications" class="button ghost" type="button">Grant permission</button>
-              <span id="browserNotificationState">Permission not requested</span>
-            </div>
-            <div class="toggle-list notification-events">
-              <label><input id="notifyAgentInput" type="checkbox"><span>Agent needs input or review</span></label>
-              <label><input id="notifyApplicationStarted" type="checkbox"><span>Application started</span></label>
-              <label><input id="notifyApplicationApplied" type="checkbox"><span>Application submitted</span></label>
-              <label><input id="notifyApplicationFailed" type="checkbox"><span>Application attempt failed</span></label>
-              <label><input id="notifyOa" type="checkbox"><span>OA recorded</span></label>
-              <label><input id="notifyInterview" type="checkbox"><span>Interview recorded</span></label>
-              <label><input id="notifyOffer" type="checkbox"><span>Offer recorded</span></label>
-            </div>
-            <div class="notification-email">
-              <label class="email-enable"><input id="emailNotifications" type="checkbox"><span>Send email alerts</span></label>
-              <div class="field-grid">
-                <label>Send alerts to<input id="notificationEmailTo" type="email" placeholder="you@example.com"></label>
-                <label>From address<input id="notificationEmailFrom" type="email" placeholder="you@example.com"></label>
-                <label>SMTP host<input id="smtpHost" placeholder="smtp.example.com"></label>
-                <label>SMTP port<input id="smtpPort" type="number" min="1" max="65535"></label>
-                <label>Security<select id="smtpSecurity"><option value="starttls">STARTTLS</option><option value="ssl">SSL / TLS</option><option value="none">None (local relay)</option></select></label>
-                <label>SMTP username<input id="smtpUsername" autocomplete="username"></label>
-                <label>SMTP password <span id="smtpPasswordState"></span><input id="smtpPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep saved"><button class="clear-secret" data-secret="TIAAA_SMTP_PASSWORD" type="button">Forget saved value</button></label>
-              </div>
-              <button id="testEmailNotification" class="button ghost" type="button">Send test email</button>
-              <p class="fine-print">Save settings before sending a test. Providers such as Gmail may require an app password.</p>
-            </div>
-          </article>
-          <article class="panel settings-card keys-card">
-            <p class="kicker">OPTIONAL SECRETS</p><h2>API keys and ATS password</h2>
-            <p class="fine-print">These are optional. Keys are write-only in this UI and stored in <code>.env</code> with private permissions. Leave a field blank to keep the saved value.</p>
-            <div class="field-grid">
-              <label>Anthropic API key <span>advanced alternative to account login · <span id="anthropicState"></span></span><input id="anthropicKey" type="password" autocomplete="new-password" placeholder="optional API billing"><button class="clear-secret" data-secret="ANTHROPIC_API_KEY" type="button">Forget saved value</button></label>
-              <label>GitHub token <span id="githubState"></span><input id="githubToken" type="password" autocomplete="new-password" placeholder="optional"><button class="clear-secret" data-secret="GITHUB_TOKEN" type="button">Forget saved value</button></label>
-              <label>OpenAI key <span id="openaiState"></span><input id="openaiKey" type="password" autocomplete="new-password" placeholder="optional provider"><button class="clear-secret" data-secret="OPENAI_API_KEY" type="button">Forget saved value</button></label>
-              <label>Gemini key <span id="geminiState"></span><input id="geminiKey" type="password" autocomplete="new-password" placeholder="optional provider"><button class="clear-secret" data-secret="GEMINI_API_KEY" type="button">Forget saved value</button></label>
-              <label>Application account password <span id="applicationPasswordState"></span><input id="applicationPassword" type="password" autocomplete="new-password" placeholder="optional ATS account creation"><button class="clear-secret" data-secret="TIAAA_APPLICATION_PASSWORD" type="button">Forget saved value</button></label>
-            </div>
-          </article>
           <div class="settings-save"><p id="settingsNote">Changes affect the next background cycle.</p><button class="button terracotta" type="submit">Save all settings</button></div>
         </form>
       </section>
 
-      <footer><span>TI-AAA · Tech Internship Autonomous Application Agent</span><span>Private by default · data stays in your local volume</span></footer>
+      <footer><span>TI-AAA · Tech Internship Autonomous Application Agent</span><span>Local storage by default · connected services receive enabled-feature data</span></footer>
     </main>
   </div>
 
@@ -387,28 +365,36 @@
           <div class="step-actions"><button class="button ghost prev-step" type="button">Back</button></div>
         </section>
         <section class="onboard-step" data-step="3">
-          <p class="kicker">STEP 3 OF 3</p><h2>Choose the agent’s boundary</h2>
+          <p class="kicker">STEP 3 OF 3</p><h2>Connect the browser agent</h2>
           <div class="onboard-auth">
             <div class="auth-status-line"><span id="onboardClaudeAuthDot" class="auth-dot"></span><strong id="onboardClaudeAuthState">Claude account not connected</strong></div>
             <p id="onboardClaudeAuthDetail" class="fine-print">Recommended: sign in with the Claude Pro or Max account you already use for Claude Code. No Anthropic API key is needed.</p>
+            <p class="fine-print"><strong>Compatibility note:</strong> Anthropic may change or discontinue subscription login for this workflow. An Anthropic API key is the fallback.</p>
             <button id="onboardConnectClaude" class="button ink" type="button">Connect Claude account</button>
             <div id="onboardClaudeCodePanel" class="auth-code-panel hidden">
               <p><a id="onboardClaudeLoginLink" target="_blank" rel="noopener noreferrer">Open Claude sign-in</a>, finish signing in, then paste its one-time code here.</p>
               <div class="auth-code-row"><input id="onboardClaudeLoginCode" autocomplete="one-time-code" placeholder="Paste one-time code"><button id="onboardCompleteClaude" class="button terracotta" type="button">Complete connection</button></div>
             </div>
-            <details class="advanced-auth"><summary>Use an Anthropic API key instead</summary><label class="wide-label">Anthropic API key <span>optional; uses separate API billing</span><input id="onboardAnthropic" type="password" autocomplete="new-password" placeholder="sk-ant-…"></label></details>
           </div>
-          <label class="wide-label">Application account password <span>optional; used only if an employer requires account creation</span><input id="onboardApplicationPassword" type="password" autocomplete="new-password"></label>
-          <div class="choice-list">
-            <label><input type="radio" name="onboardBoundary" value="review" checked><span><strong>Stop before final Submit</strong><small>Manual Apply actions fill the form, then wait for your review.</small></span></label>
-            <label><input type="radio" name="onboardBoundary" value="submit"><span><strong>Allow final submission</strong><small>Manual Apply actions—and future auto-apply if enabled—may click Submit.</small></span></label>
-          </div>
-          <p class="fine-print">Automatic application to newly posted matches starts off. You can opt in later from Settings.</p>
-          <p class="fine-print">CAPTCHAs, ambiguous questions, and missing facts always stop for review.</p>
+          <div class="intake-note"><strong>Manual confirmation</strong><p>A manual application fills the form and keeps it open. You confirm final submission from the Agent page. Auto mode starts off and can be enabled later in Settings.</p></div>
+          <p class="fine-print">Auto mode does not wait for answers. If a required personal fact is missing, it stops that application and reports the reason when you return.</p>
           <div class="step-actions"><button class="button ghost prev-step" type="button">Back</button><button id="finishOnboarding" class="button terracotta" type="button">Finish setup</button></div>
         </section>
       </div>
     </div>
+  </div>
+
+  <div id="welcomeBack" class="welcome-back hidden" role="dialog" aria-modal="true" aria-labelledby="welcomeBackTitle">
+    <section class="welcome-card">
+      <header><span>RETURN BRIEF / AUTO MODE</span><button id="closeWelcomeBack" type="button" aria-label="Close welcome back summary">×</button></header>
+      <div class="welcome-copy">
+        <p class="kicker">WELCOME BACK</p>
+        <h2 id="welcomeBackTitle">The agent kept working.</h2>
+        <p id="welcomeBackSummary" class="lead"></p>
+      </div>
+      <div id="welcomeBackApplications" class="welcome-applications"></div>
+      <footer><button id="welcomeBackTracker" class="button ink" type="button">Open application tracker</button><button id="welcomeBackDone" class="button ghost" type="button">Keep browsing</button></footer>
+    </section>
   </div>
 
   <div id="jobDetailScrim" class="drawer-scrim hidden">

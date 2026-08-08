@@ -22,8 +22,11 @@ from tiaaa.database import (
     get_app_state,
     get_connection,
     init_db,
+    list_application_queue,
     manual_application_ids,
     recover_stale_work,
+    refresh_qualification_scores,
+    request_final_submission,
     request_manual_application,
     set_app_state,
     source_baseline_complete,
@@ -127,7 +130,7 @@ class AutomationService:
         job_id: int,
         answers: dict[str, Any],
     ) -> dict[str, Any]:
-        """Save candidate answers and restart the same prepared application."""
+        """Save candidate answers and continue the active application session."""
 
         connection = get_connection(self.db_path)
         if bool(get_app_state(connection).get("service_paused")):
@@ -142,6 +145,24 @@ class AutomationService:
             f"Continuing application for {job['company']} · {job['role']}",
         )
         self.trigger()
+        return job
+
+    def confirm_submission(self, job_id: int) -> dict[str, Any]:
+        """Authorize final submission in the still-open manual browser session."""
+
+        connection = get_connection(self.db_path)
+        if bool(get_app_state(connection).get("service_paused")):
+            raise RuntimeError("Resume the background service before submitting")
+        job = request_final_submission(connection, job_id)
+        if job is None:
+            raise LookupError("Job not found")
+        set_app_state(connection, "service_status", "applying")
+        set_app_state(
+            connection,
+            "service_message",
+            f"Submitting application for {job['company']} · {job['role']}",
+        )
+        self._wake.set()
         return job
 
     def snapshot(self) -> dict[str, Any]:
@@ -220,23 +241,42 @@ class AutomationService:
                 "queued": sum(result.queued for result in sync_results),
                 "errors": sum(result.status == "error" for result in sync_results),
             }
+            if not settings.get("preparation", {}).get("use_llm"):
+                refresh_qualification_scores(
+                    connection,
+                    profile=profile,
+                    settings=settings,
+                )
 
             state = get_app_state(connection)
             prepared = {"prepared": 0, "errors": 0}
             applied = {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+            push_delivery = {
+                "subscriptions": 0,
+                "sent": 0,
+                "jobs": 0,
+                "removed": 0,
+                "errors": 0,
+            }
             onboarding_complete = bool(state.get("onboarding_complete"))
             baseline_complete = source_baseline_complete(
                 connection, expected_documents=len(SOURCE_DOCUMENTS)
             )
             service_settings = settings.get("service", {})
+            automation = settings.get("automation", {})
+            auto_mode = bool(automation.get("auto_apply_new", False))
             manual_pending = bool(manual_application_ids(connection))
             if (
                 onboarding_complete
                 and baseline_complete
-                and (manual_pending or bool(service_settings.get("auto_prepare", True)))
+                and (
+                    manual_pending
+                    or auto_mode
+                    or bool(service_settings.get("auto_prepare", True))
+                )
             ):
                 set_app_state(connection, "service_status", "preparing")
-                set_app_state(connection, "service_message", "Selecting and tailoring resumes")
+                set_app_state(connection, "service_message", "Selecting application resumes")
                 if settings.get("preparation", {}).get("use_llm"):
                     from tiaaa.preparation import score_jobs_with_llm
 
@@ -250,10 +290,39 @@ class AutomationService:
                     db_path=self.db_path,
                 )
 
-            automation = settings.get("automation", {})
+            if (
+                onboarding_complete
+                and baseline_complete
+                and auto_mode
+                and bool(automation.get("web_push_notifications", False))
+            ):
+                try:
+                    from tiaaa.web_push import send_auto_queue_notifications
+
+                    queue = list_application_queue(
+                        connection,
+                        auto_enabled=True,
+                        max_attempts=int(automation.get("max_attempts", 3)),
+                        minimum_fit_score=int(
+                            automation.get("auto_apply_minimum_fit_score", 7)
+                        ),
+                        profile=profile,
+                        use_preferences=bool(
+                            automation.get("auto_apply_use_preferences", False)
+                        ),
+                    )
+                    push_delivery = send_auto_queue_notifications(
+                        connection,
+                        paths=self.paths,
+                        queue=queue,
+                    )
+                except Exception as exc:
+                    log.warning("Browser notification delivery failed: %s", exc)
+                    push_delivery["errors"] += 1
+
             manual_ids = manual_application_ids(connection)
             if onboarding_complete and baseline_complete and (
-                manual_ids or bool(automation.get("auto_apply_new", False))
+                manual_ids or auto_mode
             ):
                 set_app_state(connection, "service_status", "applying")
                 set_app_state(connection, "service_message", "Browser application workers are active")
@@ -266,19 +335,22 @@ class AutomationService:
                         paths=self.paths,
                         limit=1,
                         workers=1,
-                        submit=bool(automation.get("allow_submission")),
+                        submit=False,
+                        unattended=False,
+                        interactive_review=True,
                         target_job_id=job_id,
                         db_path=self.db_path,
                     )
                     for key in applied:
                         applied[key] += result[key]
-                if bool(automation.get("auto_apply_new", False)):
+                if auto_mode:
                     result = run_applications(
                         profile=profile,
                         settings=settings,
                         paths=self.paths,
-                        workers=int(automation.get("workers", 1)),
-                        submit=bool(automation.get("allow_submission")),
+                        workers=1,
+                        submit=True,
+                        unattended=True,
                         db_path=self.db_path,
                     )
                     for key in applied:
@@ -292,6 +364,7 @@ class AutomationService:
                 "baseline_complete": baseline_complete,
                 "preparation": prepared,
                 "applications": applied,
+                "web_push": push_delivery,
             }
             set_app_state(connection, "last_cycle", summary)
             set_app_state(connection, "last_cycle_at", summary["completed_at"])

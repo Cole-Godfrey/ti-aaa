@@ -50,7 +50,6 @@ SOURCE_DOCUMENTS: tuple[SourceDocument, ...] = (
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "poll_interval_seconds": 300,
-    "minimum_fit_score": 5,
     "service": {
         "enabled": True,
         "auto_prepare": True,
@@ -64,11 +63,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "preparation": {
         "use_llm": False,
         "generate_cover_letters": True,
-        "tailor_resumes": True,
     },
     "automation": {
         "auto_apply_new": False,
         "auto_apply_minimum_fit_score": 7,
+        "auto_apply_use_preferences": False,
+        "web_push_notifications": False,
         "allow_submission": False,
         "workers": 1,
         "max_applications_per_cycle": 5,
@@ -77,25 +77,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "claude_model": "sonnet",
         "headless": False,
         "timeout_seconds": 600,
-    },
-    "notifications": {
-        "browser_enabled": False,
-        "email_enabled": False,
-        "email_to": "",
-        "email_from": "",
-        "smtp_host": "",
-        "smtp_port": 587,
-        "smtp_security": "starttls",
-        "smtp_username": "",
-        "events": {
-            "agent_input": True,
-            "application_started": True,
-            "application_applied": True,
-            "application_failed": True,
-            "oa": True,
-            "interview": True,
-            "offer": True,
-        },
     },
     "dashboard": {"host": "127.0.0.1", "port": 8787},
 }
@@ -155,6 +136,10 @@ class AppPaths:
     def workers(self) -> Path:
         return self.root / "workers"
 
+    @property
+    def web_push_private_key(self) -> Path:
+        return self.root / "web-push-private.pem"
+
 
 def get_paths(root: Path | str | None = None) -> AppPaths:
     configured = root or os.environ.get("TIAAA_HOME") or (Path.home() / ".tiaaa")
@@ -206,7 +191,33 @@ def load_settings(paths: AppPaths | None = None) -> dict[str, Any]:
     loaded = yaml.safe_load(paths.settings.read_text(encoding="utf-8")) or {}
     if not isinstance(loaded, dict):
         raise ValueError(f"Settings must be a YAML mapping: {paths.settings}")
-    return _deep_merge(DEFAULT_SETTINGS, loaded)
+    return _normalize_settings(_deep_merge(DEFAULT_SETTINGS, loaded))
+
+
+def _normalize_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Discard retired settings when an existing installation is loaded or saved."""
+
+    settings.pop("minimum_fit_score", None)
+    settings.pop("notifications", None)
+    preparation = settings.get("preparation")
+    if isinstance(preparation, dict):
+        preparation.pop("tailor_resumes", None)
+    automation = settings.get("automation")
+    if isinstance(automation, dict):
+        legacy_submission_split = (
+            "auto_apply_eligible_only" in automation or "enabled" in automation
+        )
+        if (
+            legacy_submission_split
+            and bool(automation.get("auto_apply_new"))
+            and not bool(automation.get("allow_submission"))
+        ):
+            # Older releases had two separate switches. Do not reinterpret an old
+            # discovery-only choice as permission for unattended final submission.
+            automation["auto_apply_new"] = False
+        automation.pop("auto_apply_eligible_only", None)
+        automation.pop("enabled", None)
+    return settings
 
 
 def load_profile(paths: AppPaths | None = None) -> dict[str, Any]:
@@ -239,12 +250,14 @@ def save_settings(settings: dict[str, Any], paths: AppPaths | None = None) -> Pa
     """Persist user settings after merging defaults and clamping unsafe runtime values."""
 
     paths = ensure_dirs(paths)
-    merged = _deep_merge(DEFAULT_SETTINGS, settings)
+    merged = _normalize_settings(_deep_merge(DEFAULT_SETTINGS, settings))
     merged["poll_interval_seconds"] = max(30, int(merged.get("poll_interval_seconds", 300)))
-    merged["minimum_fit_score"] = max(1, min(10, int(merged.get("minimum_fit_score", 5))))
     automation = merged["automation"]
     automation["auto_apply_minimum_fit_score"] = max(
         1, min(10, int(automation.get("auto_apply_minimum_fit_score", 7)))
+    )
+    automation["web_push_notifications"] = bool(
+        automation.get("web_push_notifications", False)
     )
     automation["workers"] = max(1, min(8, int(automation.get("workers", 1))))
     automation["max_applications_per_cycle"] = max(
@@ -256,14 +269,6 @@ def save_settings(settings: dict[str, Any], paths: AppPaths | None = None) -> Pa
     automation["max_attempts"] = max(1, min(10, int(automation.get("max_attempts", 3))))
     automation["timeout_seconds"] = max(
         60, min(3600, int(automation.get("timeout_seconds", 600)))
-    )
-    notifications = merged["notifications"]
-    notifications["smtp_port"] = max(
-        1, min(65535, int(notifications.get("smtp_port", 587)))
-    )
-    security = str(notifications.get("smtp_security", "starttls")).casefold()
-    notifications["smtp_security"] = (
-        security if security in {"starttls", "ssl", "none"} else "starttls"
     )
     paths.settings.write_text(
         yaml.safe_dump(merged, sort_keys=False, allow_unicode=True), encoding="utf-8"
@@ -278,8 +283,6 @@ SECRET_NAMES = (
     "GEMINI_API_KEY",
     "OPENAI_API_KEY",
     "GITHUB_TOKEN",
-    "TIAAA_APPLICATION_PASSWORD",
-    "TIAAA_SMTP_PASSWORD",
 )
 
 
@@ -293,12 +296,7 @@ def secret_status(paths: AppPaths | None = None) -> dict[str, dict[str, str | bo
         value = os.environ.get(name) or str(stored.get(name) or "")
         result[name] = {
             "configured": bool(value),
-            "suffix": (
-                value[-4:]
-                if name not in {"TIAAA_APPLICATION_PASSWORD", "TIAAA_SMTP_PASSWORD"}
-                and len(value) >= 4
-                else ""
-            ),
+            "suffix": value[-4:] if len(value) >= 4 else "",
         }
     return result
 

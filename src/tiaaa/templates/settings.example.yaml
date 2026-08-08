@@ -1,5 +1,4 @@
 poll_interval_seconds: 300
-minimum_fit_score: 5
 
 service:
   # The poller runs even when no browser is open.
@@ -16,46 +15,24 @@ filters:
 preparation:
   use_llm: false
   generate_cover_letters: true
-  # Reorders existing resume facts into an ATS-friendly PDF; it never invents content.
-  tailor_resumes: true
 
 automation:
-  # Opt in to browser workers for matching roles discovered after this is enabled.
-  # Current and previously discovered roles remain available for manual Apply actions.
+  # Auto mode applies only to roles found after the initial repository baseline.
   auto_apply_new: false
-  # Automatic workers only claim jobs at or above this fit score.
-  # Manual Apply actions ignore this limit.
+  # Auto mode uses candidate qualifications for this score. Preferences do not change it.
   auto_apply_minimum_fit_score: 7
-  # False fills forms for review; true lets the background service click final Submit.
+  # If true, Auto mode also requires the role, location, and term preferences in profile.json.
+  auto_apply_use_preferences: false
+  # Browser permission is requested only after Auto mode is on and this is enabled in the web app.
+  web_push_notifications: false
+  # CLI safety switch for `tiaaa apply --submit`. The web app uses in-app confirmation.
   allow_submission: false
-  workers: 1
   max_applications_per_cycle: 5
   max_applications_per_day: 25
   max_attempts: 3
   claude_model: sonnet
   headless: false
   timeout_seconds: 600
-
-notifications:
-  # Browser alerts appear only while the dashboard is open and permission is granted.
-  browser_enabled: false
-  # Email alerts keep working when the dashboard is closed. The SMTP password is
-  # stored separately as TIAAA_SMTP_PASSWORD in the private .env file.
-  email_enabled: false
-  email_to: ""
-  email_from: ""
-  smtp_host: ""
-  smtp_port: 587
-  smtp_security: starttls
-  smtp_username: ""
-  events:
-    agent_input: true
-    application_started: true
-    application_applied: true
-    application_failed: true
-    oa: true
-    interview: true
-    offer: true
 
 dashboard:
   host: 127.0.0.1

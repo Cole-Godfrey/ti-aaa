@@ -2,20 +2,21 @@
 
 ## One-time setup
 
-1. Create the public GitHub repository and add it as this repository's `origin`.
-2. Review the package name. `ti-aaa` returned no PyPI project on 2026-07-18, but availability can change.
-3. Add the final repository URLs to `[project.urls]` in `pyproject.toml`.
-4. Create a PyPI project/trusted-publisher mapping for:
-   - GitHub owner and repository
-   - workflow `.github/workflows/publish.yml`
+1. Confirm that the `ti-aaa` package name is still available on PyPI.
+2. Create a PyPI project or pending trusted-publisher mapping for:
+   - GitHub owner `Cole-Godfrey` and repository `ti-aaa`
+   - workflow filename `publish.yml` (stored in `.github/workflows/`)
    - environment `pypi`
-5. Protect the `pypi` GitHub environment if release approval is desired.
+3. Create the `pypi` GitHub environment. Add a required reviewer if release approval is desired.
+4. Enable GitHub private vulnerability reporting so `SECURITY.md`'s reporting path is available.
+5. Protect `main` and require the CI matrix before merging.
 
 ## Release checklist
 
 ```bash
 ruff check src tests
-pytest --cov=tiaaa --cov-report=term-missing
+pytest --cov=tiaaa --cov-report=term-missing --cov-fail-under=65
+pip-audit
 python -m build
 python -m twine check dist/*
 ```
@@ -28,4 +29,5 @@ Then:
 4. Create and push an annotated tag matching the release, such as `vX.Y.Z`.
 5. Verify the Publish workflow and install the artifact in a clean environment.
 
-The publish workflow uses PyPI trusted publishing and stores no long-lived PyPI token.
+The publish workflow repeats linting, tests, dependency auditing, tag/version validation, building,
+and package validation before it uses PyPI trusted publishing. It stores no long-lived PyPI token.

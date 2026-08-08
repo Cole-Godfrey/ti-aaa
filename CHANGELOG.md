@@ -4,6 +4,40 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-07
+
+### Added
+
+- a welcome-back summary of submissions and stopped Auto mode attempts since the prior visit
+- a final in-app submission confirmation that continues on the completed live form
+- a persisted application queue shown in the Agent tab
+- an optional preference gate for Auto mode
+- one best-fit automatic application per company
+- opt-in Web Push alerts for new jobs entering the Auto-mode queue
+
+### Changed
+
+- all eligible queued jobs can be prepared; preparation no longer has a fit limit
+- fit scores measure candidate qualifications and do not use preferences or strict eligibility filters
+- Auto mode uses the configured fit limit, submits without user input, and records missing facts as errors
+- upgrades leave the new Auto mode off when the old setup did not permit final submission
+- repository batches use one browser and are processed one application at a time
+- selected resumes are copied without PDF changes and named `First_Last_Resume.pdf`
+- API keys are configured through the private `.env` file or environment variables, not the dashboard
+- dependency ranges and pinned Claude Code and Playwright MCP releases were refreshed for publication
+- public package metadata, install instructions, and third-party data-flow disclosures now point to the GitHub repository
+
+### Removed
+
+- the former application-start browser alerts and all email-alert delivery code
+- the shared employer account password; account creation and login now require manual action
+
+### Security
+
+- state-changing dashboard requests and worker WebSockets now reject cross-origin browsers
+- the dashboard now rejects untrusted host headers and disables API response caching
+- discovery ignores credentialed URLs and links that directly target local or private-network addresses
+
 ## [0.6.0] - 2026-08-02
 
 ### Added

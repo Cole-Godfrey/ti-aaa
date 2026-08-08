@@ -9,6 +9,8 @@ __pycache__
 dist
 build
 .env
+.env.*
+!.env.example
 tiaaa.db*
 application-packets
 browser-profiles
@@ -16,3 +18,9 @@ live-previews
 resumes
 workers
 logs
+profile.json
+settings.yaml
+resume.pdf
+resume.txt
+.claude
+.planning

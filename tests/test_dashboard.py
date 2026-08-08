@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 
+import pytest
 from fastapi.testclient import TestClient
 from reportlab.pdfgen import canvas
+from starlette.websockets import WebSocketDisconnect
 
 from tiaaa.apply.preview import preview_frame_hub
 from tiaaa.config import SOURCE_DOCUMENTS, AppPaths
@@ -14,8 +16,12 @@ from tiaaa.database import (
     get_job,
     ingest_listings,
     init_db,
+    mark_apply_result,
+    request_final_submission,
+    request_manual_application,
     set_app_state,
     store_agent_inputs,
+    update_tracker,
     update_worker_state,
 )
 from tiaaa.models import InternshipListing
@@ -57,12 +63,6 @@ def test_dashboard_stats_jobs_and_tracker_updates(tmp_path, profile, settings) -
     analytics = client.get("/api/analytics").json()
     assert analytics["summary"]["applications"] == 1
     assert analytics["dimensions"]["role_family"][0]["label"] == "Software engineering"
-    notices = client.get("/api/notifications").json()
-    assert [item["category"] for item in notices["items"]] == [
-        "application_applied",
-        "oa",
-    ]
-    assert notices["latest_id"] == notices["items"][-1]["id"]
     health = client.get("/api/health")
     assert health.json()["status"] == "ok"
     assert health.headers["x-content-type-options"] == "nosniff"
@@ -70,45 +70,77 @@ def test_dashboard_stats_jobs_and_tracker_updates(tmp_path, profile, settings) -
     assert get_connection(path).execute("SELECT outcome_status FROM jobs").fetchone()[0] == "oa"
 
 
-def test_web_onboarding_stores_write_only_keys_and_resume(tmp_path, profile, monkeypatch) -> None:
+def test_dashboard_blocks_untrusted_hosts_and_cross_origin_writes(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path / "dashboard.db"))
+
+    assert client.get("/api/health", headers={"host": "attacker.example"}).status_code == 400
+    cross_origin = client.post(
+        "/api/dashboard/visit",
+        headers={
+            "origin": "https://attacker.example",
+            "sec-fetch-site": "cross-site",
+        },
+    )
+    assert cross_origin.status_code == 403
+
+    same_origin = client.post(
+        "/api/dashboard/visit",
+        headers={"origin": "http://testserver", "sec-fetch-site": "same-origin"},
+    )
+    assert same_origin.status_code == 200
+    assert same_origin.headers["cache-control"] == "no-store"
+
+
+def test_dashboard_blocks_cross_origin_worker_websockets(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path / "dashboard.db"))
+
+    with pytest.raises(WebSocketDisconnect) as error, client.websocket_connect(
+        "/api/workers/worker-0/stream",
+        headers={
+            "origin": "https://attacker.example",
+            "sec-fetch-site": "cross-site",
+        },
+    ):
+        pass
+    assert error.value.code == 1008
+
+
+def test_config_api_stores_write_only_keys_and_web_onboarding_resume(
+    tmp_path, profile, monkeypatch
+) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("TIAAA_SMTP_PASSWORD", raising=False)
     paths = AppPaths(tmp_path)
     path = tmp_path / "tiaaa.db"
     client = TestClient(create_app(path, paths=paths))
     secret = "sk-ant-test-secret-1234"
-    smtp_secret = "smtp-app-password"
 
     response = client.put(
         "/api/config",
         json={
             "profile": profile,
-            "secrets": {
-                "ANTHROPIC_API_KEY": secret,
-                "TIAAA_SMTP_PASSWORD": smtp_secret,
-            },
+            "secrets": {"ANTHROPIC_API_KEY": secret},
         },
     )
     assert response.status_code == 200
     assert secret not in response.text
-    assert smtp_secret not in response.text
     assert response.json()["secrets"]["ANTHROPIC_API_KEY"] == {
         "configured": True,
         "suffix": "1234",
     }
     assert secret in paths.env.read_text(encoding="utf-8")
-    assert smtp_secret in paths.env.read_text(encoding="utf-8")
-    assert response.json()["secrets"]["TIAAA_SMTP_PASSWORD"] == {
-        "configured": True,
-        "suffix": "",
-    }
     assert paths.env.stat().st_mode & 0o077 == 0
     cleared = client.put(
         "/api/config",
-        json={"clear_secrets": ["ANTHROPIC_API_KEY", "TIAAA_SMTP_PASSWORD"]},
+        json={"clear_secrets": ["ANTHROPIC_API_KEY"]},
     )
     assert cleared.json()["secrets"]["ANTHROPIC_API_KEY"]["configured"] is False
     assert secret not in paths.env.read_text(encoding="utf-8")
+    retired_password = client.put(
+        "/api/config",
+        json={"secrets": {"TIAAA_APPLICATION_PASSWORD": "do-not-store"}},
+    )
+    assert retired_password.status_code == 422
+    assert "do-not-store" not in paths.env.read_text(encoding="utf-8")
 
     buffer = io.BytesIO()
     document = canvas.Canvas(buffer)
@@ -128,6 +160,76 @@ def test_web_onboarding_stores_write_only_keys_and_resume(tmp_path, profile, mon
     assert finish.status_code == 200
     assert client.get("/api/onboarding").json()["complete"] is True
     assert client.delete("/api/resumes/1").status_code == 409
+
+
+def test_dashboard_visit_reports_applications_since_the_prior_visit(
+    tmp_path, profile, settings
+) -> None:
+    paths = AppPaths(tmp_path)
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    listing = InternshipListing(
+        company="Acme",
+        role="Software Engineer Intern",
+        location="Remote",
+        application_url="https://jobs.test/welcome",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+    )
+    failed_listing = InternshipListing(
+        company="Blocked Co",
+        role="Platform Intern",
+        location="Remote",
+        application_url="https://jobs.test/welcome-failed",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+    )
+    ingest_listings(
+        connection,
+        source,
+        [listing, failed_listing],
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    client = TestClient(create_app(paths.database, paths=paths))
+
+    first = client.post("/api/dashboard/visit").json()
+    assert first["first_visit"] is True
+    assert first["applications"] == []
+
+    update_tracker(connection, 1, pipeline_status="applied")
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applying', apply_origin = 'auto',
+                        last_attempted_at = updated_at
+        WHERE id = 2
+        """
+    )
+    connection.commit()
+    mark_apply_result(
+        connection,
+        2,
+        "failed",
+        "Required home address is not configured",
+        reason_code="missing_input",
+        manual_handoff=False,
+    )
+    second = client.post("/api/dashboard/visit").json()
+    assert second["first_visit"] is False
+    assert second["application_count"] == 1
+    assert second["applications"][0]["company"] == "Acme"
+    assert second["failure_count"] == 1
+    assert second["failures"][0]["company"] == "Blocked Co"
+    assert second["failures"][0]["apply_reason_code"] == "missing_input"
+
+    third = client.post("/api/dashboard/visit").json()
+    assert third["applications"] == []
+    assert third["failures"] == []
 
 
 def test_live_worker_preview_is_served_only_from_preview_directory(tmp_path) -> None:
@@ -212,7 +314,7 @@ def test_latest_jobs_detail_and_manual_apply_action(tmp_path, profile, settings)
 
         def request_application(self, job_id):
             self.requested.append(job_id)
-            return get_job(connection, job_id)
+            return request_manual_application(connection, job_id)
 
     app = create_app(paths.database, paths=paths)
     service = FakeService()
@@ -223,12 +325,16 @@ def test_latest_jobs_detail_and_manual_apply_action(tmp_path, profile, settings)
     rows = client.get("/api/jobs?view=latest").json()["items"]
     assert [row["company"] for row in rows[:2]] == ["Latest Co", "Older Co"]
     detail = client.get(f"/api/jobs/{rows[0]['id']}").json()
-    assert detail["application_mode"] == "review"
+    assert detail["application_mode"] == "manual_confirm"
     assert detail["source_labels"] == source.label
     response = client.post(f"/api/jobs/{rows[0]['id']}/apply")
     assert response.status_code == 202
-    assert response.json()["mode"] == "review"
+    assert response.json()["mode"] == "manual_confirm"
     assert service.requested == [rows[0]["id"]]
+    queue = client.get("/api/workers").json()
+    assert queue["queue_summary"] == {"serial": True, "active": 0, "waiting": 1}
+    assert queue["queue"][0]["id"] == rows[0]["id"]
+    assert queue["queue"][0]["origin"] == "manual"
 
 
 def test_agent_page_accepts_requested_input_and_requeues_job(
@@ -296,6 +402,60 @@ def test_agent_page_accepts_requested_input_and_requeues_job(
     assert get_job(connection, 1)["manual_requested"] == 1
 
 
+def test_agent_page_confirms_submission_on_the_live_completed_form(
+    tmp_path, profile, settings
+) -> None:
+    paths = AppPaths(tmp_path)
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    listing = InternshipListing(
+        company="Acme",
+        role="Software Engineer Intern",
+        location="Remote",
+        application_url="https://jobs.test/submit",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+    )
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'manual_review', worker_id = 'worker-0',
+                        resume_path = ?
+        WHERE id = 1
+        """,
+        (str(tmp_path / "Avery_Student_Resume.pdf"),),
+    )
+    connection.commit()
+    update_worker_state(
+        connection,
+        "worker-0",
+        status="review_ready",
+        job=get_job(connection, 1),
+        message="Review complete; confirm Submit below",
+    )
+
+    class FakeService:
+        def confirm_submission(self, job_id):
+            return request_final_submission(connection, job_id)
+
+    app = create_app(paths.database, paths=paths)
+    app.state.service = FakeService()
+    client = TestClient(app)
+
+    worker_payload = client.get("/api/workers").json()
+    worker = worker_payload["items"][0]
+    assert worker["submission_ready"] is True
+    assert worker_payload["queue"][0]["queue_state"] == "active"
+    assert worker_payload["queue"][0]["worker_status"] == "review_ready"
+    response = client.post("/api/jobs/1/submit")
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "submitting"
+    assert get_job(connection, 1)["submission_requested"] == 1
+
+
 def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     paths = AppPaths(tmp_path)
     client = TestClient(create_app(paths.database, paths=paths))
@@ -304,18 +464,51 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     javascript = client.get("/static/app.js").text
 
     assert 'id="agentInputPanel"' in index
-    assert 'id="autoApplyMinimumFit"' in index
-    assert 'id="notifyApplicationStarted"' in index
+    assert 'id="agentQueueList"' in index
+    assert 'id="agentQueueCount"' in index
+    assert 'id="autoMode"' in index
+    assert 'id="autoModeMinimumFit"' in index
+    assert 'id="autoModeUsePreferences"' in index
+    assert 'id="webPushOption" class="web-push-option hidden"' in index
+    assert 'id="webPushNotifications"' in index
+    assert 'id="autoApplyMinimumFit"' not in index
+    assert 'id="autoApplyRule"' not in index
+    assert 'id="tailorResumes"' not in index
+    assert 'id="autoApplyNew"' not in index
+    assert 'id="allowSubmission"' not in index
+    assert 'id="workerCount"' not in index
+    assert 'id="welcomeBack"' in index
+    assert 'id="minimumFit"' not in index
+    assert "NOTIFICATIONS" not in index
+    assert "OPTIONAL SECRETS" not in index
+    assert 'id="anthropicKey"' not in index
+    assert 'id="onboardAnthropic"' not in index
     assert "Local browser stream" in index
     assert "new WebSocket" in javascript
     assert "data-preview-canvas" in javascript
     assert "}, 500);" not in javascript
     assert "}, 1000);" in javascript
     assert "Save answers & continue" in javascript
+    assert "keeps the current form open and continues it with your answers" in javascript
+    assert "restarts this application with your answers" not in javascript
     assert "function listingDate(postingDate, firstSeenAt)" in javascript
     assert "job.posting_date || shortDate(job.first_seen_at)" not in javascript
     assert javascript.count("listingDate(job.posting_date, job.first_seen_at)") == 2
     assert "automation.auto_apply_minimum_fit_score ?? 7" in javascript
+    assert 'api(`/api/jobs/${card.dataset.submitJob}/submit`' in javascript
+    assert "Submit application" in javascript
+    assert "function renderApplicationQueue" in javascript
+    assert 'renderApplicationQueue(workers.queue || [], workers.queue_summary || {})' in javascript
+    assert "Notification.requestPermission()" in javascript
+    assert 'navigator.serviceWorker.register("/sw.js"' in javascript
+    assert 'web_push_notifications: checked("autoMode") && checked("webPushNotifications")' in javascript
+    assert 'api("/api/dashboard/visit", { method: "POST" })' in javascript
+    assert "stopped with a recorded reason" in javascript
+
+    service_worker = client.get("/sw.js")
+    assert service_worker.status_code == 200
+    assert "showNotification" in service_worker.text
+    assert service_worker.headers["service-worker-allowed"] == "/"
 
 
 def test_web_settings_clamp_the_auto_apply_fit_limit(tmp_path) -> None:
@@ -324,10 +517,26 @@ def test_web_settings_clamp_the_auto_apply_fit_limit(tmp_path) -> None:
 
     response = client.put(
         "/api/config",
-        json={"settings": {"automation": {"auto_apply_minimum_fit_score": 99}}},
+        json={
+            "settings": {
+                "minimum_fit_score": 5,
+                "notifications": {"email_enabled": True},
+                "automation": {
+                    "auto_apply_eligible_only": True,
+                    "auto_apply_minimum_fit_score": 99,
+                    "auto_apply_use_preferences": True,
+                    "web_push_notifications": 1,
+                },
+            }
+        },
     )
 
     assert response.status_code == 200
     assert response.json()["settings"]["automation"][
         "auto_apply_minimum_fit_score"
     ] == 10
+    assert "auto_apply_eligible_only" not in response.json()["settings"]["automation"]
+    assert response.json()["settings"]["automation"]["auto_apply_use_preferences"] is True
+    assert response.json()["settings"]["automation"]["web_push_notifications"] is True
+    assert "minimum_fit_score" not in response.json()["settings"]
+    assert "notifications" not in response.json()["settings"]

@@ -23,7 +23,7 @@ def pdf_with_text(*lines: str) -> bytes:
     return buffer.getvalue()
 
 
-def test_best_resume_is_selected_tailored_and_recorded_on_submission(
+def test_best_resume_is_selected_preserved_and_recorded_on_submission(
     tmp_path, profile, settings
 ) -> None:
     paths = ensure_dirs(AppPaths(tmp_path))
@@ -86,7 +86,9 @@ def test_best_resume_is_selected_tailored_and_recorded_on_submission(
     assert prepared["base_resume_name"] == "Backend"
     assert Path(prepared["resume_path"]).is_file()
     assert prepared["resume_path"] != backend["pdf_path"]
-    assert "verbatim lines" in prepared["tailoring_reason"]
+    assert Path(prepared["resume_path"]).name == "Avery_Student_Resume.pdf"
+    assert Path(prepared["resume_path"]).read_bytes() == Path(backend["pdf_path"]).read_bytes()
+    assert "preserved the original PDF" in prepared["tailoring_reason"]
 
     mark_apply_result(connection, 1, "applied")
     submitted = get_job(connection, 1)

@@ -65,6 +65,9 @@ def test_manual_application_runs_when_automatic_new_job_setting_is_off(
     )
 
     def fake_apply(**kwargs):
+        assert kwargs["submit"] is False
+        assert kwargs["unattended"] is False
+        assert kwargs["interactive_review"] is True
         calls.append(kwargs.get("target_job_id"))
         return {"applied": 0, "review": 1, "failed": 0, "expired": 0}
 
@@ -73,3 +76,53 @@ def test_manual_application_runs_when_automatic_new_job_setting_is_off(
 
     assert calls == [42]
     assert summary["applications"]["review"] == 1
+
+
+def test_auto_mode_submits_unattended_in_the_same_cycle(
+    tmp_path, profile, settings, monkeypatch
+) -> None:
+    paths = ensure_dirs(AppPaths(tmp_path))
+    save_profile(profile, paths)
+    settings["automation"]["auto_apply_new"] = True
+    settings["automation"]["web_push_notifications"] = True
+    save_settings(settings, paths)
+    connection = init_db(paths.database)
+    set_app_state(connection, "onboarding_complete", True)
+    calls: list[dict] = []
+    push_calls: list[list[dict]] = []
+
+    monkeypatch.setattr(
+        "tiaaa.discovery.github.sync_repositories",
+        lambda **_kwargs: [
+            SyncResult("source/readme", "Source", "synced", parsed=1, new=1, queued=1)
+        ],
+    )
+    monkeypatch.setattr("tiaaa.service.source_baseline_complete", lambda *_a, **_k: True)
+    monkeypatch.setattr("tiaaa.service.manual_application_ids", lambda _connection: [])
+    monkeypatch.setattr(
+        "tiaaa.preparation.prepare_jobs",
+        lambda **_kwargs: {"prepared": 1, "errors": 0},
+    )
+
+    def fake_push(_connection, *, paths, queue):
+        assert paths == service_paths
+        push_calls.append(queue)
+        return {"subscriptions": 1, "sent": 1, "jobs": 1, "removed": 0, "errors": 0}
+
+    service_paths = paths
+    monkeypatch.setattr("tiaaa.web_push.send_auto_queue_notifications", fake_push)
+
+    def fake_apply(**kwargs):
+        calls.append(kwargs)
+        return {"applied": 1, "review": 0, "failed": 0, "expired": 0}
+
+    monkeypatch.setattr("tiaaa.apply.run_applications", fake_apply)
+    summary = AutomationService(paths).run_cycle()
+
+    assert len(calls) == 1
+    assert calls[0].get("target_job_id") is None
+    assert calls[0]["submit"] is True
+    assert calls[0]["unattended"] is True
+    assert summary["applications"]["applied"] == 1
+    assert push_calls == [[]]
+    assert summary["web_push"]["sent"] == 1

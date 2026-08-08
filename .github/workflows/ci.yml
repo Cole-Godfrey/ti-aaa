@@ -14,16 +14,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
       - run: ruff check .
-      - run: pytest --cov=tiaaa --cov-report=term-missing
+      - run: pytest --cov=tiaaa --cov-report=term-missing --cov-fail-under=65
       - if: matrix.python-version == '3.12'
-        run: python -m build
+        run: pip-audit
+      - if: matrix.python-version == '3.12'
+        run: |
+          python -m build
+          python -m twine check dist/*

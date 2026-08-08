@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.database import (
     add_resume_record,
@@ -7,22 +11,42 @@ from tiaaa.database import (
     answered_agent_inputs,
     claim_next_job,
     claimable_application_count,
+    close_all_connections,
     close_connection,
     get_analytics,
+    get_job,
     get_stats,
     ingest_listings,
     init_db,
     list_agent_inputs,
+    list_application_queue,
     list_jobs,
-    list_notifications,
     mark_apply_result,
     mark_prepared,
     reconcile_source_registry,
+    recover_stale_work,
+    request_final_submission,
     request_manual_application,
+    resume_application_after_input,
+    resume_application_for_submission,
     store_agent_inputs,
     update_tracker,
+    update_worker_state,
 )
 from tiaaa.models import InternshipListing, SourceDocument
+
+
+def test_close_all_connections_releases_registered_database_handles(tmp_path) -> None:
+    path = tmp_path / "connections.db"
+    connection = init_db(path)
+
+    close_all_connections(path)
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
+    replacement = init_db(path)
+    assert replacement.execute("SELECT 1").fetchone()[0] == 1
+    close_connection(path)
 
 
 def make_listing(source, company: str, role: str, url: str, location: str = "Remote"):
@@ -106,6 +130,64 @@ def test_first_sync_listing_can_be_explicitly_sent_to_agent(tmp_path, profile, s
     close_connection(path)
 
 
+def test_service_restart_releases_a_stale_manual_review_session(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "stale-review.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/stale")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'manual_review', worker_id = 'worker-0',
+                        submission_requested = 1
+        WHERE id = 1
+        """
+    )
+    update_worker_state(
+        connection,
+        "worker-0",
+        status="review_ready",
+        job=get_job(connection, 1),
+    )
+
+    assert recover_stale_work(connection) == 1
+    recovered = get_job(connection, 1)
+    assert recovered["pipeline_status"] == "manual_review"
+    assert recovered["worker_id"] is None
+    assert recovered["submission_requested"] == 0
+    assert request_manual_application(connection, 1)["pipeline_status"] == "queued"
+    close_connection(path)
+
+
+def test_manual_request_cannot_replace_a_live_review_session(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "live-review.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/live")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'manual_review', worker_id = 'worker-0' WHERE id = 1"
+    )
+    update_worker_state(
+        connection,
+        "worker-0",
+        status="review_ready",
+        job=get_job(connection, 1),
+    )
+
+    try:
+        request_manual_application(connection, 1)
+    except ValueError as exc:
+        assert "already manual review" in str(exc)
+    else:
+        raise AssertionError("A live review session must not be replaced")
+    close_connection(path)
+
+
 def test_auto_apply_fit_limit_blocks_low_fit_jobs_but_manual_apply_bypasses_it(
     tmp_path, profile, settings
 ) -> None:
@@ -149,10 +231,225 @@ def test_auto_apply_fit_limit_blocks_low_fit_jobs_but_manual_apply_bypasses_it(
     )
     assert manual is not None
     assert manual["company"] == "Low Fit"
-    assert [item["category"] for item in list_notifications(connection)] == [
-        "application_started",
-        "application_started",
+    close_connection(path)
+
+
+def test_auto_apply_claims_only_the_best_fit_role_per_company(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "company-best-fit.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listings = [
+        make_listing(source, "Acme", "Backend Intern", "https://jobs.test/acme-backend"),
+        make_listing(source, "Acme", "ML Intern", "https://jobs.test/acme-ml"),
+        make_listing(source, "Beta", "Software Intern", "https://jobs.test/beta-swe"),
     ]
+    ingest_listings(
+        connection,
+        source,
+        listings,
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'ready', eligibility = 'eligible',
+                        discovered_as_new = 1,
+                        fit_score = CASE role
+                            WHEN 'ML Intern' THEN 9
+                            WHEN 'Backend Intern' THEN 8
+                            ELSE 7 END
+        """
+    )
+    connection.commit()
+
+    assert claimable_application_count(
+        connection, max_attempts=3, minimum_fit_score=7
+    ) == 2
+    acme = claim_next_job(
+        connection,
+        worker_id="worker-0",
+        max_attempts=3,
+        minimum_fit_score=7,
+    )
+    assert acme is not None
+    assert acme["company"] == "Acme"
+    assert acme["role"] == "ML Intern"
+    assert acme["apply_origin"] == "auto"
+    sibling = get_job(connection, 1)
+    assert sibling is not None
+    assert sibling["pipeline_status"] == "skipped"
+    assert sibling["apply_reason_code"] == "company_role_deduplicated"
+
+    beta = claim_next_job(
+        connection,
+        worker_id="worker-1",
+        max_attempts=3,
+        minimum_fit_score=7,
+    )
+    assert beta is not None
+    assert beta["company"] == "Beta"
+    assert claim_next_job(
+        connection,
+        worker_id="worker-2",
+        max_attempts=3,
+        minimum_fit_score=7,
+    ) is None
+    close_connection(path)
+
+
+def test_application_queue_keeps_batch_order_and_one_role_per_company(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "application-queue.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listings = [
+        make_listing(source, "Acme", "Backend Intern", "https://jobs.test/acme-backend"),
+        make_listing(source, "Acme", "ML Intern", "https://jobs.test/acme-ml"),
+        make_listing(source, "Beta", "Software Intern", "https://jobs.test/beta"),
+        make_listing(source, "Low Fit", "IT Intern", "https://jobs.test/low"),
+    ]
+    ingest_listings(
+        connection,
+        source,
+        listings,
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'queued', eligibility = 'eligible',
+                        discovered_as_new = 1,
+                        fit_score = CASE role
+                            WHEN 'ML Intern' THEN 9
+                            WHEN 'Backend Intern' THEN 8
+                            WHEN 'Software Intern' THEN 7
+                            ELSE 6 END
+        """
+    )
+    connection.commit()
+
+    waiting = list_application_queue(
+        connection,
+        auto_enabled=True,
+        max_attempts=3,
+        minimum_fit_score=7,
+        profile=profile,
+    )
+
+    assert [(item["company"], item["role"]) for item in waiting] == [
+        ("Acme", "ML Intern"),
+        ("Beta", "Software Intern"),
+    ]
+    assert [item["position"] for item in waiting] == [1, 2]
+    assert all(item["queue_state"] == "preparing" for item in waiting)
+
+    connection.execute("UPDATE jobs SET pipeline_status = 'ready' WHERE fit_score >= 7")
+    connection.commit()
+    claimed = claim_next_job(
+        connection,
+        worker_id="worker-0",
+        max_attempts=3,
+        minimum_fit_score=7,
+    )
+    assert claimed is not None
+    active_queue = list_application_queue(
+        connection,
+        auto_enabled=True,
+        max_attempts=3,
+        minimum_fit_score=7,
+        profile=profile,
+    )
+    assert active_queue[0]["id"] == claimed["id"]
+    assert active_queue[0]["queue_state"] == "active"
+    assert active_queue[1]["company"] == "Beta"
+    close_connection(path)
+
+
+def test_auto_apply_preferences_are_an_optional_gate(tmp_path, profile, settings) -> None:
+    path = tmp_path / "preference-gate.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listings = [
+        make_listing(source, "Hardware Co", "Hardware Intern", "https://jobs.test/hw"),
+        make_listing(source, "Software Co", "Software Intern", "https://jobs.test/swe"),
+    ]
+    ingest_listings(
+        connection,
+        source,
+        listings,
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'ready', eligibility = 'eligible',
+                        discovered_as_new = 1, fit_score = 8
+        """
+    )
+    connection.commit()
+
+    assert claimable_application_count(
+        connection,
+        max_attempts=3,
+        minimum_fit_score=7,
+        profile=profile,
+        use_preferences=False,
+    ) == 2
+    assert claimable_application_count(
+        connection,
+        max_attempts=3,
+        minimum_fit_score=7,
+        profile=profile,
+        use_preferences=True,
+    ) == 1
+    claimed = claim_next_job(
+        connection,
+        worker_id="worker-0",
+        max_attempts=3,
+        minimum_fit_score=7,
+        profile=profile,
+        use_preferences=True,
+    )
+    assert claimed is not None
+    assert claimed["company"] == "Software Co"
+    close_connection(path)
+
+
+def test_auto_apply_does_not_retry_a_terminal_missing_fact(tmp_path, profile, settings) -> None:
+    path = tmp_path / "terminal-auto-error.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/missing")
+    ingest_listings(
+        connection,
+        source,
+        [listing],
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'failed', eligibility = 'eligible',
+                        discovered_as_new = 1, fit_score = 9,
+                        apply_origin = 'auto', apply_attempts = 1,
+                        apply_reason_code = 'missing_input',
+                        apply_error = 'Required address is unavailable'
+        """
+    )
+    connection.commit()
+
+    assert claimable_application_count(
+        connection,
+        max_attempts=3,
+        minimum_fit_score=7,
+    ) == 0
     close_connection(path)
 
 
@@ -325,7 +622,7 @@ def test_tracker_milestones_drive_rates_and_are_retained(tmp_path, profile, sett
     close_connection(path)
 
 
-def test_analytics_break_down_submitted_applications_and_notifications_are_unique(
+def test_analytics_break_down_submitted_applications(
     tmp_path, profile, settings
 ) -> None:
     path = tmp_path / "analytics.db"
@@ -410,12 +707,6 @@ def test_analytics_break_down_submitted_applications_and_notifications_are_uniqu
         source_one.label,
         source_two.label,
     }
-    assert [item["category"] for item in list_notifications(connection)] == [
-        "application_applied",
-        "oa",
-        "application_applied",
-        "interview",
-    ]
     close_connection(path)
 
 
@@ -599,7 +890,7 @@ def test_candidate_agent_inputs_are_saved_and_requeue_prepared_job(
     ingest_listings(connection, source, [listing], profile=profile, settings=settings)
     connection.execute(
         """
-        UPDATE jobs SET pipeline_status = 'manual_review', resume_path = ?
+        UPDATE jobs SET pipeline_status = 'manual_review', resume_path = ?, apply_attempts = 1
         WHERE id = 1
         """,
         (str(tmp_path / "resume.pdf"),),
@@ -633,6 +924,59 @@ def test_candidate_agent_inputs_are_saved_and_requeue_prepared_job(
     assert job["pipeline_status"] == "ready"
     assert job["manual_requested"] == 1
     assert answered_agent_inputs(connection, 1)["preferred_team"]["answer"] == "Platform"
+
+    assert resume_application_after_input(connection, 1, "worker-0") is True
+    resumed = get_job(connection, 1)
+    assert resumed is not None
+    assert resumed["pipeline_status"] == "applying"
+    assert resumed["worker_id"] == "worker-0"
+    assert resumed["manual_requested"] == 0
+    assert resumed["apply_attempts"] == 1
+    close_connection(path)
+
+
+def test_review_ready_form_can_be_confirmed_and_resumed_on_same_worker(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "submission-confirmation.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/submit")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applying', worker_id = 'worker-0',
+                        apply_origin = 'manual', apply_attempts = 1
+        WHERE id = 1
+        """
+    )
+    connection.commit()
+    mark_apply_result(
+        connection,
+        1,
+        "review_ready",
+        "All required fields are complete",
+        retain_worker=True,
+    )
+    update_worker_state(
+        connection,
+        "worker-0",
+        status="review_ready",
+        job=get_job(connection, 1),
+        message="Confirm Submit",
+    )
+
+    confirmed = request_final_submission(connection, 1)
+    assert confirmed is not None
+    assert confirmed["submission_requested"] == 1
+    assert resume_application_for_submission(connection, 1, "worker-0") is True
+
+    resumed = get_job(connection, 1)
+    assert resumed is not None
+    assert resumed["pipeline_status"] == "applying"
+    assert resumed["worker_id"] == "worker-0"
+    assert resumed["apply_attempts"] == 1
+    assert resumed["submission_requested"] == 0
     close_connection(path)
 
 
