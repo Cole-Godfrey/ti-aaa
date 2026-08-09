@@ -415,6 +415,11 @@ async function openJobDetail(jobId) {
     element("jobDetailNumber").textContent = `#${job.id}`;
     const sources = String(job.source_labels || "Repository source").split(",");
     const events = (job.events || []).slice(0, 6);
+    const applicationBoundary = job.application_mode === "auto"
+      ? "Unattended Auto mode"
+      : job.application_mode === "manual_auto_submit"
+        ? "Submits after your manual Apply selection"
+        : "Final Submit requires confirmation in Agent";
     element("jobDetailContent").innerHTML = `
       <p class="drawer-kicker">${escapeHtml(listingDate(job.posting_date, job.first_seen_at))}</p>
       <h2 id="jobDetailTitle">${escapeHtml(job.role)}</h2><h3>${escapeHtml(job.company)}</h3>
@@ -422,7 +427,7 @@ async function openJobDetail(jobId) {
         <div><dt>Location</dt><dd>${escapeHtml(job.location || "Not listed")}</dd></div>
         <div><dt>Fit</dt><dd>${escapeHtml(job.fit_score ?? "—")}/10 · ${escapeHtml(job.score_reasoning || "Not scored")}</dd></div>
         <div><dt>Eligibility</dt><dd>${escapeHtml(job.eligibility)} · ${escapeHtml(job.eligibility_reason || "No rule note")}</dd></div>
-        <div><dt>Agent boundary</dt><dd>${job.application_mode === "auto" ? "Unattended Auto mode" : "Final Submit requires confirmation in Agent"}</dd></div>
+        <div><dt>Agent boundary</dt><dd>${applicationBoundary}</dd></div>
         <div><dt>Resume</dt><dd>${escapeHtml(job.submitted_resume_name || job.base_resume_name || "Selected during preparation")}</dd></div>
       </dl>
       <section class="drawer-section"><span>FOUND IN</span>${sources.map(source => `<p>${escapeHtml(source)}</p>`).join("")}</section>
@@ -449,7 +454,11 @@ async function requestJobApplication(jobId, button) {
     showToast("Connect Claude Code in Settings before starting the agent", true);
     return;
   }
-  if (!window.confirm("Apply to this role with TI-AAA?\n\nThe agent will complete the form and wait in Agent for your final Submit confirmation.")) return;
+  const manualAutoSubmit = Boolean(state.config?.settings?.automation?.manual_auto_submit);
+  const confirmationDetail = manualAutoSubmit
+    ? "The agent will complete and submit the form. It will still pause in Agent for missing facts or a one-time verification code."
+    : "The agent will complete the form and wait in Agent for your final Submit confirmation.";
+  if (!window.confirm(`Apply to this role with TI-AAA?\n\n${confirmationDetail}`)) return;
   button.disabled = true;
   try {
     await api(`/api/jobs/${jobId}/apply`, { method: "POST" });
@@ -726,6 +735,9 @@ function agentInputControl(question) {
   if (question.input_type === "textarea") {
     return `<textarea data-agent-key="${key}" rows="3"${required}>${escapeHtml(current)}</textarea>`;
   }
+  if (question.input_type === "verification_code") {
+    return `<input data-agent-key="${key}" type="text" value="${escapeHtml(current)}" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" maxlength="128" placeholder="Enter the one-time code"${required}>`;
+  }
   const type = ["email", "tel", "number", "date"].includes(question.input_type) ? question.input_type : "text";
   return `<input data-agent-key="${key}" type="${type}" value="${escapeHtml(current)}"${required}>`;
 }
@@ -758,9 +770,14 @@ function renderAgentInputs(workers) {
     const questions = worker.questions || [];
     const resumeName = worker.submitted_resume_name || worker.base_resume_name || "Prepared resume";
     if (questions.length && worker.availability_status !== "manual_only") {
+      const verificationCodeRequested = questions.some(question => question.input_type === "verification_code");
+      const checkpointTitle = verificationCodeRequested ? "VERIFICATION CODE NEEDED" : "CANDIDATE INPUT NEEDED";
+      const checkpointNote = worker.review_detail || (verificationCodeRequested
+        ? "Paste the one-time code sent by the employer. TI-AAA uses it only for this open application and clears it after the agent continues."
+        : "Answer only with truthful information. TI-AAA keeps the current form open and continues it with your answers.");
       return `<article class="agent-checkpoint" data-agent-job="${worker.job_id}">
-        <header><div><p class="kicker">CANDIDATE INPUT NEEDED</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>${questions.length} field${questions.length === 1 ? "" : "s"}</span></header>
-        <p class="checkpoint-note">${escapeHtml(worker.review_detail || "Answer only with truthful information. TI-AAA keeps the current form open and continues it with your answers.")}</p>
+        <header><div><p class="kicker">${checkpointTitle}</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>${questions.length} field${questions.length === 1 ? "" : "s"}</span></header>
+        <p class="checkpoint-note">${escapeHtml(checkpointNote)}</p>
         <form class="agent-input-form">${questions.map(question => `<label>${escapeHtml(question.label)}${question.required ? "" : " <span>optional</span>"}${agentInputControl(question)}</label>`).join("")}
           <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><button class="button ink" type="submit">Save answers & continue</button></div>
         </form></article>`;
@@ -1019,6 +1036,7 @@ function populateConfiguration(config) {
   setValue("allowedLocations", joinList(filters.allowed_locations)); setChecked("remoteOnly", filters.remote_only);
   setValue("pollInterval", settings.poll_interval_seconds);
   setChecked("autoMode", automation.auto_apply_new);
+  setChecked("manualAutoSubmit", automation.manual_auto_submit);
   setValue("autoModeMinimumFit", automation.auto_apply_minimum_fit_score ?? 7);
   setChecked("autoModeUsePreferences", automation.auto_apply_use_preferences);
   setChecked("webPushNotifications", automation.web_push_notifications);
@@ -1094,6 +1112,7 @@ function configurationPayload() {
   delete settings.automation.auto_apply_eligible_only;
   Object.assign(settings.automation, {
     auto_apply_new: checked("autoMode"), headless: checked("headless"),
+    manual_auto_submit: checked("manualAutoSubmit"),
     auto_apply_use_preferences: checked("autoModeUsePreferences"),
     web_push_notifications: checked("autoMode") && checked("webPushNotifications"),
     auto_apply_minimum_fit_score: Number(element("autoModeMinimumFit").value) || 7,

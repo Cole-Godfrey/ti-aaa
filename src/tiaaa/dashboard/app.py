@@ -505,10 +505,13 @@ def create_app(
             (job_id,),
         ).fetchall()
         result["events"] = [dict(item) for item in events]
+        manual_auto_submit = bool(
+            load_settings(paths).get("automation", {}).get("manual_auto_submit", False)
+        )
         result["application_mode"] = (
             "auto"
             if result.get("apply_origin") == "auto"
-            else "manual_confirm"
+            else "manual_auto_submit" if manual_auto_submit else "manual_confirm"
         )
         return result
 
@@ -531,10 +534,13 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        manual_auto_submit = bool(
+            load_settings(paths).get("automation", {}).get("manual_auto_submit", False)
+        )
         return {
             "status": "queued",
             "job": _public_job(row),
-            "mode": "manual_confirm",
+            "mode": "manual_auto_submit" if manual_auto_submit else "manual_confirm",
         }
 
     @app.post("/api/jobs/{job_id}/inputs", status_code=202)

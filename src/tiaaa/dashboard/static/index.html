@@ -273,13 +273,14 @@
               <label>Claude model<input id="claudeModel" placeholder="sonnet"></label>
             </div>
             <div class="toggle-list">
+              <label class="manual-submit-toggle"><input id="manualAutoSubmit" type="checkbox"><span><b>Auto-submit manually selected applications</b><small>After you choose Apply, submit the completed form without a separate final confirmation. Questions and one-time codes still pause in Agent.</small></span></label>
               <label><input id="serviceEnabled" type="checkbox"><span>Keep polling in the background</span></label>
               <label><input id="autoPrepare" type="checkbox"><span>Prepare new matching roles automatically</span></label>
               <label><input id="useLlm" type="checkbox"><span>Use an LLM for scores and cover letters</span></label>
               <label><input id="generateCoverLetters" type="checkbox"><span>Generate factual cover letters when LLM use is on</span></label>
               <label><input id="headless" type="checkbox"><span>Run browser windows headlessly</span></label>
             </div>
-            <p class="fine-print">Manual Apply actions always stop on the completed form and wait for your in-app Submit confirmation.</p>
+            <p class="fine-print">This setting affects only jobs you explicitly select. Auto mode has its own unattended submission behavior above.</p>
           </article>
           <article class="panel settings-card">
             <p class="kicker">COMMON ANSWERS</p><h2>Screening defaults</h2>
@@ -376,7 +377,7 @@
               <div class="auth-code-row"><input id="onboardClaudeLoginCode" autocomplete="one-time-code" placeholder="Paste one-time code"><button id="onboardCompleteClaude" class="button terracotta" type="button">Complete connection</button></div>
             </div>
           </div>
-          <div class="intake-note"><strong>Manual confirmation</strong><p>A manual application fills the form and keeps it open. You confirm final submission from the Agent page. Auto mode starts off and can be enabled later in Settings.</p></div>
+          <div class="intake-note"><strong>Manual confirmation by default</strong><p>A manual application fills the form and keeps it open for final confirmation. You can enable auto-submit for explicitly selected jobs later in Settings. Auto mode also starts off.</p></div>
           <p class="fine-print">Auto mode does not wait for answers. If a required personal fact is missing, it stops that application and reports the reason when you return.</p>
           <div class="step-actions"><button class="button ghost prev-step" type="button">Back</button><button id="finishOnboarding" class="button terracotta" type="button">Finish setup</button></div>
         </section>

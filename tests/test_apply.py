@@ -4,6 +4,8 @@ import base64
 import os
 import sys
 
+import pytest
+
 import tiaaa.apply.runner as runner
 from tiaaa.apply.preview import PreviewCapture, preview_frame_hub
 from tiaaa.apply.prompt import (
@@ -27,6 +29,7 @@ from tiaaa.apply.runner import (
     _stream_summary,
     _timeout_output,
     _unattended_result,
+    _verification_code_fallback,
     _wait_for_agent_answers,
     _wait_for_submission_confirmation,
     run_applications,
@@ -77,6 +80,45 @@ def test_structured_result_carries_safe_candidate_questions() -> None:
     assert parsed.result == "needs_review"
     assert parsed.reason_code == "missing_input"
     assert parsed.questions[0]["key"] == "preferred_team"
+
+
+def test_verification_prose_gets_a_guarded_one_time_code_input() -> None:
+    detail = (
+        "Clicking Submit application triggered an email verification step: an 8-character "
+        "security code was sent to avery@example.com and must be entered to complete submission."
+    )
+
+    questions = _verification_code_fallback(
+        AgentResult("needs_review", detail, "verification_required", [])
+    )
+
+    assert questions == [
+        {
+            "key": "email_verification_code",
+            "label": "Email verification code",
+            "input_type": "verification_code",
+            "options": [],
+            "required": True,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Enter the account password and verification code",
+        "Open the approval link on another device for the verification code",
+        "Complete the CAPTCHA before entering the security code",
+        "Upload an identity document to obtain a verification code",
+    ],
+)
+def test_verification_fallback_rejects_unsafe_handoffs(detail) -> None:
+    assert (
+        _verification_code_fallback(
+            AgentResult("needs_review", detail, "verification_required", [])
+        )
+        == []
+    )
 
 
 def test_stream_json_text_extraction() -> None:
@@ -332,6 +374,8 @@ def test_prompt_is_truth_constrained_and_stops_before_submit(
     assert "Leave optional fields blank" in prompt
     assert "Never wait more than 5 seconds" in prompt
     assert "Do not create an employer account" in prompt
+    assert "`input_type` set to `verification_code`" in prompt
+    assert "same open code field" in prompt
     assert "must-not-reach-the-agent" not in prompt
 
 
@@ -350,6 +394,7 @@ def test_continuation_prompt_preserves_the_open_form() -> None:
     assert "Do not re-upload the resume" in prompt
     assert "browser_snapshot" in prompt
     assert '"answer": "Platform"' in prompt
+    assert "one-time verification code" in prompt
 
 
 def test_submission_prompt_uses_only_the_completed_live_form() -> None:
@@ -392,6 +437,43 @@ def test_unattended_prompt_never_requests_input_and_handles_judgment_questions(
     assert "personality" in prompt
     assert "expected compensation" in prompt
     assert "Negotiable or Market rate" in prompt
+    assert "return an empty `questions` array" in prompt
+    assert "Never wait for a code in unattended Auto mode" in prompt
+
+
+def test_manual_auto_submit_authorizes_only_a_selected_job(
+    tmp_path, profile, settings, monkeypatch
+) -> None:
+    settings["automation"]["manual_auto_submit"] = True
+    monkeypatch.setattr(runner, "init_db", lambda _path: object())
+    monkeypatch.setattr(runner, "applications_today", lambda _connection: 0)
+    monkeypatch.setattr(
+        runner,
+        "claimable_application_count",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    result = run_applications(
+        profile=profile,
+        settings=settings,
+        paths=AppPaths(tmp_path),
+        submit=True,
+        manual_selection_auto_submit=True,
+        target_job_id=42,
+        db_path=tmp_path / "manual-auto-submit.sqlite3",
+    )
+
+    assert result == {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+
+    with pytest.raises(PermissionError, match="terminal or API submission"):
+        run_applications(
+            profile=profile,
+            settings=settings,
+            paths=AppPaths(tmp_path),
+            submit=True,
+            target_job_id=43,
+            db_path=tmp_path / "manual-batch.sqlite3",
+        )
 
 
 def test_unattended_checkpoints_are_terminal_failures_without_questions() -> None:

@@ -11,6 +11,7 @@ from tiaaa.database import (
     answered_agent_inputs,
     claim_next_job,
     claimable_application_count,
+    clear_ephemeral_agent_inputs,
     close_all_connections,
     close_connection,
     get_analytics,
@@ -914,16 +915,48 @@ def test_candidate_agent_inputs_are_saved_and_requeue_prepared_job(
                 "options": [],
                 "required": True,
             },
+            {
+                "key": "email_verification_code",
+                "label": "8-character email verification code",
+                "input_type": "verification_code",
+                "options": [],
+                "required": True,
+            },
+            {
+                "key": "account_password",
+                "label": "Account password",
+                "input_type": "verification_code",
+                "options": [],
+                "required": True,
+            },
         ],
     )
 
-    assert [item["input_key"] for item in saved] == ["preferred_team"]
-    job = answer_agent_inputs(connection, 1, {"preferred_team": "Platform"})
+    assert [item["input_key"] for item in saved] == [
+        "preferred_team",
+        "email_verification_code",
+    ]
+    job = answer_agent_inputs(
+        connection,
+        1,
+        {"preferred_team": "Platform", "email_verification_code": "A1B2C3D4"},
+    )
 
     assert job is not None
     assert job["pipeline_status"] == "ready"
     assert job["manual_requested"] == 1
     assert answered_agent_inputs(connection, 1)["preferred_team"]["answer"] == "Platform"
+    assert answered_agent_inputs(connection, 1)["email_verification_code"]["answer"] == "A1B2C3D4"
+
+    assert clear_ephemeral_agent_inputs(connection, 1) == 1
+    assert "email_verification_code" not in answered_agent_inputs(connection, 1)
+    verification = next(
+        item
+        for item in list_agent_inputs(connection, 1)
+        if item["input_key"] == "email_verification_code"
+    )
+    assert verification["answer"] is None
+    assert verification["status"] == "resolved"
 
     assert resume_application_after_input(connection, 1, "worker-0") is True
     resumed = get_job(connection, 1)

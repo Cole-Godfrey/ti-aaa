@@ -43,3 +43,18 @@ def test_new_auto_mode_can_be_enabled_without_the_cli_submit_switch(tmp_path) ->
     )
 
     assert load_settings(paths)["automation"]["auto_apply_new"] is True
+
+
+def test_manual_auto_submit_is_an_independent_opt_in(tmp_path) -> None:
+    paths = AppPaths(tmp_path)
+
+    assert load_settings(paths)["automation"]["manual_auto_submit"] is False
+
+    save_settings(
+        {"automation": {"auto_apply_new": False, "manual_auto_submit": True}},
+        paths,
+    )
+
+    automation = load_settings(paths)["automation"]
+    assert automation["auto_apply_new"] is False
+    assert automation["manual_auto_submit"] is True

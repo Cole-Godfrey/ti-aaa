@@ -48,11 +48,21 @@ AGENT_INPUT_TYPES = {
     "date",
     "select",
     "boolean",
+    "verification_code",
 }
 _SENSITIVE_INPUT_PATTERN = re.compile(
     r"\b(?:password|passcode|one.?time code|verification code|mfa|otp|captcha|"
     r"social security|ssn|bank|routing|credit card|debit card|passport|"
     r"driver.?s license|government id|biometric)\b",
+    re.IGNORECASE,
+)
+_PROHIBITED_INPUT_PATTERN = re.compile(
+    r"\b(?:password|passphrase|captcha|social security|ssn|bank|routing|"
+    r"credit card|debit card|passport|driver.?s license|government id|biometric)\b",
+    re.IGNORECASE,
+)
+_VERIFICATION_CODE_PATTERN = re.compile(
+    r"\b(?:verification|security|one.?time|mfa|otp|authentication)\s*(?:code|passcode)\b",
     re.IGNORECASE,
 )
 _AUTO_TERMINAL_REASON_CODES = {
@@ -752,7 +762,7 @@ def store_agent_inputs(
     job_id: int,
     questions: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Persist only ordinary, non-sensitive questions returned by the agent."""
+    """Persist safe questions, including a narrowly scoped one-time-code channel."""
 
     now = utc_now()
     connection.execute(
@@ -766,14 +776,21 @@ def store_agent_inputs(
         key = str(raw.get("key") or "").strip().casefold()
         label = str(raw.get("label") or "").strip()
         input_type = str(raw.get("input_type") or "text").strip().casefold()
+        normalized_question = re.sub(r"[_-]+", " ", f"{key} {label}")
+        is_verification_code = bool(
+            input_type == "verification_code"
+            and _VERIFICATION_CODE_PATTERN.search(normalized_question)
+            and not _PROHIBITED_INPUT_PATTERN.search(normalized_question)
+        )
         if (
             not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", key)
             or key in seen
             or not label
             or len(label) > 240
             or input_type not in AGENT_INPUT_TYPES
-            or _SENSITIVE_INPUT_PATTERN.search(
-                re.sub(r"[_-]+", " ", f"{key} {label}")
+            or (
+                _SENSITIVE_INPUT_PATTERN.search(normalized_question)
+                and not is_verification_code
             )
         ):
             continue
@@ -797,7 +814,9 @@ def store_agent_inputs(
                 input_type = excluded.input_type,
                 options_json = excluded.options_json,
                 required = excluded.required,
+                answer = NULL,
                 status = 'pending',
+                answered_at = NULL,
                 updated_at = excluded.updated_at
             """,
             (
@@ -825,6 +844,20 @@ def resolve_agent_inputs(connection: sqlite3.Connection, job_id: int) -> None:
     connection.commit()
 
 
+def clear_ephemeral_agent_inputs(connection: sqlite3.Connection, job_id: int) -> int:
+    """Remove one-time codes after a browser turn has consumed them."""
+
+    cursor = connection.execute(
+        """
+        UPDATE agent_inputs SET answer = NULL, status = 'resolved', updated_at = ?
+        WHERE job_id = ? AND input_type = 'verification_code' AND status = 'answered'
+        """,
+        (utc_now(), job_id),
+    )
+    connection.commit()
+    return cursor.rowcount
+
+
 def answer_agent_inputs(
     connection: sqlite3.Connection,
     job_id: int,
@@ -849,6 +882,12 @@ def answer_agent_inputs(
 
     normalized: dict[str, Any] = {}
     for key, value in answers.items():
+        if by_key[key]["input_type"] == "verification_code":
+            if not isinstance(value, str):
+                raise ValueError(f"Invalid value for {by_key[key]['label']}")
+            value = value.strip()
+            if not value or len(value) > 128 or "\n" in value or "\r" in value:
+                raise ValueError(f"Invalid value for {by_key[key]['label']}")
         if not isinstance(value, (str, bool, int, float)):
             raise ValueError(f"Invalid value for {by_key[key]['label']}")
         if isinstance(value, str):

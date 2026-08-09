@@ -461,6 +461,9 @@ input[type="checkbox"], input[type="radio"] { width: 15px; height: 15px; margin:
 .toggle-list { display: grid; gap: 9px; margin-top: 18px; }
 .toggle-list label { display: flex; gap: 9px; align-items: center; text-transform: none; }
 .toggle-list label span { color: var(--ink); font: 11px var(--human); }
+.toggle-list .manual-submit-toggle { align-items: start; }
+.manual-submit-toggle b, .manual-submit-toggle small { display: block; }
+.manual-submit-toggle small { margin-top: 3px; color: var(--muted); font: 8px/1.45 var(--data); }
 .danger-toggle { color: var(--signal); }
 .fine-print { color: var(--muted); font-size: 10px; line-height: 1.5; }
 .wide-label { max-width: 610px; margin-top: 20px; }

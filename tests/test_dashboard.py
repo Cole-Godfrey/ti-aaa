@@ -8,7 +8,7 @@ from reportlab.pdfgen import canvas
 from starlette.websockets import WebSocketDisconnect
 
 from tiaaa.apply.preview import preview_frame_hub
-from tiaaa.config import SOURCE_DOCUMENTS, AppPaths
+from tiaaa.config import SOURCE_DOCUMENTS, AppPaths, save_settings
 from tiaaa.dashboard.app import create_app
 from tiaaa.database import (
     answer_agent_inputs,
@@ -336,6 +336,15 @@ def test_latest_jobs_detail_and_manual_apply_action(tmp_path, profile, settings)
     assert queue["queue"][0]["id"] == rows[0]["id"]
     assert queue["queue"][0]["origin"] == "manual"
 
+    settings["automation"]["manual_auto_submit"] = True
+    save_settings(settings, paths)
+    older_detail = client.get(f"/api/jobs/{rows[1]['id']}").json()
+    assert older_detail["application_mode"] == "manual_auto_submit"
+    auto_submit_response = client.post(f"/api/jobs/{rows[1]['id']}/apply")
+    assert auto_submit_response.status_code == 202
+    assert auto_submit_response.json()["mode"] == "manual_auto_submit"
+    assert service.requested == [rows[0]["id"], rows[1]["id"]]
+
 
 def test_agent_page_accepts_requested_input_and_requeues_job(
     tmp_path, profile, settings
@@ -370,7 +379,14 @@ def test_agent_page_accepts_requested_input_and_requeues_job(
                 "input_type": "select",
                 "options": ["Platform", "Product"],
                 "required": True,
-            }
+            },
+            {
+                "key": "email_verification_code",
+                "label": "Email verification code",
+                "input_type": "verification_code",
+                "options": [],
+                "required": True,
+            },
         ],
     )
     update_worker_state(
@@ -392,9 +408,15 @@ def test_agent_page_accepts_requested_input_and_requeues_job(
     worker = client.get("/api/workers").json()["items"][0]
     assert worker["pipeline_status"] == "manual_review"
     assert worker["questions"][0]["input_key"] == "preferred_team"
+    assert worker["questions"][1]["input_type"] == "verification_code"
     response = client.post(
         "/api/jobs/1/inputs",
-        json={"answers": {"preferred_team": "Platform"}},
+        json={
+            "answers": {
+                "preferred_team": "Platform",
+                "email_verification_code": "A1B2C3D4",
+            }
+        },
     )
 
     assert response.status_code == 202
@@ -469,6 +491,7 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'id="autoMode"' in index
     assert 'id="autoModeMinimumFit"' in index
     assert 'id="autoModeUsePreferences"' in index
+    assert 'id="manualAutoSubmit"' in index
     assert 'id="webPushOption" class="web-push-option hidden"' in index
     assert 'id="webPushNotifications"' in index
     assert 'id="autoApplyMinimumFit"' not in index
@@ -489,6 +512,8 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert "}, 500);" not in javascript
     assert "}, 1000);" in javascript
     assert "Save answers & continue" in javascript
+    assert 'autocomplete="one-time-code"' in javascript
+    assert "VERIFICATION CODE NEEDED" in javascript
     assert "keeps the current form open and continues it with your answers" in javascript
     assert "restarts this application with your answers" not in javascript
     assert "function listingDate(postingDate, firstSeenAt)" in javascript
@@ -525,6 +550,7 @@ def test_web_settings_clamp_the_auto_apply_fit_limit(tmp_path) -> None:
                     "auto_apply_eligible_only": True,
                     "auto_apply_minimum_fit_score": 99,
                     "auto_apply_use_preferences": True,
+                    "manual_auto_submit": 1,
                     "web_push_notifications": 1,
                 },
             }
@@ -537,6 +563,7 @@ def test_web_settings_clamp_the_auto_apply_fit_limit(tmp_path) -> None:
     ] == 10
     assert "auto_apply_eligible_only" not in response.json()["settings"]["automation"]
     assert response.json()["settings"]["automation"]["auto_apply_use_preferences"] is True
+    assert response.json()["settings"]["automation"]["manual_auto_submit"] is True
     assert response.json()["settings"]["automation"]["web_push_notifications"] is True
     assert "minimum_fit_score" not in response.json()["settings"]
     assert "notifications" not in response.json()["settings"]

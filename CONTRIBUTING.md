@@ -53,10 +53,11 @@ The browser agent must:
 
 - use only profile/resume facts
 - stop on unknown required answers
-- stop on CAPTCHA, MFA, SSO, or email verification
+- stop on CAPTCHA, SSO, non-code MFA, or verification that cannot be completed with a candidate-supplied one-time code
+- keep the live browser session open while requesting a one-time code and clear the code after use
 - avoid sensitive financial, identity, biometric, and device-permission flows
 - verify visible confirmation before recording an application
-- require an explicit manual Apply action followed by dashboard confirmation, or an enabled `automation.auto_apply_new` unattended mode
+- require an explicit manual Apply action followed by dashboard confirmation or enabled `automation.manual_auto_submit`, or an enabled `automation.auto_apply_new` unattended mode
 - keep terminal final submission behind both `automation.allow_submission` and `--submit`
 - stop for manual action instead of creating an employer account or handling its password
 

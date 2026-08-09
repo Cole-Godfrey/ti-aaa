@@ -4,6 +4,15 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+### Added
+
+- an opt-in setting to auto-submit applications that the user explicitly selects
+- a local Agent input for employer one-time verification codes that continues the live form
+
+### Security
+
+- one-time verification-code answers are cleared after the browser turn consumes them; passwords and other sensitive-input requests remain blocked
+
 ## [0.7.0] - 2026-08-07
 
 ### Added

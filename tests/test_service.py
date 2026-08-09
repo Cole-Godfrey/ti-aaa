@@ -126,3 +126,44 @@ def test_auto_mode_submits_unattended_in_the_same_cycle(
     assert summary["applications"]["applied"] == 1
     assert push_calls == [[]]
     assert summary["web_push"]["sent"] == 1
+
+
+def test_manual_auto_submit_submits_selected_job_but_keeps_input_interactive(
+    tmp_path, profile, settings, monkeypatch
+) -> None:
+    paths = ensure_dirs(AppPaths(tmp_path))
+    save_profile(profile, paths)
+    settings["automation"]["auto_apply_new"] = False
+    settings["automation"]["manual_auto_submit"] = True
+    save_settings(settings, paths)
+    connection = init_db(paths.database)
+    set_app_state(connection, "onboarding_complete", True)
+    calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "tiaaa.discovery.github.sync_repositories",
+        lambda **_kwargs: [
+            SyncResult("source/readme", "Source", "unchanged", parsed=10, baseline=False)
+        ],
+    )
+    monkeypatch.setattr("tiaaa.service.source_baseline_complete", lambda *_a, **_k: True)
+    monkeypatch.setattr("tiaaa.service.manual_application_ids", lambda _connection: [42])
+    monkeypatch.setattr(
+        "tiaaa.preparation.prepare_jobs",
+        lambda **_kwargs: {"prepared": 1, "errors": 0},
+    )
+
+    def fake_apply(**kwargs):
+        calls.append(kwargs)
+        return {"applied": 1, "review": 0, "failed": 0, "expired": 0}
+
+    monkeypatch.setattr("tiaaa.apply.run_applications", fake_apply)
+    summary = AutomationService(paths).run_cycle()
+
+    assert len(calls) == 1
+    assert calls[0]["target_job_id"] == 42
+    assert calls[0]["submit"] is True
+    assert calls[0]["unattended"] is False
+    assert calls[0]["interactive_review"] is False
+    assert calls[0]["manual_selection_auto_submit"] is True
+    assert summary["applications"]["applied"] == 1

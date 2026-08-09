@@ -328,6 +328,9 @@ class AutomationService:
                 set_app_state(connection, "service_message", "Browser application workers are active")
                 from tiaaa.apply import run_applications
 
+                manual_auto_submit = bool(
+                    automation.get("manual_auto_submit", False)
+                )
                 for job_id in manual_ids:
                     result = run_applications(
                         profile=profile,
@@ -335,9 +338,10 @@ class AutomationService:
                         paths=self.paths,
                         limit=1,
                         workers=1,
-                        submit=False,
+                        submit=manual_auto_submit,
                         unattended=False,
-                        interactive_review=True,
+                        interactive_review=not manual_auto_submit,
+                        manual_selection_auto_submit=manual_auto_submit,
                         target_job_id=job_id,
                         db_path=self.db_path,
                     )
