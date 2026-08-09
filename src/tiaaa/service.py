@@ -27,6 +27,7 @@ from tiaaa.database import (
     recover_stale_work,
     refresh_qualification_scores,
     request_final_submission,
+    request_human_control_return,
     request_manual_application,
     retry_manual_application,
     set_app_state,
@@ -180,6 +181,24 @@ class AutomationService:
             connection,
             "service_message",
             f"Submitting application for {job['company']} · {job['role']}",
+        )
+        self._wake.set()
+        return job
+
+    def return_browser_control(self, job_id: int) -> dict[str, Any]:
+        """Tell a retained CAPTCHA session that candidate interaction is complete."""
+
+        connection = get_connection(self.db_path)
+        if bool(get_app_state(connection).get("service_paused")):
+            raise RuntimeError("Resume the background service before returning browser control")
+        job = request_human_control_return(connection, job_id)
+        if job is None:
+            raise LookupError("Job not found")
+        set_app_state(connection, "service_status", "applying")
+        set_app_state(
+            connection,
+            "service_message",
+            f"Resuming application for {job['company']} · {job['role']}",
         )
         self._wake.set()
         return job

@@ -23,6 +23,7 @@ from tiaaa.apply.chrome import launch_chrome, stop_chrome, stop_process_tree
 from tiaaa.apply.preview import PreviewCapture
 from tiaaa.apply.prompt import (
     build_continuation_prompt,
+    build_human_control_prompt,
     build_prompt,
     build_submission_prompt,
 )
@@ -36,12 +37,15 @@ from tiaaa.database import (
     close_live_checkpoint,
     final_submission_requested,
     get_connection,
+    human_control_returned,
     init_db,
     list_agent_inputs,
+    live_human_interaction_checkpoint,
     live_submission_checkpoint,
     mark_apply_result,
     release_claim,
     resolve_agent_inputs,
+    resume_application_after_human_control,
     resume_application_after_input,
     resume_application_for_submission,
     store_agent_inputs,
@@ -650,6 +654,30 @@ def _verification_code_fallback(result: AgentResult) -> list[dict[str, Any]]:
     ]
 
 
+def _human_interaction_result(result: AgentResult) -> AgentResult:
+    """Normalize visible and likely invisible CAPTCHA stalls into a live checkpoint."""
+
+    if result.result == "captcha" or (
+        result.reason_code == "captcha"
+        and result.result in {"failed", "needs_review", "review_ready"}
+    ):
+        return AgentResult("captcha", result.detail, "captcha", [])
+    detail = (result.detail or "").casefold()
+    submission_stalled = "submitting" in detail and any(
+        marker in detail
+        for marker in (
+            "disabled",
+            "stuck",
+            "no confirmation",
+            "no receipt",
+            "cannot be confirmed",
+        )
+    )
+    if result.result in {"failed", "needs_review", "review_ready"} and submission_stalled:
+        return AgentResult("captcha", result.detail, "captcha", [])
+    return result
+
+
 def _parse_agent_result(text: str, *, submit: bool) -> AgentResult:
     try:
         structured = json.loads(text)
@@ -906,6 +934,22 @@ class _ApplicationAgentSession:
         result, _ = self._turn(build_submission_prompt(), submit=True)
         return result
 
+    def continue_after_human_control(self) -> AgentResult:
+        """Inspect and continue the retained form after candidate browser interaction."""
+
+        if self.process is None or not self.process.alive:
+            return AgentResult("failed", "live browser session ended during human control")
+        result, _ = self._turn(
+            build_human_control_prompt(
+                submission_authorized=self.submission_authorized,
+                submission_started=self.submission_started,
+            ),
+            # A human may have explicitly completed submission while in control. Parsing APPLIED
+            # here records only a receipt the resumed agent can actually see.
+            submit=True,
+        )
+        return self._submit_if_ready(result)
+
     def close(self) -> None:
         if self.process is not None:
             self.process.close()
@@ -946,6 +990,27 @@ def _wait_for_submission_confirmation(
         if not live_submission_checkpoint(connection, job_id, worker_id):
             return False
         if final_submission_requested(connection, job_id, worker_id):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.01, min(float(poll_interval), 1.0)))
+
+
+def _wait_for_human_control_return(
+    connection: Any,
+    job_id: int,
+    worker_id: str,
+    *,
+    timeout: int | float = 1800,
+    poll_interval: float = 0.25,
+) -> bool:
+    """Wait while the candidate controls the exact retained browser tab."""
+
+    deadline = time.monotonic() + max(0, float(timeout))
+    while True:
+        if not live_human_interaction_checkpoint(connection, job_id, worker_id):
+            return False
+        if human_control_returned(connection, job_id, worker_id):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -1065,6 +1130,7 @@ def _worker(
                 finally:
                     clear_ephemeral_agent_inputs(connection, int(job["id"]))
                 while True:
+                    agent_result = _human_interaction_result(agent_result)
                     if unattended:
                         agent_result = _unattended_result(agent_result)
                     result = agent_result.result
@@ -1087,6 +1153,17 @@ def _worker(
                     else:
                         resolve_agent_inputs(connection, int(job["id"]))
                     waiting_for_input = result == "needs_review" and bool(saved_questions)
+                    waiting_for_human = (
+                        not unattended
+                        and not waiting_for_input
+                        and (
+                            result == "captcha"
+                            or (
+                                result == "needs_review"
+                                and agent_result.reason_code == "captcha"
+                            )
+                        )
+                    )
                     waiting_for_submission = (
                         interactive_review
                         and result == "review_ready"
@@ -1097,8 +1174,14 @@ def _worker(
                         int(job["id"]),
                         result,
                         detail,
-                        reason_code=agent_result.reason_code,
-                        retain_worker=waiting_for_input or waiting_for_submission,
+                        reason_code=(
+                            "captcha" if waiting_for_human else agent_result.reason_code
+                        ),
+                        retain_worker=(
+                            waiting_for_input
+                            or waiting_for_human
+                            or waiting_for_submission
+                        ),
                         manual_handoff=not unattended,
                     )
                     result_message = {
@@ -1114,7 +1197,10 @@ def _worker(
                             if waiting_for_input
                             else "Application needs your review"
                         ),
-                        "captcha": "Paused for CAPTCHA review",
+                        "captcha": (
+                            "Human control is enabled in Agent; solve the CAPTCHA or inspect the "
+                            "stalled submission in this same browser"
+                        ),
                         "failed": "Application attempt failed",
                     }.get(result, result.replace("_", " ").title())
                     update_worker_state(
@@ -1151,6 +1237,34 @@ def _worker(
                                 clear_ephemeral_agent_inputs(
                                     connection, int(job["id"])
                                 )
+                            continue
+                        close_live_checkpoint(
+                            connection,
+                            int(job["id"]),
+                            worker_name,
+                        )
+
+                    if waiting_for_human:
+                        returned = _wait_for_human_control_return(
+                            connection,
+                            int(job["id"]),
+                            worker_name,
+                            timeout=_agent_input_wait_timeout(),
+                        )
+                        if returned and resume_application_after_human_control(
+                            connection,
+                            int(job["id"]),
+                            worker_name,
+                        ):
+                            update_worker_state(
+                                connection,
+                                worker_name,
+                                status="applying",
+                                job=job,
+                                message="Control returned; inspecting the same browser page",
+                                screenshot_path=str(preview_path.resolve()),
+                            )
+                            agent_result = agent_session.continue_after_human_control()
                             continue
                         close_live_checkpoint(
                             connection,

@@ -48,6 +48,7 @@ TI-AAA reads these repositories:
 - Multiple resumes with job-specific selection
 - Byte-preserved application resume copies
 - A live view of the browser worker
+- Same-session browser control for manual CAPTCHA checkpoints—click, type, paste, and scroll without opening a second browser
 - Input fields for agent questions
 - A one-time-code input that continues the same open application and clears the code after use
 - Final submission confirmation on the live completed form
@@ -115,6 +116,8 @@ Browser alerts work on `localhost` and use the browser's Web Push service. TI-AA
 Open **Latest jobs**. Select a job, then select **Apply**. Open **Agent** to watch the browser and answer factual questions or paste a one-time verification code if an employer sends one. By default, review the completed form and select **Submit application**. If **Auto-submit manually selected applications** is enabled, the agent submits after completing the form without this second confirmation.
 
 The manual action does not require automatic apply. It also does not use the automatic fit limit.
+
+If the employer presents a CAPTCHA—or Submit stays disabled on **Submitting…** without producing a receipt—the manual application pauses with the exact Chromium tab still open. In **Agent**, use the live canvas to click the challenge, focus and type or paste into fields, and scroll. Select **Continue agent** when the challenge is clear or a receipt is visible. TI-AAA then inspects and continues that same page; it does not send you to a fresh job link or browser where the form state could be lost. Auto mode remains unattended and records CAPTCHA checkpoints as stopped attempts.
 
 If a **Confirm in Agent** checkpoint needs to start over, open **Applications** and select **Retry**. TI-AAA closes any retained live form, clears pending checkpoint inputs, and queues a fresh browser attempt.
 
@@ -318,6 +321,7 @@ These secrets are optional:
 - TI-AAA has no developer-operated server and sends no product telemetry.
 - Repository sync sends requests to GitHub. A configured `GITHUB_TOKEN` is sent only to GitHub.
 - Claude browser automation receives the selected resume text, candidate profile, prepared answers, and job metadata. It interacts with the employer site, which receives the fields and files entered for that application.
+- During a manual CAPTCHA checkpoint, dashboard mouse and keyboard actions travel only through the local same-origin WebSocket to the retained Chromium tab. TI-AAA does not expose a remote navigation command or send the application URL to another browser.
 - A one-time code entered in **Agent** passes through the active Claude browser session to the employer's code field. TI-AAA clears the stored local answer after that browser turn.
 - Optional OpenAI, Gemini, or custom LLM preparation sends resume text and job metadata to the provider you configure.
 - Optional Web Push sends the company and role in an encrypted notification through your browser vendor's push service.
@@ -329,7 +333,7 @@ These secrets are optional:
 - Manual applications ask for unknown, ordinary candidate facts and can pause for a one-time code sent to the candidate's configured email address or phone.
 - Auto mode does not ask for input. A missing required personal fact stops that application and is recorded.
 - Auto mode can answer subjective questions and compensation questions without inventing candidate facts.
-- One-time verification codes can be entered in the local Agent view and are cleared after the browser turn uses them. CAPTCHA, SSO, non-code MFA, assessments, and identity checks require a manual handoff.
+- One-time verification codes can be entered in the local Agent view and are cleared after the browser turn uses them. CAPTCHAs can be completed by the candidate in the retained live browser; TI-AAA does not solve or bypass them. SSO, non-code MFA, assessments, and identity checks still require a manual handoff.
 - Employer account creation and passwords require manual action; TI-AAA does not store or send an application-site password.
 - The agent refuses payment, bank, government ID, and biometric requests.
 - Application limits stay active in automatic mode.

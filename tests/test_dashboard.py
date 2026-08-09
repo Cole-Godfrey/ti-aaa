@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import io
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
 from reportlab.pdfgen import canvas
 from starlette.websockets import WebSocketDisconnect
 
-from tiaaa.apply.preview import preview_frame_hub
+from tiaaa.apply.preview import browser_control_hub, preview_frame_hub
 from tiaaa.config import SOURCE_DOCUMENTS, AppPaths, save_settings
 from tiaaa.dashboard.app import create_app
 from tiaaa.database import (
@@ -18,6 +19,7 @@ from tiaaa.database import (
     init_db,
     mark_apply_result,
     request_final_submission,
+    request_human_control_return,
     request_manual_application,
     retry_manual_application,
     set_app_state,
@@ -235,6 +237,7 @@ def test_dashboard_visit_reports_applications_since_the_prior_visit(
 
 def test_live_worker_preview_is_served_only_from_preview_directory(tmp_path) -> None:
     preview_frame_hub.clear()
+    browser_control_hub.clear()
     paths = AppPaths(tmp_path)
     paths.previews.mkdir(parents=True)
     preview = paths.previews / "worker-0.jpg"
@@ -260,6 +263,92 @@ def test_live_worker_preview_is_served_only_from_preview_directory(tmp_path) -> 
     preview_frame_hub.publish("worker-0", b"\xff\xd8stream\xff\xd9")
     with client.websocket_connect("/api/workers/worker-0/stream") as websocket:
         assert websocket.receive_bytes() == b"\xff\xd8stream\xff\xd9"
+    preview_frame_hub.clear()
+    browser_control_hub.clear()
+
+
+def test_captcha_checkpoint_relays_input_and_returns_the_same_browser_to_agent(
+    tmp_path, profile, settings
+) -> None:
+    preview_frame_hub.clear()
+    browser_control_hub.clear()
+    paths = AppPaths(tmp_path)
+    paths.previews.mkdir(parents=True)
+    preview_path = paths.previews / "worker-0.jpg"
+    preview_path.write_bytes(b"\xff\xd8\xff\xd9")
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    listing = InternshipListing(
+        company="Capula",
+        role="Trading and Research Intern",
+        location="London",
+        application_url="https://jobs.test/capula",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+    )
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'applying', worker_id = 'worker-0' WHERE id = 1"
+    )
+    connection.commit()
+    mark_apply_result(
+        connection,
+        1,
+        "captcha",
+        "Submit remained disabled on Submitting with no confirmation",
+        reason_code="captcha",
+        retain_worker=True,
+    )
+    update_worker_state(
+        connection,
+        "worker-0",
+        status="captcha",
+        job=get_job(connection, 1),
+        message="Human control enabled",
+        screenshot_path=str(preview_path),
+    )
+
+    class FakeController:
+        def __init__(self) -> None:
+            self.actions: list[dict] = []
+            self.received = threading.Event()
+
+        def enqueue_control(self, action):
+            self.actions.append(action)
+            self.received.set()
+
+    controller = FakeController()
+    browser_control_hub.register("worker-0", controller)
+    preview_frame_hub.set_active("worker-0", True)
+
+    class FakeService:
+        def return_browser_control(self, job_id):
+            return request_human_control_return(connection, job_id)
+
+    app = create_app(paths.database, paths=paths)
+    app.state.service = FakeService()
+    client = TestClient(app)
+
+    worker = client.get("/api/workers").json()["items"][0]
+    assert worker["browser_interactive"] is True
+    assert worker["pipeline_status"] == "manual_review"
+
+    preview_frame_hub.publish("worker-0", b"\xff\xd8interactive\xff\xd9")
+    with client.websocket_connect("/api/workers/worker-0/stream") as websocket:
+        assert websocket.receive_bytes() == b"\xff\xd8interactive\xff\xd9"
+        websocket.send_json({"type": "click", "x": 0.5, "y": 0.25})
+        assert controller.received.wait(timeout=1)
+
+    assert controller.actions == [{"type": "click", "x": 0.5, "y": 0.25}]
+    response = client.post("/api/jobs/1/continue-agent")
+    assert response.status_code == 202
+    assert response.json()["status"] == "continuing"
+    assert get_job(connection, 1)["human_control_returned"] == 1
+    assert client.get("/api/workers").json()["items"][0]["browser_interactive"] is False
+
+    browser_control_hub.unregister("worker-0", controller)
     preview_frame_hub.clear()
 
 
@@ -583,8 +672,13 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert "OPTIONAL SECRETS" not in index
     assert 'id="anthropicKey"' not in index
     assert 'id="onboardAnthropic"' not in index
-    assert "Local browser stream" in index
+    assert "Same-session browser" in index
+    assert "click, type, paste, and scroll directly" in index
     assert "new WebSocket" in javascript
+    assert "data-browser-control" in javascript
+    assert "Input.dispatchMouseEvent" not in javascript
+    assert "This is the agent's exact retained tab—not a new job link" in javascript
+    assert "/continue-agent" in javascript
     assert "data-preview-canvas" in javascript
     assert "}, 500);" not in javascript
     assert "}, 1000);" in javascript

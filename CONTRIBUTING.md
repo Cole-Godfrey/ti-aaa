@@ -53,7 +53,8 @@ The browser agent must:
 
 - use only profile/resume facts
 - stop on unknown required answers
-- stop on CAPTCHA, SSO, non-code MFA, or verification that cannot be completed with a candidate-supplied one-time code
+- stop agent actions on CAPTCHA and retain the exact browser for candidate control; never automate, solve, or bypass the challenge
+- stop on SSO, non-code MFA, or verification that cannot be completed with a candidate-supplied one-time code
 - keep the live browser session open while requesting a one-time code and clear the code after use
 - avoid sensitive financial, identity, biometric, and device-permission flows
 - complete and audit every form page before a separate final-submission turn; never use the final Submit control to trigger validation or discover fields

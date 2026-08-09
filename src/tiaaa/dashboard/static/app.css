@@ -336,12 +336,22 @@ tbody tr:hover td { background: rgba(220,255,69,.16); }
 .worker-state { font: 8px var(--data); text-transform: uppercase; }
 .worker-state.applying { color: var(--blue); }
 .worker-state.failed { color: var(--signal); }
+.worker-state.captcha { color: var(--signal); }
+.worker-card.human-control { border-width: 2px; box-shadow: 7px 7px 0 rgba(230,79,55,.24); }
 .preview-frame { position: relative; aspect-ratio: 16/10; overflow: hidden; background: #252620; }
 .preview-frame canvas { width: 100%; height: 100%; display: block; object-fit: contain; background: #252620; }
+.preview-frame.interactive canvas { cursor: crosshair; touch-action: none; }
+.preview-frame.interactive canvas:focus { outline: 4px solid var(--acid); outline-offset: -4px; }
 .preview-frame.streaming::after { content: "LIVE"; position: absolute; top: 9px; right: 9px; padding: 4px 6px; color: var(--ink); background: var(--acid); border: 1px solid var(--ink); font: 7px var(--data); letter-spacing: .1em; }
 .preview-frame.fallback::after { content: "JPEG FALLBACK"; position: absolute; top: 9px; right: 9px; padding: 4px 6px; color: var(--paper); background: var(--blue); font: 7px var(--data); }
+.preview-frame.interactive::after { content: "YOUR CONTROL"; color: var(--paper); background: var(--signal); pointer-events: none; }
 .preview-empty { position: absolute; inset: 0; height: 100%; display: grid; place-items: center; margin: 0; color: #aaaca3; font: 9px var(--data); }
 .preview-frame.has-frame .preview-empty { display: none; }
+.browser-control-bar { display: flex; gap: 18px; align-items: center; justify-content: space-between; padding: 13px 14px; background: var(--acid); border-top: 1px solid var(--ink); }
+.browser-control-bar strong, .browser-control-bar span { display: block; }
+.browser-control-bar strong { font: 9px var(--data); letter-spacing: .08em; }
+.browser-control-bar span { max-width: 660px; margin-top: 4px; font-size: 10px; line-height: 1.4; }
+.browser-control-bar button { flex: 0 0 auto; }
 .worker-message { margin: 0; padding: 11px 14px; color: var(--muted); border-top: 1px solid var(--rule); font-size: 10px; }
 .agent-input-stack { display: grid; gap: 12px; margin-top: 18px; }
 .agent-checkpoint { background: var(--paper); border: 1px solid var(--ink); border-left: 8px solid var(--signal); box-shadow: 5px 5px 0 rgba(23,24,19,.09); }
@@ -360,6 +370,7 @@ tbody tr:hover td { background: rgba(220,255,69,.16); }
 .checkpoint-actions > span { color: var(--muted); font: 8px var(--data); text-transform: uppercase; }
 .checkpoint-actions > div { display: flex; gap: 15px; align-items: center; }
 .agent-checkpoint.handoff { border-left-color: var(--blue); }
+.agent-checkpoint.human-checkpoint { border-left-color: var(--signal); }
 .agent-checkpoint.submit-checkpoint { border-left-color: var(--acid); box-shadow: 6px 6px 0 rgba(220,255,69,.5); }
 .submit-actions { padding: 18px 19px; }
 .submit-application { min-width: 190px; }
@@ -589,6 +600,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 4
   .agent-input-form { grid-template-columns: 1fr; }
   .checkpoint-actions { align-items: stretch; flex-direction: column; }
   .checkpoint-actions > div { justify-content: space-between; }
+  .browser-control-bar { align-items: stretch; flex-direction: column; }
   .agent-queue-list { margin-inline: -15px; }
   .agent-queue-row { padding-inline: 13px; }
   .latest-controls input, .latest-controls select { width: 100%; min-width: 0; flex: 0 0 auto; }

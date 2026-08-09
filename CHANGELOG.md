@@ -9,6 +9,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - an opt-in setting to auto-submit applications that the user explicitly selects
 - a local Agent input for employer one-time verification codes that continues the live form
 - a Retry action for **Confirm in Agent** checkpoints in the Applications tab
+- same-session human browser control for CAPTCHA and blocked-interaction checkpoints, including clicking, typing, pasting, scrolling, and returning the retained tab to the agent
 
 ### Changed
 
@@ -17,10 +18,12 @@ All notable changes are documented here. This project follows [Semantic Versioni
 ### Fixed
 
 - the browser agent no longer uses the final Submit control to trigger validation or discover unfinished fields
+- disabled or stuck **Submitting…** states without a receipt now become live human-interaction checkpoints instead of closing an intact application form
 
 ### Security
 
 - one-time verification-code answers are cleared after the browser turn consumes them; passwords and other sensitive-input requests remain blocked
+- browser-control messages are accepted only for the currently retained CAPTCHA checkpoint and expose no URL-navigation command
 
 ## [0.7.0] - 2026-08-07
 

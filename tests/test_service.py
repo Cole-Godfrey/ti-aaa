@@ -101,6 +101,30 @@ def test_retry_application_requests_a_fresh_service_cycle(tmp_path, monkeypatch)
     assert state["service_message"] == "Retry requested for Acme · Software Intern"
 
 
+def test_return_browser_control_wakes_the_retained_agent(tmp_path, monkeypatch) -> None:
+    paths = ensure_dirs(AppPaths(tmp_path))
+    init_db(paths.database)
+    service = AutomationService(paths)
+    monkeypatch.setattr(
+        "tiaaa.service.request_human_control_return",
+        lambda _connection, job_id: {
+            "id": job_id,
+            "company": "Capula",
+            "role": "Trading and Research Intern",
+        },
+    )
+
+    job = service.return_browser_control(42)
+
+    assert job["id"] == 42
+    assert service._wake.is_set()
+    state = get_app_state(get_connection(paths.database))
+    assert state["service_status"] == "applying"
+    assert state["service_message"] == (
+        "Resuming application for Capula · Trading and Research Intern"
+    )
+
+
 def test_auto_mode_submits_unattended_in_the_same_cycle(
     tmp_path, profile, settings, monkeypatch
 ) -> None:

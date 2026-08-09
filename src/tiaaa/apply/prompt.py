@@ -81,8 +81,50 @@ def build_submission_prompt() -> str:
 7. If the completed form or live site session is gone, return FAILED. Do not restart the application.
 8. If a new required factual field or one-time verification-code field appears, return NEEDS_REVIEW
    under the original accuracy rules.
+9. If Submit remains disabled or stuck on Submitting for at least 10 seconds with the completed form
+   intact and no receipt, do not click it repeatedly. An invisible anti-bot challenge may be blocking
+   the request; leave the page open and return CAPTCHA so the candidate can take control in TI-AAA.
 """
     )
+
+
+def build_human_control_prompt(
+    *,
+    submission_authorized: bool,
+    submission_started: bool,
+) -> str:
+    """Resume after the candidate interacted with the exact retained browser tab."""
+
+    if submission_started:
+        next_step = (
+            "A final submission attempt had already begun before control was handed over. If a visible "
+            "receipt is now present, return APPLIED. Otherwise re-audit the current form and use only "
+            "the remaining final action once after the human-resolved blocker is gone."
+        )
+    elif submission_authorized:
+        next_step = (
+            "Final submission is authorized, but remain in the completion-and-review stage. Do not "
+            "click the final Submit action in this turn. Return REVIEW_READY after a clean audit; "
+            "TI-AAA will send the separate submission-only turn."
+        )
+    else:
+        next_step = (
+            "You still do not have permission to click the final Submit action. If the candidate "
+            "personally submitted while controlling the browser and a receipt is already visible, "
+            "return APPLIED; otherwise return REVIEW_READY after the form is complete."
+        )
+    return f"""The candidate temporarily controlled the same retained browser tab to resolve a CAPTCHA
+or blocked site interaction, then returned control to you. Continue only in that existing tab.
+
+1. Your first action must be `browser_snapshot` of the current page.
+2. Do not navigate to the original application URL, reload, go back, restart the application,
+   re-upload the resume, or overwrite completed fields.
+3. Inspect the current state before acting. Preserve every change the candidate made.
+4. {next_step}
+5. If the CAPTCHA or blocked interaction is still present, leave the page open and return CAPTCHA.
+6. Follow every original accuracy, safety, and structured-result rule. Never claim APPLIED without a
+   visible receipt or confirmation page.
+"""
 
 
 def _copy_resume(job: dict[str, Any], profile: dict[str, Any], worker_dir: Path) -> Path:
@@ -232,7 +274,10 @@ NON-NEGOTIABLE ACCURACY RULES
 7. {verification_rule}
 8. Never complete an assessment, recorded interview, background check, or unrelated talent-marketplace
    profile. Report NEEDS_REVIEW with the reason.
-9. Do not bypass CAPTCHAs. Report CAPTCHA when one prevents progress.
+9. Do not bypass or solve CAPTCHAs yourself. Keep the current page and completed form open and return
+   CAPTCHA when one prevents progress. A final Submit control that remains disabled or stuck on
+   Submitting for at least 10 seconds without a receipt may indicate an invisible challenge; return
+   CAPTCHA instead of repeatedly clicking or abandoning the intact form.
 10. If the job is closed, expired, not an internship, or materially differs from the listed company/role,
    stop without submitting and return the appropriate result.
 11. If the employer returns HTTP 401/403, Access Denied, bot protection, or otherwise blocks this
