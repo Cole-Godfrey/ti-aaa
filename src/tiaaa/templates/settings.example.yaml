@@ -19,6 +19,9 @@ preparation:
 automation:
   # Auto mode applies only to roles found after the initial repository baseline.
   auto_apply_new: false
+  # If true, an explicit manual Apply action may submit after completing the form.
+  # Missing facts and one-time verification codes still pause in the Agent view.
+  manual_auto_submit: false
   # Auto mode uses candidate qualifications for this score. Preferences do not change it.
   auto_apply_minimum_fit_score: 7
   # If true, Auto mode also requires the role, location, and term preferences in profile.json.

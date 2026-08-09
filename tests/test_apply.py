@@ -4,6 +4,8 @@ import base64
 import os
 import sys
 
+import pytest
+
 import tiaaa.apply.runner as runner
 from tiaaa.apply.preview import PreviewCapture, preview_frame_hub
 from tiaaa.apply.prompt import (
@@ -27,6 +29,7 @@ from tiaaa.apply.runner import (
     _stream_summary,
     _timeout_output,
     _unattended_result,
+    _verification_code_fallback,
     _wait_for_agent_answers,
     _wait_for_submission_confirmation,
     run_applications,
@@ -77,6 +80,45 @@ def test_structured_result_carries_safe_candidate_questions() -> None:
     assert parsed.result == "needs_review"
     assert parsed.reason_code == "missing_input"
     assert parsed.questions[0]["key"] == "preferred_team"
+
+
+def test_verification_prose_gets_a_guarded_one_time_code_input() -> None:
+    detail = (
+        "Clicking Submit application triggered an email verification step: an 8-character "
+        "security code was sent to avery@example.com and must be entered to complete submission."
+    )
+
+    questions = _verification_code_fallback(
+        AgentResult("needs_review", detail, "verification_required", [])
+    )
+
+    assert questions == [
+        {
+            "key": "email_verification_code",
+            "label": "Email verification code",
+            "input_type": "verification_code",
+            "options": [],
+            "required": True,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Enter the account password and verification code",
+        "Open the approval link on another device for the verification code",
+        "Complete the CAPTCHA before entering the security code",
+        "Upload an identity document to obtain a verification code",
+    ],
+)
+def test_verification_fallback_rejects_unsafe_handoffs(detail) -> None:
+    assert (
+        _verification_code_fallback(
+            AgentResult("needs_review", detail, "verification_required", [])
+        )
+        == []
+    )
 
 
 def test_stream_json_text_extraction() -> None:
@@ -332,6 +374,11 @@ def test_prompt_is_truth_constrained_and_stops_before_submit(
     assert "Leave optional fields blank" in prompt
     assert "Never wait more than 5 seconds" in prompt
     assert "Do not create an employer account" in prompt
+    assert "`input_type` set to `verification_code`" in prompt
+    assert "same open code field" in prompt
+    assert "final Submit, Send, Finish, or Complete application control" in prompt
+    assert "Distinguish Next/Continue controls" in prompt
+    assert "separate submission-only message" in prompt
     assert "must-not-reach-the-agent" not in prompt
 
 
@@ -350,15 +397,67 @@ def test_continuation_prompt_preserves_the_open_form() -> None:
     assert "Do not re-upload the resume" in prompt
     assert "browser_snapshot" in prompt
     assert '"answer": "Platform"' in prompt
+    assert "one-time verification code" in prompt
+
+
+def test_continuation_prompt_keeps_completion_separate_from_submission() -> None:
+    completion_prompt = build_continuation_prompt(
+        {},
+        submission_authorized=True,
+    )
+    submission_prompt = build_continuation_prompt(
+        {},
+        submission_authorized=True,
+        submission_started=True,
+    )
+
+    assert "this is still a completion-and-review turn" in completion_prompt
+    assert "Do not click the final Submit button" in completion_prompt
+    assert "separate submission-only turn" in completion_prompt
+    assert "authorized submission turn already began" in submission_prompt
+    assert "remaining final action once" in submission_prompt
 
 
 def test_submission_prompt_uses_only_the_completed_live_form() -> None:
     prompt = build_submission_prompt()
 
-    assert "explicitly confirmed final submission" in prompt
+    assert "Final submission was explicitly authorized" in prompt
     assert "Do not navigate, reload, go back" in prompt
-    assert "Click the existing final Submit application button exactly once" in prompt
+    assert "Audit every visible" in prompt
+    assert "Never click Submit merely to trigger validation" in prompt
+    assert "click the existing final Submit application button exactly once" in prompt
     assert "Do not restart the application" in prompt
+
+
+def test_authorized_session_uses_a_separate_submission_turn() -> None:
+    session = object.__new__(runner._ApplicationAgentSession)
+    session.initial_prompt = "completion turn"
+    session.submission_authorized = True
+    session.submission_started = False
+    session.process = type("LiveProcess", (), {"alive": True})()
+    turns: list[tuple[str, bool | None]] = []
+
+    def fake_start_process() -> None:
+        return None
+
+    session._start_process = fake_start_process
+
+    def fake_turn(prompt: str, *, submit: bool | None = None):
+        turns.append((prompt, submit))
+        if submit:
+            return AgentResult("applied"), {"browser_actions": [], "mcp_servers": []}
+        return AgentResult("review_ready"), {"browser_actions": [], "mcp_servers": []}
+
+    session._turn = fake_turn
+
+    result = session.start()
+
+    assert result.result == "applied"
+    assert turns == [
+        ("completion turn", False),
+        (build_submission_prompt(), True),
+    ]
+    assert session.submission_started is True
 
 
 def test_unattended_prompt_never_requests_input_and_handles_judgment_questions(
@@ -392,6 +491,43 @@ def test_unattended_prompt_never_requests_input_and_handles_judgment_questions(
     assert "personality" in prompt
     assert "expected compensation" in prompt
     assert "Negotiable or Market rate" in prompt
+    assert "return an empty `questions` array" in prompt
+    assert "Never wait for a code in unattended Auto mode" in prompt
+
+
+def test_manual_auto_submit_authorizes_only_a_selected_job(
+    tmp_path, profile, settings, monkeypatch
+) -> None:
+    settings["automation"]["manual_auto_submit"] = True
+    monkeypatch.setattr(runner, "init_db", lambda _path: object())
+    monkeypatch.setattr(runner, "applications_today", lambda _connection: 0)
+    monkeypatch.setattr(
+        runner,
+        "claimable_application_count",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    result = run_applications(
+        profile=profile,
+        settings=settings,
+        paths=AppPaths(tmp_path),
+        submit=True,
+        manual_selection_auto_submit=True,
+        target_job_id=42,
+        db_path=tmp_path / "manual-auto-submit.sqlite3",
+    )
+
+    assert result == {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+
+    with pytest.raises(PermissionError, match="terminal or API submission"):
+        run_applications(
+            profile=profile,
+            settings=settings,
+            paths=AppPaths(tmp_path),
+            submit=True,
+            target_job_id=43,
+            db_path=tmp_path / "manual-batch.sqlite3",
+        )
 
 
 def test_unattended_checkpoints_are_terminal_failures_without_questions() -> None:
@@ -435,6 +571,11 @@ def test_wait_for_submission_confirmation_returns_when_dashboard_confirms(
     requested = iter([False, True])
     monkeypatch.setattr(
         runner,
+        "live_submission_checkpoint",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        runner,
         "final_submission_requested",
         lambda *_args, **_kwargs: next(requested),
     )
@@ -443,6 +584,25 @@ def test_wait_for_submission_confirmation_returns_when_dashboard_confirms(
     assert _wait_for_submission_confirmation(
         object(), 1, "worker-0", timeout=1, poll_interval=0.01
     ) is True
+
+
+def test_wait_for_submission_confirmation_stops_when_retry_cancels_checkpoint(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "live_submission_checkpoint",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "final_submission_requested",
+        lambda *_args, **_kwargs: pytest.fail("canceled checkpoint was polled"),
+    )
+
+    assert _wait_for_submission_confirmation(
+        object(), 1, "worker-0", timeout=1, poll_interval=0.01
+    ) is False
 
 
 def test_empty_application_queue_does_not_require_browser_tools(

@@ -33,7 +33,7 @@ const viewCopy = {
   settings: ["DESK / 07", "Operating rules", "Change polling, matching, and application boundaries."],
 };
 const applicationPipelineOptions = [
-  ["applied", "Applied"], ["withdrawn", "Withdrawn"],
+  ["manual_review", "Confirm in Agent"], ["applied", "Applied"], ["withdrawn", "Withdrawn"],
 ];
 const outcomeOptions = [
   ["none", "No update"], ["oa", "OA received"], ["interview", "Interview"],
@@ -302,28 +302,55 @@ function renderJobs(jobs) {
   state.jobs = jobs;
   const body = element("jobsTableBody");
   if (!jobs.length) {
-    body.innerHTML = '<tr><td colspan="6" class="loading">No submitted applications match this view.</td></tr>';
-    element("tableSummary").textContent = "0 submitted applications shown";
+    body.innerHTML = '<tr><td colspan="6" class="loading">No applications match this view.</td></tr>';
+    element("tableSummary").textContent = "0 application records shown";
     return;
   }
   body.innerHTML = jobs.map(job => {
-    const resumeName = job.submitted_resume_name;
+    const submitted = Boolean(job.applied_at);
+    const resumeName = job.submitted_resume_name || job.base_resume_name;
+    const resumeState = job.submitted_resume_name ? "submitted" : "prepared";
+    const retryAction = job.pipeline_status === "manual_review" && job.availability_status !== "manual_only"
+      ? `<button class="mini-apply retry-application" type="button" aria-label="Retry application for ${escapeHtml(job.company)}">Retry</button>`
+      : "";
     return `<tr data-job-id="${job.id}">
       <td class="role-cell"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)} · ${escapeHtml(job.location || "location not listed")}</span></td>
       <td><select class="status-select pipeline-select" aria-label="Application status for ${escapeHtml(job.company)}">${optionsMarkup(applicationPipelineOptions, job.pipeline_status)}</select></td>
-      <td class="resume-cell">${resumeName ? `<a href="/api/jobs/${job.id}/resume" target="_blank">${escapeHtml(resumeName)}</a><span>submitted</span>` : "Not recorded"}</td>
-      <td><select class="status-select outcome-select" aria-label="Outcome for ${escapeHtml(job.company)}">${optionsMarkup(outcomeOptions, job.outcome_status)}</select></td>
-      <td>${escapeHtml(shortDate(job.applied_at))}</td>
-      <td><a class="open-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer" title="Open application">↗</a></td>
+      <td class="resume-cell">${resumeName ? `<a href="/api/jobs/${job.id}/resume" target="_blank">${escapeHtml(resumeName)}</a><span>${resumeState}</span>` : "Not recorded"}</td>
+      <td><select class="status-select outcome-select" aria-label="Outcome for ${escapeHtml(job.company)}"${submitted ? "" : " disabled"}>${optionsMarkup(outcomeOptions, job.outcome_status)}</select></td>
+      <td>${submitted ? escapeHtml(shortDate(job.applied_at)) : "Not submitted"}</td>
+      <td><div class="application-actions">${retryAction}<a class="open-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer" title="Open application">↗</a></div></td>
     </tr>`;
   }).join("");
-  element("tableSummary").textContent = `${jobs.length} submitted application${jobs.length === 1 ? "" : "s"} shown · tracker changes save immediately`;
+  element("tableSummary").textContent = `${jobs.length} application record${jobs.length === 1 ? "" : "s"} shown · tracker changes save immediately`;
   body.querySelectorAll(".pipeline-select").forEach(select => select.addEventListener("change", event => {
     updateJob(event.target.closest("tr").dataset.jobId, { pipeline_status: event.target.value });
   }));
   body.querySelectorAll(".outcome-select").forEach(select => select.addEventListener("change", event => {
     updateJob(event.target.closest("tr").dataset.jobId, { outcome_status: event.target.value });
   }));
+  body.querySelectorAll(".retry-application").forEach(button => button.addEventListener("click", event => {
+    retryJobApplication(event.target.closest("tr").dataset.jobId, button);
+  }));
+}
+
+async function retryJobApplication(jobId, button) {
+  if (!state.claudeAuth?.logged_in) {
+    setView("settings");
+    showToast("Connect Claude Code in Settings before retrying the agent", true);
+    return;
+  }
+  if (!window.confirm("Retry this application from the beginning?\n\nAny form currently open in Agent will close, and pending checkpoint answers will be cleared.")) return;
+  button.disabled = true;
+  try {
+    await api(`/api/jobs/${jobId}/retry`, { method: "POST" });
+    state.agentInputSignature = null;
+    showToast("Application queued for a clean retry");
+    await Promise.all([loadJobs(), loadLatestJobs(), refreshLive()]);
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
 }
 
 async function updateJob(jobId, payload) {
@@ -415,6 +442,11 @@ async function openJobDetail(jobId) {
     element("jobDetailNumber").textContent = `#${job.id}`;
     const sources = String(job.source_labels || "Repository source").split(",");
     const events = (job.events || []).slice(0, 6);
+    const applicationBoundary = job.application_mode === "auto"
+      ? "Unattended Auto mode"
+      : job.application_mode === "manual_auto_submit"
+        ? "Submits after your manual Apply selection"
+        : "Final Submit requires confirmation in Agent";
     element("jobDetailContent").innerHTML = `
       <p class="drawer-kicker">${escapeHtml(listingDate(job.posting_date, job.first_seen_at))}</p>
       <h2 id="jobDetailTitle">${escapeHtml(job.role)}</h2><h3>${escapeHtml(job.company)}</h3>
@@ -422,7 +454,7 @@ async function openJobDetail(jobId) {
         <div><dt>Location</dt><dd>${escapeHtml(job.location || "Not listed")}</dd></div>
         <div><dt>Fit</dt><dd>${escapeHtml(job.fit_score ?? "—")}/10 · ${escapeHtml(job.score_reasoning || "Not scored")}</dd></div>
         <div><dt>Eligibility</dt><dd>${escapeHtml(job.eligibility)} · ${escapeHtml(job.eligibility_reason || "No rule note")}</dd></div>
-        <div><dt>Agent boundary</dt><dd>${job.application_mode === "auto" ? "Unattended Auto mode" : "Final Submit requires confirmation in Agent"}</dd></div>
+        <div><dt>Agent boundary</dt><dd>${applicationBoundary}</dd></div>
         <div><dt>Resume</dt><dd>${escapeHtml(job.submitted_resume_name || job.base_resume_name || "Selected during preparation")}</dd></div>
       </dl>
       <section class="drawer-section"><span>FOUND IN</span>${sources.map(source => `<p>${escapeHtml(source)}</p>`).join("")}</section>
@@ -449,7 +481,11 @@ async function requestJobApplication(jobId, button) {
     showToast("Connect Claude Code in Settings before starting the agent", true);
     return;
   }
-  if (!window.confirm("Apply to this role with TI-AAA?\n\nThe agent will complete the form and wait in Agent for your final Submit confirmation.")) return;
+  const manualAutoSubmit = Boolean(state.config?.settings?.automation?.manual_auto_submit);
+  const confirmationDetail = manualAutoSubmit
+    ? "The agent will complete and submit the form. It will still pause in Agent for missing facts or a one-time verification code."
+    : "The agent will complete the form and wait in Agent for your final Submit confirmation.";
+  if (!window.confirm(`Apply to this role with TI-AAA?\n\n${confirmationDetail}`)) return;
   button.disabled = true;
   try {
     await api(`/api/jobs/${jobId}/apply`, { method: "POST" });
@@ -726,6 +762,9 @@ function agentInputControl(question) {
   if (question.input_type === "textarea") {
     return `<textarea data-agent-key="${key}" rows="3"${required}>${escapeHtml(current)}</textarea>`;
   }
+  if (question.input_type === "verification_code") {
+    return `<input data-agent-key="${key}" type="text" value="${escapeHtml(current)}" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" maxlength="128" placeholder="Enter the one-time code"${required}>`;
+  }
   const type = ["email", "tel", "number", "date"].includes(question.input_type) ? question.input_type : "text";
   return `<input data-agent-key="${key}" type="${type}" value="${escapeHtml(current)}"${required}>`;
 }
@@ -758,9 +797,14 @@ function renderAgentInputs(workers) {
     const questions = worker.questions || [];
     const resumeName = worker.submitted_resume_name || worker.base_resume_name || "Prepared resume";
     if (questions.length && worker.availability_status !== "manual_only") {
+      const verificationCodeRequested = questions.some(question => question.input_type === "verification_code");
+      const checkpointTitle = verificationCodeRequested ? "VERIFICATION CODE NEEDED" : "CANDIDATE INPUT NEEDED";
+      const checkpointNote = worker.review_detail || (verificationCodeRequested
+        ? "Paste the one-time code sent by the employer. TI-AAA uses it only for this open application and clears it after the agent continues."
+        : "Answer only with truthful information. TI-AAA keeps the current form open and continues it with your answers.");
       return `<article class="agent-checkpoint" data-agent-job="${worker.job_id}">
-        <header><div><p class="kicker">CANDIDATE INPUT NEEDED</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>${questions.length} field${questions.length === 1 ? "" : "s"}</span></header>
-        <p class="checkpoint-note">${escapeHtml(worker.review_detail || "Answer only with truthful information. TI-AAA keeps the current form open and continues it with your answers.")}</p>
+        <header><div><p class="kicker">${checkpointTitle}</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>${questions.length} field${questions.length === 1 ? "" : "s"}</span></header>
+        <p class="checkpoint-note">${escapeHtml(checkpointNote)}</p>
         <form class="agent-input-form">${questions.map(question => `<label>${escapeHtml(question.label)}${question.required ? "" : " <span>optional</span>"}${agentInputControl(question)}</label>`).join("")}
           <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><button class="button ink" type="submit">Save answers & continue</button></div>
         </form></article>`;
@@ -1019,6 +1063,7 @@ function populateConfiguration(config) {
   setValue("allowedLocations", joinList(filters.allowed_locations)); setChecked("remoteOnly", filters.remote_only);
   setValue("pollInterval", settings.poll_interval_seconds);
   setChecked("autoMode", automation.auto_apply_new);
+  setChecked("manualAutoSubmit", automation.manual_auto_submit);
   setValue("autoModeMinimumFit", automation.auto_apply_minimum_fit_score ?? 7);
   setChecked("autoModeUsePreferences", automation.auto_apply_use_preferences);
   setChecked("webPushNotifications", automation.web_push_notifications);
@@ -1094,6 +1139,7 @@ function configurationPayload() {
   delete settings.automation.auto_apply_eligible_only;
   Object.assign(settings.automation, {
     auto_apply_new: checked("autoMode"), headless: checked("headless"),
+    manual_auto_submit: checked("manualAutoSubmit"),
     auto_apply_use_preferences: checked("autoModeUsePreferences"),
     web_push_notifications: checked("autoMode") && checked("webPushNotifications"),
     auto_apply_minimum_fit_score: Number(element("autoModeMinimumFit").value) || 7,

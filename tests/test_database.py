@@ -11,6 +11,7 @@ from tiaaa.database import (
     answered_agent_inputs,
     claim_next_job,
     claimable_application_count,
+    clear_ephemeral_agent_inputs,
     close_all_connections,
     close_connection,
     get_analytics,
@@ -21,6 +22,7 @@ from tiaaa.database import (
     list_agent_inputs,
     list_application_queue,
     list_jobs,
+    live_submission_checkpoint,
     mark_apply_result,
     mark_prepared,
     reconcile_source_registry,
@@ -29,6 +31,7 @@ from tiaaa.database import (
     request_manual_application,
     resume_application_after_input,
     resume_application_for_submission,
+    retry_manual_application,
     store_agent_inputs,
     update_tracker,
     update_worker_state,
@@ -185,6 +188,85 @@ def test_manual_request_cannot_replace_a_live_review_session(
         assert "already manual review" in str(exc)
     else:
         raise AssertionError("A live review session must not be replaced")
+    close_connection(path)
+
+
+def test_retry_manual_application_cancels_live_checkpoint_and_requeues(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "retry-live-review.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/retry")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'manual_review', resume_path = ? WHERE id = 1",
+        (str(tmp_path / "resume.pdf"),),
+    )
+    connection.commit()
+    store_agent_inputs(
+        connection,
+        1,
+        [
+            {
+                "key": "preferred_team",
+                "label": "Preferred team",
+                "input_type": "text",
+                "required": True,
+            },
+            {
+                "key": "email_verification_code",
+                "label": "Email verification code",
+                "input_type": "verification_code",
+                "required": True,
+            },
+        ],
+    )
+    answer_agent_inputs(
+        connection,
+        1,
+        {
+            "preferred_team": "Platform",
+            "email_verification_code": "A1B2C3D4",
+        },
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'manual_review', worker_id = 'worker-0',
+                        apply_attempts = 3, apply_error = 'Needs confirmation',
+                        submission_requested = 1
+        WHERE id = 1
+        """
+    )
+    connection.commit()
+    update_worker_state(
+        connection,
+        "worker-0",
+        status="review_ready",
+        job=get_job(connection, 1),
+    )
+
+    assert live_submission_checkpoint(connection, 1, "worker-0") is True
+
+    retried = retry_manual_application(connection, 1)
+
+    assert retried is not None
+    assert retried["pipeline_status"] == "ready"
+    assert retried["manual_requested"] == 1
+    assert retried["worker_id"] is None
+    assert retried["apply_attempts"] == 0
+    assert retried["apply_error"] is None
+    assert retried["submission_requested"] == 0
+    assert live_submission_checkpoint(connection, 1, "worker-0") is False
+    inputs = {item["input_key"]: item for item in list_agent_inputs(connection, 1)}
+    assert inputs["preferred_team"]["status"] == "resolved"
+    assert inputs["preferred_team"]["answer"] == "Platform"
+    assert inputs["email_verification_code"]["status"] == "resolved"
+    assert inputs["email_verification_code"]["answer"] is None
+    event = connection.execute(
+        "SELECT event_type FROM events WHERE job_id = 1 ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert event["event_type"] == "manual_retry_requested"
     close_connection(path)
 
 
@@ -809,6 +891,29 @@ def test_applications_view_contains_only_submitted_jobs(tmp_path, profile, setti
     close_connection(path)
 
 
+def test_application_ledger_includes_agent_checkpoints(tmp_path, profile, settings) -> None:
+    path = tmp_path / "application-ledger.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    jobs = [
+        make_listing(source, "Discovered", "Software Intern", "https://jobs.test/1"),
+        make_listing(source, "Submitted", "Data Intern", "https://jobs.test/2"),
+        make_listing(source, "Checkpoint", "Security Intern", "https://jobs.test/3"),
+    ]
+    ingest_listings(connection, source, jobs, profile=profile, settings=settings)
+    update_tracker(connection, 2, pipeline_status="applied")
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'manual_review' WHERE id = 3"
+    )
+    connection.commit()
+
+    rows = list_jobs(connection, application_ledger=True)
+
+    assert [row["company"] for row in rows] == ["Checkpoint", "Submitted"]
+    assert all(row["company"] != "Discovered" for row in rows)
+    close_connection(path)
+
+
 def test_employer_closed_listing_is_not_reopened_by_unchanged_source(
     tmp_path, profile, settings
 ) -> None:
@@ -914,16 +1019,48 @@ def test_candidate_agent_inputs_are_saved_and_requeue_prepared_job(
                 "options": [],
                 "required": True,
             },
+            {
+                "key": "email_verification_code",
+                "label": "8-character email verification code",
+                "input_type": "verification_code",
+                "options": [],
+                "required": True,
+            },
+            {
+                "key": "account_password",
+                "label": "Account password",
+                "input_type": "verification_code",
+                "options": [],
+                "required": True,
+            },
         ],
     )
 
-    assert [item["input_key"] for item in saved] == ["preferred_team"]
-    job = answer_agent_inputs(connection, 1, {"preferred_team": "Platform"})
+    assert [item["input_key"] for item in saved] == [
+        "preferred_team",
+        "email_verification_code",
+    ]
+    job = answer_agent_inputs(
+        connection,
+        1,
+        {"preferred_team": "Platform", "email_verification_code": "A1B2C3D4"},
+    )
 
     assert job is not None
     assert job["pipeline_status"] == "ready"
     assert job["manual_requested"] == 1
     assert answered_agent_inputs(connection, 1)["preferred_team"]["answer"] == "Platform"
+    assert answered_agent_inputs(connection, 1)["email_verification_code"]["answer"] == "A1B2C3D4"
+
+    assert clear_ephemeral_agent_inputs(connection, 1) == 1
+    assert "email_verification_code" not in answered_agent_inputs(connection, 1)
+    verification = next(
+        item
+        for item in list_agent_inputs(connection, 1)
+        if item["input_key"] == "email_verification_code"
+    )
+    assert verification["answer"] is None
+    assert verification["status"] == "resolved"
 
     assert resume_application_after_input(connection, 1, "worker-0") is True
     resumed = get_job(connection, 1)

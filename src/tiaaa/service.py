@@ -28,6 +28,7 @@ from tiaaa.database import (
     refresh_qualification_scores,
     request_final_submission,
     request_manual_application,
+    retry_manual_application,
     set_app_state,
     source_baseline_complete,
 )
@@ -143,6 +144,24 @@ class AutomationService:
             connection,
             "service_message",
             f"Continuing application for {job['company']} · {job['role']}",
+        )
+        self.trigger()
+        return job
+
+    def retry_application(self, job_id: int) -> dict[str, Any]:
+        """Cancel a review checkpoint and queue a clean browser attempt."""
+
+        connection = get_connection(self.db_path)
+        if bool(get_app_state(connection).get("service_paused")):
+            raise RuntimeError("Resume the background service before retrying an application")
+        job = retry_manual_application(connection, job_id)
+        if job is None:
+            raise LookupError("Job not found")
+        set_app_state(connection, "service_status", "requested")
+        set_app_state(
+            connection,
+            "service_message",
+            f"Retry requested for {job['company']} · {job['role']}",
         )
         self.trigger()
         return job
@@ -328,6 +347,9 @@ class AutomationService:
                 set_app_state(connection, "service_message", "Browser application workers are active")
                 from tiaaa.apply import run_applications
 
+                manual_auto_submit = bool(
+                    automation.get("manual_auto_submit", False)
+                )
                 for job_id in manual_ids:
                     result = run_applications(
                         profile=profile,
@@ -335,9 +357,10 @@ class AutomationService:
                         paths=self.paths,
                         limit=1,
                         workers=1,
-                        submit=False,
+                        submit=manual_auto_submit,
                         unattended=False,
-                        interactive_review=True,
+                        interactive_review=not manual_auto_submit,
+                        manual_selection_auto_submit=manual_auto_submit,
                         target_job_id=job_id,
                         db_path=self.db_path,
                     )

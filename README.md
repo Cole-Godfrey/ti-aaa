@@ -26,7 +26,8 @@ TI-AAA reads these repositories:
 - Auto mode applies to one best-fit role for each company.
 - New job batches stay in a visible queue. One browser applies to them in order.
 - A manual **Apply** action ignores the automatic fit limit.
-- A manual application stops on the completed form. You confirm final submission in **Agent**.
+- By default, a manual application stops on the completed form for confirmation in **Agent**. You can opt into auto-submit for jobs you explicitly select.
+- The agent completes and audits the form before TI-AAA starts a separate final-submission turn. It does not use the final Submit control to discover missing fields.
 - Auto mode does not wait for user input. It submits safe applications and records why it stops others.
 - Optional Web Push alerts report new Auto-mode jobs. They require Auto mode and browser permission.
 - TI-AAA does not rewrite a resume. It submits an unchanged copy named `First_Last_Resume.pdf`.
@@ -48,8 +49,10 @@ TI-AAA reads these repositories:
 - Byte-preserved application resume copies
 - A live view of the browser worker
 - Input fields for agent questions
+- A one-time-code input that continues the same open application and clears the code after use
 - Final submission confirmation on the live completed form
-- A spreadsheet-style application tracker
+- An application tracker that includes submitted roles and **Confirm in Agent** checkpoints
+- A clean Retry action for application checkpoints
 - Resume records for each submitted application
 - Application, online assessment (OA), interview, and offer statistics
 - A welcome-back summary of applications and stopped Auto mode attempts
@@ -91,11 +94,12 @@ Claude subscription login is a Claude Code compatibility path. Anthropic may cha
 
 The first repository check creates the baseline. You can close the dashboard after setup. The Docker service continues to poll.
 
-### 4. Set automatic application rules
+### 4. Set application rules
 
 Open **Settings**. Use these controls:
 
 - **Auto mode** turns unattended applications on or off. It is off by default.
+- **Auto-submit manually selected applications** submits after an explicit **Apply** selection without requiring a second final-confirmation click. It is off by default.
 - **Minimum qualification fit** controls automatic applications. Its default is 7.
 - **Use my preferences as an application gate** can also require your role, location, and term preferences. It is off by default.
 - **Notify this browser when new jobs enter the queue** appears only when Auto mode is on. Select it once, allow the browser prompt, then select **Save all settings**. It does not use email or SMS.
@@ -108,9 +112,11 @@ Browser alerts work on `localhost` and use the browser's Web Push service. TI-AA
 
 ### 5. Apply to a job now
 
-Open **Latest jobs**. Select a job, then select **Apply**. Open **Agent** to watch the browser and answer factual questions. When the form is complete, review the live view and select **Submit application**.
+Open **Latest jobs**. Select a job, then select **Apply**. Open **Agent** to watch the browser and answer factual questions or paste a one-time verification code if an employer sends one. By default, review the completed form and select **Submit application**. If **Auto-submit manually selected applications** is enabled, the agent submits after completing the form without this second confirmation.
 
 The manual action does not require automatic apply. It also does not use the automatic fit limit.
+
+If a **Confirm in Agent** checkpoint needs to start over, open **Applications** and select **Retry**. TI-AAA closes any retained live form, clears pending checkpoint inputs, and queues a fresh browser attempt.
 
 ### Docker commands
 
@@ -274,6 +280,7 @@ service:
 
 automation:
   auto_apply_new: false
+  manual_auto_submit: false
   auto_apply_minimum_fit_score: 7
   auto_apply_use_preferences: false
   allow_submission: false
@@ -311,6 +318,7 @@ These secrets are optional:
 - TI-AAA has no developer-operated server and sends no product telemetry.
 - Repository sync sends requests to GitHub. A configured `GITHUB_TOKEN` is sent only to GitHub.
 - Claude browser automation receives the selected resume text, candidate profile, prepared answers, and job metadata. It interacts with the employer site, which receives the fields and files entered for that application.
+- A one-time code entered in **Agent** passes through the active Claude browser session to the employer's code field. TI-AAA clears the stored local answer after that browser turn.
 - Optional OpenAI, Gemini, or custom LLM preparation sends resume text and job metadata to the provider you configure.
 - Optional Web Push sends the company and role in an encrypted notification through your browser vendor's push service.
 - The dashboard binds to `127.0.0.1` by default.
@@ -318,10 +326,10 @@ These secrets are optional:
 - If you use an authenticated reverse proxy, set `TIAAA_TRUSTED_HOSTS` to a comma-separated list of its public hostnames.
 - Community internship lists and their outbound links are third-party data. TI-AAA rejects listed links that directly target local/private-network addresses, but you should review the sources and employers before enabling Auto mode.
 - The agent does not invent candidate facts.
-- Manual applications ask for unknown, ordinary candidate facts.
+- Manual applications ask for unknown, ordinary candidate facts and can pause for a one-time code sent to the candidate's configured email address or phone.
 - Auto mode does not ask for input. A missing required personal fact stops that application and is recorded.
 - Auto mode can answer subjective questions and compensation questions without inventing candidate facts.
-- CAPTCHA, MFA, SSO, assessments, and identity checks require manual action.
+- One-time verification codes can be entered in the local Agent view and are cleared after the browser turn uses them. CAPTCHA, SSO, non-code MFA, assessments, and identity checks require a manual handoff.
 - Employer account creation and passwords require manual action; TI-AAA does not store or send an application-site password.
 - The agent refuses payment, bank, government ID, and biometric requests.
 - Application limits stay active in automatic mode.

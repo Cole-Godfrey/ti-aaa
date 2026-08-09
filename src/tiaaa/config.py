@@ -66,6 +66,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "automation": {
         "auto_apply_new": False,
+        "manual_auto_submit": False,
         "auto_apply_minimum_fit_score": 7,
         "auto_apply_use_preferences": False,
         "web_push_notifications": False,
@@ -258,6 +259,9 @@ def save_settings(settings: dict[str, Any], paths: AppPaths | None = None) -> Pa
     )
     automation["web_push_notifications"] = bool(
         automation.get("web_push_notifications", False)
+    )
+    automation["manual_auto_submit"] = bool(
+        automation.get("manual_auto_submit", False)
     )
     automation["workers"] = max(1, min(8, int(automation.get("workers", 1))))
     automation["max_applications_per_cycle"] = max(

@@ -251,6 +251,7 @@ tbody tr:hover td { background: rgba(220,255,69,.16); }
 .text-button { padding: 0; color: var(--blue); background: none; border: 0; border-bottom: 1px solid currentColor; font: 9px var(--data); text-transform: uppercase; }
 .open-link { font: 19px var(--slab); text-decoration: none; }
 .status-select { width: 100%; min-width: 105px; padding: 6px; background: transparent; border: 1px solid var(--rule); font: 9px var(--data); }
+.application-actions { display: flex; gap: 7px; align-items: center; justify-content: flex-end; white-space: nowrap; }
 .resume-cell a, .resume-cell span { display: block; }
 .resume-cell span { margin-top: 2px; color: var(--muted); font: 7px var(--data); text-transform: uppercase; }
 .table-summary { margin: 12px 0 0; color: var(--muted); font: 8px var(--data); text-transform: uppercase; }
@@ -461,6 +462,9 @@ input[type="checkbox"], input[type="radio"] { width: 15px; height: 15px; margin:
 .toggle-list { display: grid; gap: 9px; margin-top: 18px; }
 .toggle-list label { display: flex; gap: 9px; align-items: center; text-transform: none; }
 .toggle-list label span { color: var(--ink); font: 11px var(--human); }
+.toggle-list .manual-submit-toggle { align-items: start; }
+.manual-submit-toggle b, .manual-submit-toggle small { display: block; }
+.manual-submit-toggle small { margin-top: 3px; color: var(--muted); font: 8px/1.45 var(--data); }
 .danger-toggle { color: var(--signal); }
 .fine-print { color: var(--muted); font-size: 10px; line-height: 1.5; }
 .wide-label { max-width: 610px; margin-top: 20px; }

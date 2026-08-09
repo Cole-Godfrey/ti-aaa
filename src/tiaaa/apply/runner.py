@@ -32,11 +32,13 @@ from tiaaa.database import (
     applications_today,
     claim_next_job,
     claimable_application_count,
+    clear_ephemeral_agent_inputs,
     close_live_checkpoint,
     final_submission_requested,
     get_connection,
     init_db,
     list_agent_inputs,
+    live_submission_checkpoint,
     mark_apply_result,
     release_claim,
     resolve_agent_inputs,
@@ -100,6 +102,7 @@ _RESULT_SCHEMA = {
                             "date",
                             "select",
                             "boolean",
+                            "verification_code",
                         ],
                     },
                     "options": {
@@ -609,6 +612,44 @@ def _unattended_result(result: AgentResult) -> AgentResult:
     )
 
 
+def _verification_code_fallback(result: AgentResult) -> list[dict[str, Any]]:
+    """Recover a safe code input when an agent reports it only in prose."""
+
+    if result.result != "needs_review" or result.questions:
+        return []
+    detail = (result.detail or "").casefold()
+    if result.reason_code not in {"verification_required", "login_required"}:
+        return []
+    if not re.search(
+        r"\b(?:verification|security|one.?time|mfa|otp|authentication)\s*"
+        r"(?:code|passcode)\b",
+        detail,
+    ):
+        return []
+    if any(
+        marker in detail
+        for marker in (
+            "password",
+            "captcha",
+            "approval link",
+            "another device",
+            "identity document",
+            "government id",
+        )
+    ):
+        return []
+    email_code = "email" in detail or "e-mail" in detail
+    return [
+        {
+            "key": "email_verification_code" if email_code else "verification_code",
+            "label": "Email verification code" if email_code else "One-time verification code",
+            "input_type": "verification_code",
+            "options": [],
+            "required": True,
+        }
+    ]
+
+
 def _parse_agent_result(text: str, *, submit: bool) -> AgentResult:
     try:
         structured = json.loads(text)
@@ -758,6 +799,7 @@ class _ApplicationAgentSession:
         self.submit = submit
         self.unattended = unattended
         self.submission_authorized = submit
+        self.submission_started = False
         self.turn_number = 0
         self.process: _ClaudeProcess | None = None
         self.worker_dir = paths.workers / f"worker-{worker_id}"
@@ -769,7 +811,7 @@ class _ApplicationAgentSession:
             profile=profile,
             paths=paths,
             worker_dir=self.worker_dir,
-            submit=submit,
+            submit=False,
             unattended=unattended,
             application_answers=application_answers,
         )
@@ -815,7 +857,7 @@ class _ApplicationAgentSession:
     def start(self) -> AgentResult:
         for agent_launch in range(2):
             self._start_process()
-            result, summary = self._turn(self.initial_prompt)
+            result, summary = self._turn(self.initial_prompt, submit=False)
             if agent_launch == 0 and _bridge_needs_retry(summary):
                 log.warning(
                     "Browser bridge was still pending for worker-%s; retrying Claude once",
@@ -824,8 +866,19 @@ class _ApplicationAgentSession:
                 self.close()
                 time.sleep(0.5)
                 continue
-            return result
+            return self._submit_if_ready(result)
         return AgentResult("failed", "browser bridge did not become ready")
+
+    def _submit_if_ready(self, result: AgentResult) -> AgentResult:
+        """Start a separate final-action turn only after form completion is reported."""
+
+        if (
+            result.result == "review_ready"
+            and self.submission_authorized
+            and not self.submission_started
+        ):
+            return self.submit_after_confirmation()
+        return result
 
     def continue_with(
         self,
@@ -837,10 +890,11 @@ class _ApplicationAgentSession:
             build_continuation_prompt(
                 application_answers,
                 submission_authorized=self.submission_authorized,
+                submission_started=self.submission_started,
             ),
-            submit=self.submission_authorized,
+            submit=self.submission_started,
         )
-        return result
+        return self._submit_if_ready(result)
 
     def submit_after_confirmation(self) -> AgentResult:
         """Use the retained form after the candidate authorizes final submission."""
@@ -848,6 +902,7 @@ class _ApplicationAgentSession:
         if self.process is None or not self.process.alive:
             return AgentResult("failed", "live review session ended before confirmation")
         self.submission_authorized = True
+        self.submission_started = True
         result, _ = self._turn(build_submission_prompt(), submit=True)
         return result
 
@@ -888,6 +943,8 @@ def _wait_for_submission_confirmation(
 
     deadline = time.monotonic() + max(0, float(timeout))
     while True:
+        if not live_submission_checkpoint(connection, job_id, worker_id):
+            return False
         if final_submission_requested(connection, job_id, worker_id):
             return True
         if time.monotonic() >= deadline:
@@ -1003,22 +1060,29 @@ def _worker(
                         connection, int(job["id"])
                     ),
                 )
-                agent_result = agent_session.start()
+                try:
+                    agent_result = agent_session.start()
+                finally:
+                    clear_ephemeral_agent_inputs(connection, int(job["id"]))
                 while True:
                     if unattended:
                         agent_result = _unattended_result(agent_result)
                     result = agent_result.result
                     detail = agent_result.detail
                     saved_questions: list[dict[str, Any]] = []
+                    checkpoint_questions = (
+                        agent_result.questions
+                        or _verification_code_fallback(agent_result)
+                    )
                     if (
                         not unattended
                         and result == "needs_review"
-                        and agent_result.questions
+                        and checkpoint_questions
                     ):
                         saved_questions = store_agent_inputs(
                             connection,
                             int(job["id"]),
-                            agent_result.questions,
+                            checkpoint_questions,
                         )
                     else:
                         resolve_agent_inputs(connection, int(job["id"]))
@@ -1081,7 +1145,12 @@ def _worker(
                                 message="Answer received; continuing in the same browser",
                                 screenshot_path=str(preview_path.resolve()),
                             )
-                            agent_result = agent_session.continue_with(answers)
+                            try:
+                                agent_result = agent_session.continue_with(answers)
+                            finally:
+                                clear_ephemeral_agent_inputs(
+                                    connection, int(job["id"])
+                                )
                             continue
                         close_live_checkpoint(
                             connection,
@@ -1200,6 +1269,7 @@ def run_applications(
     submit: bool = False,
     unattended: bool = False,
     interactive_review: bool = False,
+    manual_selection_auto_submit: bool = False,
     target_job_id: int | None = None,
     db_path: str | Path | None = None,
 ) -> dict[str, int]:
@@ -1211,10 +1281,21 @@ def run_applications(
     )
     if unattended and not bool(automation.get("auto_apply_new", False)):
         raise PermissionError("Unattended submission requires Auto mode to be enabled")
-    if submit and not unattended and not bool(automation.get("allow_submission")):
+    manual_setting_authorizes = bool(
+        manual_selection_auto_submit
+        and automation.get("manual_auto_submit", False)
+        and target_job_id is not None
+    )
+    if (
+        submit
+        and not unattended
+        and not bool(automation.get("allow_submission"))
+        and not manual_setting_authorizes
+    ):
         raise PermissionError(
-            "Submission is disabled in settings.yaml. Set automation.allow_submission: true "
-            "and keep using --submit to opt in."
+            "Submission is disabled. Dashboard-selected auto-submit requires its saved setting; "
+            "terminal or API submission requires automation.allow_submission: true plus the "
+            "explicit submit option."
         )
     # Repository batches are a persisted queue. One browser consumes it serially
     # so two applications can never run at the same time.

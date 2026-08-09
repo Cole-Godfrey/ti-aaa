@@ -110,11 +110,11 @@
       <section class="view" data-view="applications">
         <article class="panel table-panel">
           <div class="panel-head tracker-head">
-            <div><p class="kicker">APPLICATION LEDGER</p><h2>Submitted applications</h2><p>Only roles you actually applied to appear here.</p></div>
+            <div><p class="kicker">APPLICATION LEDGER</p><h2>Applications & checkpoints</h2><p>Submitted roles and applications waiting for action in Agent appear here.</p></div>
             <div class="filters">
               <input id="searchInput" type="search" placeholder="Search company, role, location" autocomplete="off">
               <select id="statusFilter" aria-label="Filter applications by status">
-                <option value="all">All applications</option><option value="applied">Applied</option>
+                <option value="all">All applications</option><option value="manual_review">Confirm in Agent</option><option value="applied">Applied</option>
                 <option value="oa">OA received</option><option value="interview">Interviewing</option>
                 <option value="offer">Offer</option><option value="rejected">Rejected</option>
                 <option value="withdrawn">Withdrawn</option>
@@ -123,8 +123,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Company / role</th><th>Status</th><th>Submitted resume</th><th>Outcome</th><th>Applied</th><th></th></tr></thead>
-              <tbody id="jobsTableBody"><tr><td colspan="6" class="loading">Loading submitted applications…</td></tr></tbody>
+              <thead><tr><th>Company / role</th><th>Status</th><th>Resume</th><th>Outcome</th><th>Applied</th><th></th></tr></thead>
+              <tbody id="jobsTableBody"><tr><td colspan="6" class="loading">Loading applications…</td></tr></tbody>
             </table>
           </div>
           <p id="tableSummary" class="table-summary"></p>
@@ -273,13 +273,14 @@
               <label>Claude model<input id="claudeModel" placeholder="sonnet"></label>
             </div>
             <div class="toggle-list">
+              <label class="manual-submit-toggle"><input id="manualAutoSubmit" type="checkbox"><span><b>Auto-submit manually selected applications</b><small>After you choose Apply, submit the completed form without a separate final confirmation. Questions and one-time codes still pause in Agent.</small></span></label>
               <label><input id="serviceEnabled" type="checkbox"><span>Keep polling in the background</span></label>
               <label><input id="autoPrepare" type="checkbox"><span>Prepare new matching roles automatically</span></label>
               <label><input id="useLlm" type="checkbox"><span>Use an LLM for scores and cover letters</span></label>
               <label><input id="generateCoverLetters" type="checkbox"><span>Generate factual cover letters when LLM use is on</span></label>
               <label><input id="headless" type="checkbox"><span>Run browser windows headlessly</span></label>
             </div>
-            <p class="fine-print">Manual Apply actions always stop on the completed form and wait for your in-app Submit confirmation.</p>
+            <p class="fine-print">This setting affects only jobs you explicitly select. Auto mode has its own unattended submission behavior above.</p>
           </article>
           <article class="panel settings-card">
             <p class="kicker">COMMON ANSWERS</p><h2>Screening defaults</h2>
@@ -376,7 +377,7 @@
               <div class="auth-code-row"><input id="onboardClaudeLoginCode" autocomplete="one-time-code" placeholder="Paste one-time code"><button id="onboardCompleteClaude" class="button terracotta" type="button">Complete connection</button></div>
             </div>
           </div>
-          <div class="intake-note"><strong>Manual confirmation</strong><p>A manual application fills the form and keeps it open. You confirm final submission from the Agent page. Auto mode starts off and can be enabled later in Settings.</p></div>
+          <div class="intake-note"><strong>Manual confirmation by default</strong><p>A manual application fills the form and keeps it open for final confirmation. You can enable auto-submit for explicitly selected jobs later in Settings. Auto mode also starts off.</p></div>
           <p class="fine-print">Auto mode does not wait for answers. If a required personal fact is missing, it stops that application and reports the reason when you return.</p>
           <div class="step-actions"><button class="button ghost prev-step" type="button">Back</button><button id="finishOnboarding" class="button terracotta" type="button">Finish setup</button></div>
         </section>
