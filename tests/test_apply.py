@@ -376,6 +376,9 @@ def test_prompt_is_truth_constrained_and_stops_before_submit(
     assert "Do not create an employer account" in prompt
     assert "`input_type` set to `verification_code`" in prompt
     assert "same open code field" in prompt
+    assert "final Submit, Send, Finish, or Complete application control" in prompt
+    assert "Distinguish Next/Continue controls" in prompt
+    assert "separate submission-only message" in prompt
     assert "must-not-reach-the-agent" not in prompt
 
 
@@ -397,13 +400,64 @@ def test_continuation_prompt_preserves_the_open_form() -> None:
     assert "one-time verification code" in prompt
 
 
+def test_continuation_prompt_keeps_completion_separate_from_submission() -> None:
+    completion_prompt = build_continuation_prompt(
+        {},
+        submission_authorized=True,
+    )
+    submission_prompt = build_continuation_prompt(
+        {},
+        submission_authorized=True,
+        submission_started=True,
+    )
+
+    assert "this is still a completion-and-review turn" in completion_prompt
+    assert "Do not click the final Submit button" in completion_prompt
+    assert "separate submission-only turn" in completion_prompt
+    assert "authorized submission turn already began" in submission_prompt
+    assert "remaining final action once" in submission_prompt
+
+
 def test_submission_prompt_uses_only_the_completed_live_form() -> None:
     prompt = build_submission_prompt()
 
-    assert "explicitly confirmed final submission" in prompt
+    assert "Final submission was explicitly authorized" in prompt
     assert "Do not navigate, reload, go back" in prompt
-    assert "Click the existing final Submit application button exactly once" in prompt
+    assert "Audit every visible" in prompt
+    assert "Never click Submit merely to trigger validation" in prompt
+    assert "click the existing final Submit application button exactly once" in prompt
     assert "Do not restart the application" in prompt
+
+
+def test_authorized_session_uses_a_separate_submission_turn() -> None:
+    session = object.__new__(runner._ApplicationAgentSession)
+    session.initial_prompt = "completion turn"
+    session.submission_authorized = True
+    session.submission_started = False
+    session.process = type("LiveProcess", (), {"alive": True})()
+    turns: list[tuple[str, bool | None]] = []
+
+    def fake_start_process() -> None:
+        return None
+
+    session._start_process = fake_start_process
+
+    def fake_turn(prompt: str, *, submit: bool | None = None):
+        turns.append((prompt, submit))
+        if submit:
+            return AgentResult("applied"), {"browser_actions": [], "mcp_servers": []}
+        return AgentResult("review_ready"), {"browser_actions": [], "mcp_servers": []}
+
+    session._turn = fake_turn
+
+    result = session.start()
+
+    assert result.result == "applied"
+    assert turns == [
+        ("completion turn", False),
+        (build_submission_prompt(), True),
+    ]
+    assert session.submission_started is True
 
 
 def test_unattended_prompt_never_requests_input_and_handles_judgment_questions(
@@ -517,6 +571,11 @@ def test_wait_for_submission_confirmation_returns_when_dashboard_confirms(
     requested = iter([False, True])
     monkeypatch.setattr(
         runner,
+        "live_submission_checkpoint",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        runner,
         "final_submission_requested",
         lambda *_args, **_kwargs: next(requested),
     )
@@ -525,6 +584,25 @@ def test_wait_for_submission_confirmation_returns_when_dashboard_confirms(
     assert _wait_for_submission_confirmation(
         object(), 1, "worker-0", timeout=1, poll_interval=0.01
     ) is True
+
+
+def test_wait_for_submission_confirmation_stops_when_retry_cancels_checkpoint(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runner,
+        "live_submission_checkpoint",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "final_submission_requested",
+        lambda *_args, **_kwargs: pytest.fail("canceled checkpoint was polled"),
+    )
+
+    assert _wait_for_submission_confirmation(
+        object(), 1, "worker-0", timeout=1, poll_interval=0.01
+    ) is False
 
 
 def test_empty_application_queue_does_not_require_browser_tools(

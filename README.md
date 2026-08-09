@@ -27,6 +27,7 @@ TI-AAA reads these repositories:
 - New job batches stay in a visible queue. One browser applies to them in order.
 - A manual **Apply** action ignores the automatic fit limit.
 - By default, a manual application stops on the completed form for confirmation in **Agent**. You can opt into auto-submit for jobs you explicitly select.
+- The agent completes and audits the form before TI-AAA starts a separate final-submission turn. It does not use the final Submit control to discover missing fields.
 - Auto mode does not wait for user input. It submits safe applications and records why it stops others.
 - Optional Web Push alerts report new Auto-mode jobs. They require Auto mode and browser permission.
 - TI-AAA does not rewrite a resume. It submits an unchanged copy named `First_Last_Resume.pdf`.
@@ -50,7 +51,8 @@ TI-AAA reads these repositories:
 - Input fields for agent questions
 - A one-time-code input that continues the same open application and clears the code after use
 - Final submission confirmation on the live completed form
-- A spreadsheet-style application tracker
+- An application tracker that includes submitted roles and **Confirm in Agent** checkpoints
+- A clean Retry action for application checkpoints
 - Resume records for each submitted application
 - Application, online assessment (OA), interview, and offer statistics
 - A welcome-back summary of applications and stopped Auto mode attempts
@@ -113,6 +115,8 @@ Browser alerts work on `localhost` and use the browser's Web Push service. TI-AA
 Open **Latest jobs**. Select a job, then select **Apply**. Open **Agent** to watch the browser and answer factual questions or paste a one-time verification code if an employer sends one. By default, review the completed form and select **Submit application**. If **Auto-submit manually selected applications** is enabled, the agent submits after completing the form without this second confirmation.
 
 The manual action does not require automatic apply. It also does not use the automatic fit limit.
+
+If a **Confirm in Agent** checkpoint needs to start over, open **Applications** and select **Retry**. TI-AAA closes any retained live form, clears pending checkpoint inputs, and queues a fresh browser attempt.
 
 ### Docker commands
 

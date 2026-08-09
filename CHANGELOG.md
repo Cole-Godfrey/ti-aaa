@@ -8,6 +8,15 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 - an opt-in setting to auto-submit applications that the user explicitly selects
 - a local Agent input for employer one-time verification codes that continues the live form
+- a Retry action for **Confirm in Agent** checkpoints in the Applications tab
+
+### Changed
+
+- submission-authorized runs now complete and audit the full form before a separate final-action browser turn
+
+### Fixed
+
+- the browser agent no longer uses the final Submit control to trigger validation or discover unfinished fields
 
 ### Security
 

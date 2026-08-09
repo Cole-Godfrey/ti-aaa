@@ -38,6 +38,7 @@ from tiaaa.database import (
     get_connection,
     init_db,
     list_agent_inputs,
+    live_submission_checkpoint,
     mark_apply_result,
     release_claim,
     resolve_agent_inputs,
@@ -798,6 +799,7 @@ class _ApplicationAgentSession:
         self.submit = submit
         self.unattended = unattended
         self.submission_authorized = submit
+        self.submission_started = False
         self.turn_number = 0
         self.process: _ClaudeProcess | None = None
         self.worker_dir = paths.workers / f"worker-{worker_id}"
@@ -809,7 +811,7 @@ class _ApplicationAgentSession:
             profile=profile,
             paths=paths,
             worker_dir=self.worker_dir,
-            submit=submit,
+            submit=False,
             unattended=unattended,
             application_answers=application_answers,
         )
@@ -855,7 +857,7 @@ class _ApplicationAgentSession:
     def start(self) -> AgentResult:
         for agent_launch in range(2):
             self._start_process()
-            result, summary = self._turn(self.initial_prompt)
+            result, summary = self._turn(self.initial_prompt, submit=False)
             if agent_launch == 0 and _bridge_needs_retry(summary):
                 log.warning(
                     "Browser bridge was still pending for worker-%s; retrying Claude once",
@@ -864,8 +866,19 @@ class _ApplicationAgentSession:
                 self.close()
                 time.sleep(0.5)
                 continue
-            return result
+            return self._submit_if_ready(result)
         return AgentResult("failed", "browser bridge did not become ready")
+
+    def _submit_if_ready(self, result: AgentResult) -> AgentResult:
+        """Start a separate final-action turn only after form completion is reported."""
+
+        if (
+            result.result == "review_ready"
+            and self.submission_authorized
+            and not self.submission_started
+        ):
+            return self.submit_after_confirmation()
+        return result
 
     def continue_with(
         self,
@@ -877,10 +890,11 @@ class _ApplicationAgentSession:
             build_continuation_prompt(
                 application_answers,
                 submission_authorized=self.submission_authorized,
+                submission_started=self.submission_started,
             ),
-            submit=self.submission_authorized,
+            submit=self.submission_started,
         )
-        return result
+        return self._submit_if_ready(result)
 
     def submit_after_confirmation(self) -> AgentResult:
         """Use the retained form after the candidate authorizes final submission."""
@@ -888,6 +902,7 @@ class _ApplicationAgentSession:
         if self.process is None or not self.process.alive:
             return AgentResult("failed", "live review session ended before confirmation")
         self.submission_authorized = True
+        self.submission_started = True
         result, _ = self._turn(build_submission_prompt(), submit=True)
         return result
 
@@ -928,6 +943,8 @@ def _wait_for_submission_confirmation(
 
     deadline = time.monotonic() + max(0, float(timeout))
     while True:
+        if not live_submission_checkpoint(connection, job_id, worker_id):
+            return False
         if final_submission_requested(connection, job_id, worker_id):
             return True
         if time.monotonic() >= deadline:

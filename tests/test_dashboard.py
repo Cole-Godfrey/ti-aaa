@@ -19,6 +19,7 @@ from tiaaa.database import (
     mark_apply_result,
     request_final_submission,
     request_manual_application,
+    retry_manual_application,
     set_app_state,
     store_agent_inputs,
     update_tracker,
@@ -478,6 +479,80 @@ def test_agent_page_confirms_submission_on_the_live_completed_form(
     assert get_job(connection, 1)["submission_requested"] == 1
 
 
+def test_applications_page_retries_a_confirm_in_agent_checkpoint(
+    tmp_path, profile, settings
+) -> None:
+    paths = AppPaths(tmp_path)
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    listing = InternshipListing(
+        company="Acme",
+        role="Software Engineer Intern",
+        location="Remote",
+        application_url="https://jobs.test/retry",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+    )
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'manual_review', worker_id = 'worker-0',
+                        resume_path = ?, submission_requested = 1
+        WHERE id = 1
+        """,
+        (str(tmp_path / "Avery_Student_Resume.pdf"),),
+    )
+    connection.commit()
+    store_agent_inputs(
+        connection,
+        1,
+        [
+            {
+                "key": "email_verification_code",
+                "label": "Email verification code",
+                "input_type": "verification_code",
+                "required": True,
+            }
+        ],
+    )
+    update_worker_state(
+        connection,
+        "worker-0",
+        status="review_ready",
+        job=get_job(connection, 1),
+        message="Confirm in Agent",
+    )
+
+    class ConnectedAuth:
+        def status(self):
+            return {"logged_in": True}
+
+    class FakeService:
+        def retry_application(self, job_id):
+            return retry_manual_application(connection, job_id)
+
+    app = create_app(paths.database, paths=paths)
+    app.state.claude_auth = ConnectedAuth()
+    app.state.service = FakeService()
+    client = TestClient(app)
+
+    applications = client.get("/api/jobs?view=applications").json()["items"]
+    assert [item["company"] for item in applications] == ["Acme"]
+    assert applications[0]["pipeline_status"] == "manual_review"
+
+    response = client.post("/api/jobs/1/retry")
+
+    assert response.status_code == 202
+    assert response.json()["job"]["pipeline_status"] == "ready"
+    retried = get_job(connection, 1)
+    assert retried["manual_requested"] == 1
+    assert retried["worker_id"] is None
+    assert retried["submission_requested"] == 0
+    assert client.get("/api/jobs?view=applications").json()["items"] == []
+
+
 def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     paths = AppPaths(tmp_path)
     client = TestClient(create_app(paths.database, paths=paths))
@@ -492,6 +567,8 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'id="autoModeMinimumFit"' in index
     assert 'id="autoModeUsePreferences"' in index
     assert 'id="manualAutoSubmit"' in index
+    assert "Applications & checkpoints" in index
+    assert '<option value="manual_review">Confirm in Agent</option>' in index
     assert 'id="webPushOption" class="web-push-option hidden"' in index
     assert 'id="webPushNotifications"' in index
     assert 'id="autoApplyMinimumFit"' not in index
@@ -523,6 +600,10 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'api(`/api/jobs/${card.dataset.submitJob}/submit`' in javascript
     assert "Submit application" in javascript
     assert "function renderApplicationQueue" in javascript
+    assert 'class="mini-apply retry-application"' in javascript
+    assert 'aria-label="Retry application for ${escapeHtml(job.company)}"' in javascript
+    assert "Any form currently open in Agent will close" in javascript
+    assert 'api(`/api/jobs/${jobId}/retry`' in javascript
     assert 'renderApplicationQueue(workers.queue || [], workers.queue_summary || {})' in javascript
     assert "Notification.requestPermission()" in javascript
     assert 'navigator.serviceWorker.register("/sw.js"' in javascript

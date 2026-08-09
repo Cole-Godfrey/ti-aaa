@@ -110,11 +110,11 @@
       <section class="view" data-view="applications">
         <article class="panel table-panel">
           <div class="panel-head tracker-head">
-            <div><p class="kicker">APPLICATION LEDGER</p><h2>Submitted applications</h2><p>Only roles you actually applied to appear here.</p></div>
+            <div><p class="kicker">APPLICATION LEDGER</p><h2>Applications & checkpoints</h2><p>Submitted roles and applications waiting for action in Agent appear here.</p></div>
             <div class="filters">
               <input id="searchInput" type="search" placeholder="Search company, role, location" autocomplete="off">
               <select id="statusFilter" aria-label="Filter applications by status">
-                <option value="all">All applications</option><option value="applied">Applied</option>
+                <option value="all">All applications</option><option value="manual_review">Confirm in Agent</option><option value="applied">Applied</option>
                 <option value="oa">OA received</option><option value="interview">Interviewing</option>
                 <option value="offer">Offer</option><option value="rejected">Rejected</option>
                 <option value="withdrawn">Withdrawn</option>
@@ -123,8 +123,8 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Company / role</th><th>Status</th><th>Submitted resume</th><th>Outcome</th><th>Applied</th><th></th></tr></thead>
-              <tbody id="jobsTableBody"><tr><td colspan="6" class="loading">Loading submitted applications…</td></tr></tbody>
+              <thead><tr><th>Company / role</th><th>Status</th><th>Resume</th><th>Outcome</th><th>Applied</th><th></th></tr></thead>
+              <tbody id="jobsTableBody"><tr><td colspan="6" class="loading">Loading applications…</td></tr></tbody>
             </table>
           </div>
           <p id="tableSummary" class="table-summary"></p>

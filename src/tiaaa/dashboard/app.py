@@ -487,7 +487,7 @@ def create_app(
             offset=offset,
             latest=view == "latest",
             active_only=view == "latest",
-            applied_only=view == "applications",
+            application_ledger=view == "applications",
         )
         return {"items": [_public_job(row) for row in rows], "limit": limit, "offset": offset}
 
@@ -548,6 +548,22 @@ def create_app(
         service = require_service()
         try:
             row = service.continue_application(job_id, payload.answers)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "queued", "job": _public_job(row)}
+
+    @app.post("/api/jobs/{job_id}/retry", status_code=202)
+    def retry_job_application(job_id: int) -> dict[str, Any]:
+        if not bool(app.state.claude_auth.status().get("logged_in")):
+            raise HTTPException(
+                status_code=409,
+                detail="Connect Claude Code in Settings before retrying the browser agent",
+            )
+        service = require_service()
+        try:
+            row = service.retry_application(job_id)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (RuntimeError, ValueError) as exc:

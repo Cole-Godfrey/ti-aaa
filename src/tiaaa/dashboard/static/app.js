@@ -33,7 +33,7 @@ const viewCopy = {
   settings: ["DESK / 07", "Operating rules", "Change polling, matching, and application boundaries."],
 };
 const applicationPipelineOptions = [
-  ["applied", "Applied"], ["withdrawn", "Withdrawn"],
+  ["manual_review", "Confirm in Agent"], ["applied", "Applied"], ["withdrawn", "Withdrawn"],
 ];
 const outcomeOptions = [
   ["none", "No update"], ["oa", "OA received"], ["interview", "Interview"],
@@ -302,28 +302,55 @@ function renderJobs(jobs) {
   state.jobs = jobs;
   const body = element("jobsTableBody");
   if (!jobs.length) {
-    body.innerHTML = '<tr><td colspan="6" class="loading">No submitted applications match this view.</td></tr>';
-    element("tableSummary").textContent = "0 submitted applications shown";
+    body.innerHTML = '<tr><td colspan="6" class="loading">No applications match this view.</td></tr>';
+    element("tableSummary").textContent = "0 application records shown";
     return;
   }
   body.innerHTML = jobs.map(job => {
-    const resumeName = job.submitted_resume_name;
+    const submitted = Boolean(job.applied_at);
+    const resumeName = job.submitted_resume_name || job.base_resume_name;
+    const resumeState = job.submitted_resume_name ? "submitted" : "prepared";
+    const retryAction = job.pipeline_status === "manual_review" && job.availability_status !== "manual_only"
+      ? `<button class="mini-apply retry-application" type="button" aria-label="Retry application for ${escapeHtml(job.company)}">Retry</button>`
+      : "";
     return `<tr data-job-id="${job.id}">
       <td class="role-cell"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)} · ${escapeHtml(job.location || "location not listed")}</span></td>
       <td><select class="status-select pipeline-select" aria-label="Application status for ${escapeHtml(job.company)}">${optionsMarkup(applicationPipelineOptions, job.pipeline_status)}</select></td>
-      <td class="resume-cell">${resumeName ? `<a href="/api/jobs/${job.id}/resume" target="_blank">${escapeHtml(resumeName)}</a><span>submitted</span>` : "Not recorded"}</td>
-      <td><select class="status-select outcome-select" aria-label="Outcome for ${escapeHtml(job.company)}">${optionsMarkup(outcomeOptions, job.outcome_status)}</select></td>
-      <td>${escapeHtml(shortDate(job.applied_at))}</td>
-      <td><a class="open-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer" title="Open application">↗</a></td>
+      <td class="resume-cell">${resumeName ? `<a href="/api/jobs/${job.id}/resume" target="_blank">${escapeHtml(resumeName)}</a><span>${resumeState}</span>` : "Not recorded"}</td>
+      <td><select class="status-select outcome-select" aria-label="Outcome for ${escapeHtml(job.company)}"${submitted ? "" : " disabled"}>${optionsMarkup(outcomeOptions, job.outcome_status)}</select></td>
+      <td>${submitted ? escapeHtml(shortDate(job.applied_at)) : "Not submitted"}</td>
+      <td><div class="application-actions">${retryAction}<a class="open-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer" title="Open application">↗</a></div></td>
     </tr>`;
   }).join("");
-  element("tableSummary").textContent = `${jobs.length} submitted application${jobs.length === 1 ? "" : "s"} shown · tracker changes save immediately`;
+  element("tableSummary").textContent = `${jobs.length} application record${jobs.length === 1 ? "" : "s"} shown · tracker changes save immediately`;
   body.querySelectorAll(".pipeline-select").forEach(select => select.addEventListener("change", event => {
     updateJob(event.target.closest("tr").dataset.jobId, { pipeline_status: event.target.value });
   }));
   body.querySelectorAll(".outcome-select").forEach(select => select.addEventListener("change", event => {
     updateJob(event.target.closest("tr").dataset.jobId, { outcome_status: event.target.value });
   }));
+  body.querySelectorAll(".retry-application").forEach(button => button.addEventListener("click", event => {
+    retryJobApplication(event.target.closest("tr").dataset.jobId, button);
+  }));
+}
+
+async function retryJobApplication(jobId, button) {
+  if (!state.claudeAuth?.logged_in) {
+    setView("settings");
+    showToast("Connect Claude Code in Settings before retrying the agent", true);
+    return;
+  }
+  if (!window.confirm("Retry this application from the beginning?\n\nAny form currently open in Agent will close, and pending checkpoint answers will be cleared.")) return;
+  button.disabled = true;
+  try {
+    await api(`/api/jobs/${jobId}/retry`, { method: "POST" });
+    state.agentInputSignature = null;
+    showToast("Application queued for a clean retry");
+    await Promise.all([loadJobs(), loadLatestJobs(), refreshLive()]);
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
 }
 
 async function updateJob(jobId, payload) {

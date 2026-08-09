@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tiaaa.config import AppPaths, ensure_dirs, save_profile, save_settings
-from tiaaa.database import get_connection, init_db, set_app_state
+from tiaaa.database import get_app_state, get_connection, init_db, set_app_state
 from tiaaa.discovery.github import SyncResult
 from tiaaa.service import AutomationService
 
@@ -76,6 +76,29 @@ def test_manual_application_runs_when_automatic_new_job_setting_is_off(
 
     assert calls == [42]
     assert summary["applications"]["review"] == 1
+
+
+def test_retry_application_requests_a_fresh_service_cycle(tmp_path, monkeypatch) -> None:
+    paths = ensure_dirs(AppPaths(tmp_path))
+    init_db(paths.database)
+    service = AutomationService(paths)
+    monkeypatch.setattr(
+        "tiaaa.service.retry_manual_application",
+        lambda _connection, job_id: {
+            "id": job_id,
+            "company": "Acme",
+            "role": "Software Intern",
+        },
+    )
+
+    job = service.retry_application(42)
+
+    assert job["id"] == 42
+    assert service._force_cycle.is_set()
+    assert service._wake.is_set()
+    state = get_app_state(get_connection(paths.database))
+    assert state["service_status"] == "requested"
+    assert state["service_message"] == "Retry requested for Acme · Software Intern"
 
 
 def test_auto_mode_submits_unattended_in_the_same_cycle(

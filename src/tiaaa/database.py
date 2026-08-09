@@ -1551,6 +1551,7 @@ def list_jobs(
     latest: bool = False,
     active_only: bool = False,
     applied_only: bool = False,
+    application_ledger: bool = False,
 ) -> list[dict[str, Any]]:
     clauses = ["1 = 1"]
     parameters: list[Any] = []
@@ -1568,14 +1569,25 @@ def list_jobs(
         clauses.append("j.is_active = 1")
     if latest:
         clauses.append("j.availability_status != 'closed'")
-    if applied_only:
+    if application_ledger:
+        clauses.append("(j.applied_at IS NOT NULL OR j.pipeline_status = 'manual_review')")
+    elif applied_only:
         clauses.append("j.applied_at IS NOT NULL")
-    ordering = (
-        "COALESCE(j.posting_date, substr(j.first_seen_at, 1, 10)) DESC, "
-        "j.first_seen_at DESC, j.id DESC"
-        if latest
-        else "(j.applied_at IS NOT NULL) DESC, COALESCE(j.applied_at, j.last_seen_at) DESC"
-    )
+    if application_ledger:
+        ordering = (
+            "CASE WHEN j.pipeline_status = 'manual_review' THEN 0 ELSE 1 END, "
+            "COALESCE(j.updated_at, j.applied_at, j.last_seen_at) DESC"
+        )
+    elif latest:
+        ordering = (
+            "COALESCE(j.posting_date, substr(j.first_seen_at, 1, 10)) DESC, "
+            "j.first_seen_at DESC, j.id DESC"
+        )
+    else:
+        ordering = (
+            "(j.applied_at IS NOT NULL) DESC, "
+            "COALESCE(j.applied_at, j.last_seen_at) DESC"
+        )
     parameters.extend((max(1, min(limit, 500)), max(0, offset)))
     rows = connection.execute(
         f"""
@@ -2023,6 +2035,60 @@ def request_manual_application(
     add_event(connection, job_id, "manual_apply_requested", "Requested from Latest jobs")
     connection.commit()
     return get_job(connection, job_id)
+
+
+def retry_manual_application(
+    connection: sqlite3.Connection, job_id: int
+) -> dict[str, Any] | None:
+    """Cancel a retained review checkpoint and explicitly queue a fresh attempt."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = get_job(connection, job_id)
+        if row is None:
+            connection.rollback()
+            return None
+        if row["pipeline_status"] != "manual_review":
+            raise ValueError("Only an application waiting in Agent can be retried")
+        if not bool(row["is_active"]) or row["availability_status"] == "closed":
+            raise ValueError("This listing is no longer active")
+        if row["availability_status"] == "manual_only":
+            raise ValueError(
+                "This employer blocks the automated browser; open the application manually"
+            )
+
+        now = utc_now()
+        next_status = "ready" if row.get("resume_path") else "queued"
+        connection.execute(
+            """
+            UPDATE agent_inputs
+            SET answer = CASE WHEN input_type = 'verification_code' THEN NULL ELSE answer END,
+                status = 'resolved', updated_at = ?
+            WHERE job_id = ? AND status IN ('pending', 'answered')
+            """,
+            (now, job_id),
+        )
+        connection.execute(
+            """
+            UPDATE jobs SET pipeline_status = ?, manual_requested = 1,
+                            manual_requested_at = ?, apply_error = NULL,
+                            apply_reason_code = NULL, submission_requested = 0,
+                            worker_id = NULL, apply_attempts = 0, updated_at = ?
+            WHERE id = ? AND pipeline_status = 'manual_review'
+            """,
+            (next_status, now, now, job_id),
+        )
+        add_event(
+            connection,
+            job_id,
+            "manual_retry_requested",
+            "Restart requested from Applications",
+        )
+        connection.commit()
+        return get_job(connection, job_id)
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def manual_application_ids(connection: sqlite3.Connection) -> list[int]:
@@ -2514,6 +2580,23 @@ def final_submission_requested(
         (job_id, worker_id),
     ).fetchone()
     return bool(row and row["submission_requested"])
+
+
+def live_submission_checkpoint(
+    connection: sqlite3.Connection,
+    job_id: int,
+    worker_id: str,
+) -> bool:
+    """Return whether a worker still owns the review checkpoint it is waiting on."""
+
+    row = connection.execute(
+        """
+        SELECT 1 FROM jobs
+        WHERE id = ? AND pipeline_status = 'manual_review' AND worker_id = ?
+        """,
+        (job_id, worker_id),
+    ).fetchone()
+    return row is not None
 
 
 def resume_application_for_submission(

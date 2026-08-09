@@ -251,6 +251,7 @@ tbody tr:hover td { background: rgba(220,255,69,.16); }
 .text-button { padding: 0; color: var(--blue); background: none; border: 0; border-bottom: 1px solid currentColor; font: 9px var(--data); text-transform: uppercase; }
 .open-link { font: 19px var(--slab); text-decoration: none; }
 .status-select { width: 100%; min-width: 105px; padding: 6px; background: transparent; border: 1px solid var(--rule); font: 9px var(--data); }
+.application-actions { display: flex; gap: 7px; align-items: center; justify-content: flex-end; white-space: nowrap; }
 .resume-cell a, .resume-cell span { display: block; }
 .resume-cell span { margin-top: 2px; color: var(--muted); font: 7px var(--data); text-transform: uppercase; }
 .table-summary { margin: 12px 0 0; color: var(--muted); font: 8px var(--data); text-transform: uppercase; }

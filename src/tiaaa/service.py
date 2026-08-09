@@ -28,6 +28,7 @@ from tiaaa.database import (
     refresh_qualification_scores,
     request_final_submission,
     request_manual_application,
+    retry_manual_application,
     set_app_state,
     source_baseline_complete,
 )
@@ -143,6 +144,24 @@ class AutomationService:
             connection,
             "service_message",
             f"Continuing application for {job['company']} · {job['role']}",
+        )
+        self.trigger()
+        return job
+
+    def retry_application(self, job_id: int) -> dict[str, Any]:
+        """Cancel a review checkpoint and queue a clean browser attempt."""
+
+        connection = get_connection(self.db_path)
+        if bool(get_app_state(connection).get("service_paused")):
+            raise RuntimeError("Resume the background service before retrying an application")
+        job = retry_manual_application(connection, job_id)
+        if job is None:
+            raise LookupError("Job not found")
+        set_app_state(connection, "service_status", "requested")
+        set_app_state(
+            connection,
+            "service_message",
+            f"Retry requested for {job['company']} · {job['role']}",
         )
         self.trigger()
         return job

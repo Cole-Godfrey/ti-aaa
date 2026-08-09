@@ -16,6 +16,7 @@ def build_continuation_prompt(
     application_answers: dict[str, dict[str, Any]],
     *,
     submission_authorized: bool = False,
+    submission_started: bool = False,
 ) -> str:
     """Continue a paused form without navigating away or repeating completed work."""
 
@@ -24,12 +25,22 @@ def build_continuation_prompt(
         ensure_ascii=False,
         indent=2,
     )[:8000]
-    submission_step = (
-        "The candidate already confirmed final submission. After the missing field is complete, "
-        "review the form, click its final Submit button once, and verify receipt."
-        if submission_authorized
-        else "Do not click the final Submit button. Return REVIEW_READY when the form is complete."
-    )
+    if submission_started:
+        submission_step = (
+            "The authorized submission turn already began. Complete only the current verification "
+            "or newly revealed field, re-audit the visible form, then use the site's remaining final "
+            "action once and verify receipt."
+        )
+    elif submission_authorized:
+        submission_step = (
+            "Final submission is already authorized, but this is still a completion-and-review "
+            "turn. Do not click the final Submit button. Return REVIEW_READY when every page and "
+            "required field is complete; TI-AAA will send a separate submission-only turn."
+        )
+    else:
+        submission_step = (
+            "Do not click the final Submit button. Return REVIEW_READY when the form is complete."
+        )
     return f"""The candidate supplied the requested answers below. Continue the same currently
 open application form in the existing browser session.
 
@@ -54,17 +65,21 @@ def build_submission_prompt() -> str:
     """Authorize final submission of the completed form in the current browser."""
 
     return (
-        "The candidate reviewed the completed application in TI-AAA and explicitly confirmed "
-        "final submission.\nContinue in the same browser and on the same completed form.\n\n"
+        "Final submission was explicitly authorized for this application through TI-AAA's active "
+        "manual confirmation or configured auto-submit mode.\nContinue in the same browser and on "
+        "the same completed form.\n\n"
         """1. First take one `browser_snapshot` of the current form or review page.
 
 2. Do not navigate, reload, go back, open the original Apply URL, re-upload the resume, or re-enter
    completed fields.
-3. Confirm that the visible application is still complete and belongs to the expected company and role.
-4. Click the existing final Submit application button exactly once.
-5. Verify a visible receipt or confirmation page before returning APPLIED.
-6. If the completed form or live site session is gone, return FAILED. Do not restart the application.
-7. If a new required factual field or one-time verification-code field appears, return NEEDS_REVIEW
+3. Confirm that the visible application belongs to the expected company and role. Audit every visible
+   section, required marker, empty control, invalid state, and error summary before taking any final action.
+4. Never click Submit merely to trigger validation or discover missing fields. If any known required
+   answer is incomplete, fill it and re-audit. If an answer is unknown, return NEEDS_REVIEW.
+5. Only after the audit is clean, click the existing final Submit application button exactly once.
+6. Verify a visible receipt or confirmation page before returning APPLIED.
+7. If the completed form or live site session is gone, return FAILED. Do not restart the application.
+8. If a new required factual field or one-time verification-code field appears, return NEEDS_REVIEW
    under the original accuracy rules.
 """
     )
@@ -103,12 +118,14 @@ def build_prompt(
         if cover_path.is_file():
             cover_letter = cover_path.read_text(encoding="utf-8")
     submission_rule = (
-        "Review every visible answer against the source facts, then click the final Submit button."
+        "Audit every visible section and required field against the source facts. Only when that "
+        "audit is clean may you click the final Submit button once. Never click it to trigger "
+        "validation or discover missing fields."
         if submit
         else (
-            "Fill and validate the form, but DO NOT click the final Submit button yet. Return "
-            "REVIEW_READY and wait for a later dashboard-confirmation message that explicitly "
-            "authorizes submission."
+            "Fill and audit the entire application, but DO NOT click the final Submit button or use "
+            "it to reveal validation errors. Return REVIEW_READY and wait for a separate "
+            "submission-only message that explicitly authorizes the irreversible action."
         )
     )
     success_status = "APPLIED" if submit else "REVIEW_READY"
@@ -159,8 +176,13 @@ def build_prompt(
         )
     )
     run_mode = (
-        "UNATTENDED AUTO MODE — no person is monitoring this application. Never request or wait for "
-        "user input. Complete and submit when safe; otherwise terminate with a precise reason."
+        (
+            "UNATTENDED AUTO MODE — no person is monitoring this application. Complete and audit "
+            "the form in this turn without final submission; a separate authorized submission turn "
+            "will follow. Never request or wait for user input."
+            if not submit
+            else "UNATTENDED AUTO MODE — complete and submit only after a clean final audit."
+        )
         if unattended
         else (
             "INTERACTIVE MANUAL MODE — candidate input is available in TI-AAA, and final submission "
@@ -242,15 +264,19 @@ WORKFLOW
 2. Read the page and confirm it is the internship above and still accepts applications.
 3. Click Apply and complete all required fields on each page. Upload the provided resume PDF. Paste the
    prepared cover letter only when requested. Correct bad resume-parser autofill using the profile and
-   resume. Batch all independent edits on the current page before moving to the next page.
+   resume. Batch all independent edits on the current page before moving to the next page. Do not use a
+   final Submit, Send, Finish, or Complete application control to discover what is missing.
 4. For dropdowns and screening questions, choose the literal truthful answer. Do not infer a favorable
    answer. When location or authorization requirements conflict with the profile, return
    NEEDS_REVIEW with `eligibility_conflict`.
 5. Do not create an employer account or handle an account password. If account creation, SSO, or a
    password-based login is required, report NEEDS_REVIEW with `login_required`. Handle a one-time code
    sent directly to the candidate only under verification rule 7 above.
-6. Before the irreversible action, inspect the complete review page. {submission_rule}
-7. If submitting, verify a confirmation message or confirmation page before claiming success.
+6. Distinguish Next/Continue controls from the final application action. A progress control may be an
+   HTML submit-type button; use it only after every required field on the current page is complete.
+7. Before the irreversible action, take a fresh snapshot and inspect all sections or tabs, required-field
+   markers, empty or invalid controls, and visible error summaries. {submission_rule}
+8. If submitting, verify a confirmation message or confirmation page before claiming success.
 
 Your first browser action must navigate directly to the Application URL. If browser navigation is not
 available, report FAILED with `browser_navigation_unavailable`.
