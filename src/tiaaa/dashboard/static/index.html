@@ -87,11 +87,11 @@
 
       <section class="view" data-view="latest">
         <div class="ledger-intro">
-          <div><p class="kicker">REPOSITORY INBOX</p><h2>Latest internship listings</h2><p>Everything currently active in the watched repositories. Open a dossier, then decide whether the agent should apply.</p></div>
+          <div><p class="kicker">REPOSITORY INBOX</p><h2>Latest internship listings</h2><p>Everything currently active in the watched repositories, with an explicit qualification decision based on your profile and any requirements the agent discovers.</p></div>
           <div class="latest-controls">
             <input id="latestSearch" type="search" placeholder="Filter company, role, place" autocomplete="off">
             <select id="latestEligibility" aria-label="Filter latest jobs">
-              <option value="all">All active</option><option value="eligible">Matches my rules</option><option value="ineligible">Outside my rules</option>
+              <option value="all">All active</option><option value="eligible">Qualified</option><option value="ineligible">Not qualified</option>
             </select>
           </div>
         </div>
@@ -99,8 +99,8 @@
           <div class="sheet-index"><span>ACTIVE FEED</span><strong id="latestCount">—</strong></div>
           <div class="table-wrap">
             <table class="latest-table">
-              <thead><tr><th>Posted</th><th>Company / role</th><th>Location</th><th>Fit</th><th>State</th><th></th></tr></thead>
-              <tbody id="latestJobsBody"><tr><td colspan="6" class="loading">Reading the repository ledger…</td></tr></tbody>
+              <thead><tr><th>Posted</th><th>Company / role</th><th>Location</th><th>Fit</th><th>Qualified</th><th>State</th><th></th></tr></thead>
+              <tbody id="latestJobsBody"><tr><td colspan="7" class="loading">Reading the repository ledger…</td></tr></tbody>
             </table>
           </div>
           <p id="latestSummary" class="table-summary"></p>
@@ -205,7 +205,7 @@
             <div class="auto-mode-copy">
               <p class="kicker">AUTO MODE</p>
               <h2>Apply while you are away</h2>
-              <p>When new roles reach the fit threshold, TI-AAA queues one best-fit role per company. One browser applies to them in order and never pauses for your input.</p>
+              <p>When new qualified roles reach the fit threshold, TI-AAA queues one best-fit role per company. One browser applies to them in order and never pauses for your input.</p>
             </div>
             <label class="auto-mode-switch"><input id="autoMode" type="checkbox"><span><i></i><b>Auto mode</b><small id="autoModeState">Off · manual applications only</small></span></label>
             <div class="auto-mode-controls">
@@ -220,12 +220,14 @@
           </article>
           <article class="panel settings-card">
             <p class="kicker">PROFILE</p><h2>About you</h2>
+            <p class="fine-print">Use your complete mailing address so the agent can truthfully select a result in mandatory address-suggestion widgets.</p>
             <div class="field-grid">
               <label>Legal name<input id="fullName" required></label><label>Preferred name<input id="preferredName"></label>
               <label>Email<input id="email" type="email"></label>
-              <label>Phone<input id="phone"></label><label>City<input id="city"></label>
-              <label>State / region<input id="state"></label><label>Country<input id="country"></label>
-              <label>Street address<input id="address"></label><label>Postal code<input id="postalCode"></label>
+              <label>Phone<input id="phone"></label><label>Address line 1<input id="address" autocomplete="address-line1"></label>
+              <label>Address line 2 <span>optional</span><input id="addressLine2" autocomplete="address-line2"></label><label>City<input id="city" autocomplete="address-level2"></label>
+              <label>State / region<input id="state" autocomplete="address-level1"></label><label>ZIP / postal code<input id="postalCode" autocomplete="postal-code"></label>
+              <label>County<input id="county" autocomplete="address-level3"></label><label>Country<input id="country" autocomplete="country-name"></label>
               <label>LinkedIn<input id="linkedin"></label><label>GitHub<input id="github"></label>
               <label>Portfolio<input id="portfolio"></label>
             </div>
@@ -254,6 +256,7 @@
               <label>Terms<input id="terms" placeholder="Summer 2027, Fall 2026"></label>
               <p class="settings-subhead">Qualification facts</p>
               <label>Skills / keywords<input id="skills" placeholder="Python, React, Docker, Java"></label>
+              <label>Previous internship employers<input id="previousInternshipCompanies" placeholder="Amazon, Microsoft"></label>
               <p class="settings-subhead">Strict filters</p>
               <p class="fine-print">These rules always control eligibility, but they never change the qualification score. Leave them blank to accept the curated repository scope.</p>
               <label>Required role words<input id="includeKeywords" placeholder="software, data, machine learning"></label>

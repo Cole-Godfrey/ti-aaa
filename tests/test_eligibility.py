@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.eligibility import evaluate_listing, matches_preferences
 from tiaaa.models import InternshipListing
@@ -82,3 +84,63 @@ def test_any_keyword_means_no_strict_filter(profile, settings) -> None:
     settings["filters"]["allowed_locations"] = ["Anywhere"]
 
     assert evaluate_listing(listing(location="Austin, TX"), profile, settings).eligible
+
+
+@pytest.mark.parametrize(
+    ("role", "reason"),
+    [
+        (
+            "Machine Learning Intern (Master's/PhD)",
+            "requires a master's or doctoral degree not present in the profile",
+        ),
+        (
+            "Research Intern (PhD)",
+            "requires a doctoral degree not present in the profile",
+        ),
+    ],
+)
+def test_advanced_degree_roles_are_hard_qualification_gates(
+    profile, settings, role, reason
+) -> None:
+    result = evaluate_listing(listing(role=role), profile, settings)
+
+    assert result.eligible is False
+    assert result.reason == reason
+
+
+def test_degree_alternatives_and_matching_advanced_degrees_remain_qualified(
+    profile, settings
+) -> None:
+    assert evaluate_listing(
+        listing(role="Software Intern (BS/MS)"), profile, settings
+    ).eligible
+
+    profile["education"]["degree"] = "Master of Science"
+    assert evaluate_listing(
+        listing(role="Machine Learning Intern (MS/PhD)"), profile, settings
+    ).eligible
+
+
+def test_previous_company_intern_roles_require_recorded_experience(
+    profile, settings
+) -> None:
+    restricted = listing(role="Software Intern — Previous Interns Only")
+
+    result = evaluate_listing(restricted, profile, settings)
+    assert result.eligible is False
+    assert result.reason == "restricted to previous or returning interns at this company"
+
+    profile["experience"] = {"previous_internship_companies": ["Acme Corporation"]}
+    assert evaluate_listing(restricted, profile, settings).eligible
+
+
+def test_preferred_previous_internship_experience_is_not_a_hard_gate(
+    profile, settings
+) -> None:
+    result = evaluate_listing(
+        listing(role="Software Intern — Previous internship experience preferred"),
+        profile,
+        settings,
+    )
+
+    assert result.eligible

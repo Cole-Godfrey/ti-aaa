@@ -116,6 +116,18 @@ def test_config_api_stores_write_only_keys_and_web_onboarding_resume(
     path = tmp_path / "tiaaa.db"
     client = TestClient(create_app(path, paths=paths))
     secret = "sk-ant-test-secret-1234"
+    profile["personal"].update(
+        {
+            "address": "123 Pine Street",
+            "address_line_2": "Apt 4",
+            "city": "Seattle",
+            "state": "WA",
+            "county": "King County",
+            "postal_code": "98101",
+            "country": "United States",
+        }
+    )
+    profile["experience"] = {"previous_internship_companies": ["Acme"]}
 
     response = client.put(
         "/api/config",
@@ -126,6 +138,11 @@ def test_config_api_stores_write_only_keys_and_web_onboarding_resume(
     )
     assert response.status_code == 200
     assert secret not in response.text
+    assert response.json()["profile"]["personal"]["address_line_2"] == "Apt 4"
+    assert response.json()["profile"]["personal"]["county"] == "King County"
+    assert response.json()["profile"]["experience"][
+        "previous_internship_companies"
+    ] == ["Acme"]
     assert response.json()["secrets"]["ANTHROPIC_API_KEY"] == {
         "configured": True,
         "suffix": "1234",
@@ -656,6 +673,11 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'id="autoModeMinimumFit"' in index
     assert 'id="autoModeUsePreferences"' in index
     assert 'id="manualAutoSubmit"' in index
+    assert '<th>Qualified</th>' in index
+    assert 'colspan="7"' in index
+    assert 'id="addressLine2"' in index
+    assert 'id="county"' in index
+    assert 'id="previousInternshipCompanies"' in index
     assert "Applications & checkpoints" in index
     assert '<option value="manual_review">Confirm in Agent</option>' in index
     assert 'id="webPushOption" class="web-push-option hidden"' in index
@@ -704,6 +726,7 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'web_push_notifications: checked("autoMode") && checked("webPushNotifications")' in javascript
     assert 'api("/api/dashboard/visit", { method: "POST" })' in javascript
     assert "stopped with a recorded reason" in javascript
+    assert "qualification-mark" in javascript
 
     service_worker = client.get("/sw.js")
     assert service_worker.status_code == 200

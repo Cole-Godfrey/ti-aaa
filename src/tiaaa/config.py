@@ -141,6 +141,10 @@ class AppPaths:
     def web_push_private_key(self) -> Path:
         return self.root / "web-push-private.pem"
 
+    @property
+    def employer_account_key(self) -> Path:
+        return self.root / "employer-account.key"
+
 
 def get_paths(root: Path | str | None = None) -> AppPaths:
     configured = root or os.environ.get("TIAAA_HOME") or (Path.home() / ".tiaaa")

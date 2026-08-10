@@ -239,6 +239,11 @@ tbody tr:hover td { background: rgba(220,255,69,.16); }
 .fit-mark { display: inline-block; min-width: 42px; padding: 5px; text-align: center; border: 1px solid var(--rule); font: 9px var(--data); }
 .fit-mark.good { background: var(--acid); border-color: var(--ink); }
 .fit-mark.warn { color: var(--muted); }
+.qualification-cell { min-width: 155px; }
+.qualification-cell small { max-width: 210px; display: block; margin-top: 4px; color: var(--muted); font-size: 8px; line-height: 1.3; }
+.qualification-mark { display: inline-block; padding: 4px 6px; border: 1px solid var(--ink); font: 8px var(--data); text-transform: uppercase; }
+.qualification-mark.qualified { background: var(--acid); }
+.qualification-mark.unqualified { color: var(--paper); background: var(--signal); border-color: var(--signal); }
 .state-stamp { font: 8px var(--data); text-transform: uppercase; white-space: nowrap; }
 .state-applying, .state-ready, .state-queued { color: var(--blue); }
 .state-applied { color: var(--moss); }
@@ -609,7 +614,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 4
   .latest-table th:nth-child(1), .latest-table td:nth-child(1),
   .latest-table th:nth-child(3), .latest-table td:nth-child(3),
   .latest-table th:nth-child(4), .latest-table td:nth-child(4),
-  .latest-table th:nth-child(5), .latest-table td:nth-child(5) { display: none; }
+  .latest-table th:nth-child(6), .latest-table td:nth-child(6) { display: none; }
   .latest-table .role-cell { min-width: 185px; }
   .latest-table .row-actions { min-width: 120px; padding-inline: 7px; }
   .job-detail-content { padding: 28px 20px 38px; }

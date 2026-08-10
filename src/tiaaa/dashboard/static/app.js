@@ -402,20 +402,27 @@ function renderLatestJobs() {
   const body = element("latestJobsBody");
   element("latestCount").textContent = jobs.length.toLocaleString();
   if (!jobs.length) {
-    body.innerHTML = '<tr><td colspan="6" class="loading">No active listings match this filter.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="loading">No active listings match this filter.</td></tr>';
     element("latestSummary").textContent = "Try another phrase or matching-rule filter.";
     return;
   }
-  body.innerHTML = jobs.map(job => `<tr data-job-id="${job.id}">
+  body.innerHTML = jobs.map(job => {
+    const qualified = job.eligibility === "eligible";
+    const qualificationReason = qualified && job.eligibility_reason === "eligible"
+      ? "Known requirements match"
+      : job.eligibility_reason || "Qualification not evaluated";
+    return `<tr data-job-id="${job.id}">
     <td class="date-cell">${escapeHtml(listingDate(job.posting_date, job.first_seen_at))}</td>
     <td class="role-cell"><button class="row-detail" type="button"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)}</span></button></td>
     <td>${escapeHtml(job.location || "Not listed")}</td>
-    <td><span class="fit-mark ${job.eligibility === "eligible" ? "good" : "warn"}">${escapeHtml(job.fit_score ?? "—")}/10</span></td>
+    <td><span class="fit-mark ${Number(job.fit_score) >= 7 ? "good" : "warn"}">${escapeHtml(job.fit_score ?? "—")}/10</span></td>
+    <td class="qualification-cell"><span class="qualification-mark ${qualified ? "qualified" : "unqualified"}">${qualified ? "Yes" : "No"}</span><small>${escapeHtml(qualificationReason)}</small></td>
     <td><span class="state-stamp state-${escapeHtml(job.pipeline_status)}">${escapeHtml(job.pipeline_status.replaceAll("_", " "))}</span></td>
     <td class="row-actions"><button class="text-button detail-job" type="button">Details</button>${job.availability_status === "manual_only"
       ? `<a class="mini-apply manual-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer">Open manually</a>`
       : `<button class="mini-apply" type="button"${jobActionDisabled(job) ? " disabled" : ""}>${escapeHtml(jobActionLabel(job))}</button>`}</td>
-  </tr>`).join("");
+  </tr>`;
+  }).join("");
   element("latestSummary").textContent = `${jobs.length} active listing${jobs.length === 1 ? "" : "s"} · ordered by repository posting date`;
   body.querySelectorAll(".row-detail, .detail-job").forEach(button => button.addEventListener("click", event => openJobDetail(event.target.closest("tr").dataset.jobId)));
   body.querySelectorAll(".mini-apply").forEach(button => button.addEventListener("click", event => requestJobApplication(event.target.closest("tr").dataset.jobId, button)));
@@ -1096,6 +1103,7 @@ function populateConfiguration(config) {
   const education = profile.education || {};
   const authorization = profile.work_authorization || {};
   const preferences = profile.preferences || {};
+  const experience = profile.experience || {};
   const answers = profile.answers || {};
   const eeo = profile.eeo_voluntary || {};
   const settings = config.settings;
@@ -1106,7 +1114,8 @@ function populateConfiguration(config) {
   setValue("fullName", personal.full_name); setValue("preferredName", personal.preferred_name);
   setValue("email", personal.email); setValue("phone", personal.phone);
   setValue("city", personal.city); setValue("state", personal.state); setValue("country", personal.country);
-  setValue("address", personal.address); setValue("postalCode", personal.postal_code);
+  setValue("address", personal.address); setValue("addressLine2", personal.address_line_2);
+  setValue("postalCode", personal.postal_code); setValue("county", personal.county);
   setValue("linkedin", personal.linkedin_url); setValue("github", personal.github_url); setValue("portfolio", personal.portfolio_url);
   setValue("school", education.school); setValue("degree", education.degree); setValue("major", education.major);
   setValue("graduation", education.graduation_date); setValue("currentYear", education.current_year); setValue("gpa", education.gpa);
@@ -1116,6 +1125,7 @@ function populateConfiguration(config) {
   setValue("roles", joinList(preferences.roles)); setValue("locations", joinList(preferences.locations)); setValue("terms", joinList(preferences.terms));
   const allSkills = Object.values(profile.skills || {}).flatMap(item => Array.isArray(item) ? item : []);
   setValue("skills", [...new Set(allSkills)].join(", "));
+  setValue("previousInternshipCompanies", joinList(experience.previous_internship_companies));
   setValue("includeKeywords", joinList(filters.include_role_keywords)); setValue("excludeKeywords", joinList(filters.exclude_keywords));
   setValue("allowedLocations", joinList(filters.allowed_locations)); setChecked("remoteOnly", filters.remote_only);
   setValue("pollInterval", settings.poll_interval_seconds);
@@ -1150,7 +1160,8 @@ function configurationPayload() {
   Object.assign(profile.personal, {
     full_name: value("fullName"), preferred_name: value("preferredName"), email: value("email"),
     phone: value("phone"), city: value("city"), state: value("state"), country: value("country"),
-    address: value("address"), postal_code: value("postalCode"), linkedin_url: value("linkedin"),
+    address: value("address"), address_line_2: value("addressLine2"), county: value("county"),
+    postal_code: value("postalCode"), linkedin_url: value("linkedin"),
     github_url: value("github"), portfolio_url: value("portfolio"),
   });
   profile.education = profile.education || {};
@@ -1168,6 +1179,8 @@ function configurationPayload() {
     roles: splitList(value("roles")), locations: splitList(value("locations")), terms: splitList(value("terms")), willing_to_relocate: checked("relocate"),
   });
   profile.skills = { keywords: splitList(value("skills")) };
+  profile.experience = profile.experience || {};
+  profile.experience.previous_internship_companies = splitList(value("previousInternshipCompanies"));
   profile.answers = profile.answers || {};
   Object.assign(profile.answers, {
     available_start_date: value("availableStartDate"), how_heard: value("howHeard"),

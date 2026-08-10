@@ -61,6 +61,7 @@ from tiaaa.database import (
     list_resumes,
     live_human_interaction_checkpoint,
     record_dashboard_visit,
+    refresh_qualification_scores,
     set_app_state,
     source_baseline_complete,
     source_status,
@@ -453,6 +454,16 @@ def create_app(
                     if not list_resumes(connection()):
                         raise ValueError("Upload at least one resume before finishing onboarding")
                 set_app_state(connection(), "onboarding_complete", update.onboarding_complete)
+            if update.profile is not None or update.settings is not None:
+                current_settings = load_settings(paths)
+                refresh_qualification_scores(
+                    connection(),
+                    profile=load_profile(paths),
+                    settings=current_settings,
+                    preserve_scores=bool(
+                        current_settings.get("preparation", {}).get("use_llm")
+                    ),
+                )
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if background_service is not None:

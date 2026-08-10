@@ -279,12 +279,13 @@ class AutomationService:
                 "queued": sum(result.queued for result in sync_results),
                 "errors": sum(result.status == "error" for result in sync_results),
             }
-            if not settings.get("preparation", {}).get("use_llm"):
-                refresh_qualification_scores(
-                    connection,
-                    profile=profile,
-                    settings=settings,
-                )
+            use_llm_scores = bool(settings.get("preparation", {}).get("use_llm"))
+            refresh_qualification_scores(
+                connection,
+                profile=profile,
+                settings=settings,
+                preserve_scores=use_llm_scores,
+            )
 
             state = get_app_state(connection)
             prepared = {"prepared": 0, "errors": 0}

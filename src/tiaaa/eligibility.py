@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -61,6 +62,65 @@ def _profile_skill_terms(profile: dict[str, Any]) -> set[str]:
         for token in str(item).strip().casefold().replace("/", " ").split()
         if token
     }
+
+
+def _degree_markers(value: str) -> tuple[bool, bool, bool]:
+    normalized = value.casefold().replace(".", "").replace("'", "").replace("’", "")
+    doctoral = bool(re.search(r"\b(?:phd|doctoral|doctorate)\b", normalized))
+    masters = bool(
+        re.search(
+            r"\b(?:masters?|ms|msc|meng|mba|graduate student)\b",
+            normalized,
+        )
+    )
+    bachelors = bool(
+        re.search(r"\b(?:bachelors?|bs|bsc|ba|undergrad|undergraduate)\b", normalized)
+    )
+    return doctoral, masters, bachelors
+
+
+def _degree_level(value: str) -> int:
+    doctoral, masters, bachelors = _degree_markers(value)
+    return 3 if doctoral else 2 if masters else 1 if bachelors else 0
+
+
+def _required_advanced_degree(value: str) -> int:
+    doctoral, masters, bachelors = _degree_markers(value)
+    if bachelors:
+        return 0
+    if doctoral and masters:
+        return 2
+    if doctoral:
+        return 3
+    return 2 if masters else 0
+
+
+def _requires_previous_company_intern(value: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", value.casefold())
+    return bool(
+        re.search(
+            r"\b(?:former|previous|prior|past|returning)\s+"
+            r"(?:[a-z0-9]+\s+){0,3}interns?\b",
+            normalized,
+        )
+        or re.search(r"\binterns?\s+only\b", normalized)
+    )
+
+
+def _has_previous_internship_at_company(
+    profile: dict[str, Any], company: str
+) -> bool:
+    experience = profile.get("experience", {})
+    if not isinstance(experience, dict):
+        return False
+    company_key = re.sub(r"[^a-z0-9]+", "", company.casefold())
+    for item in _strings(experience.get("previous_internship_companies")):
+        item_key = re.sub(r"[^a-z0-9]+", "", item)
+        if min(len(company_key), len(item_key)) >= 4 and (
+            company_key in item_key or item_key in company_key
+        ):
+            return True
+    return False
 
 
 def matches_preferences(
@@ -189,17 +249,45 @@ def evaluate_listing(
         score += 1
         reasons.append("programming background for a general software role")
 
-    advanced_role = any(marker in role_text for marker in ("phd", "ph.d", "master's", "masters", "mba"))
-    advanced_profile = any(marker in degree_text for marker in ("phd", "ph.d", "master", "mba", "graduate"))
-    if advanced_role and not advanced_profile:
+    required_degree_level = _required_advanced_degree(role_text)
+    profile_degree_level = _degree_level(degree_text)
+    degree_mismatch = bool(
+        required_degree_level and profile_degree_level < required_degree_level
+    )
+    previous_intern_required = _requires_previous_company_intern(role_text)
+    previous_intern_match = _has_previous_internship_at_company(
+        profile, listing.company
+    )
+    if degree_mismatch:
         score -= 4
         reasons.append("advanced-degree requirement does not match the profile")
+    if previous_intern_required:
+        if previous_intern_match:
+            reasons.append("previous internship at this company is recorded")
+        else:
+            score -= 4
+            reasons.append("role is restricted to previous company interns")
 
     score = max(1, min(10, score))
     score_reasoning = "; ".join(reasons)
 
     if listing.closed:
         return Eligibility(False, "listing marked closed", score, score_reasoning)
+    if degree_mismatch:
+        required = "doctoral" if required_degree_level == 3 else "master's or doctoral"
+        return Eligibility(
+            False,
+            f"requires a {required} degree not present in the profile",
+            score,
+            score_reasoning,
+        )
+    if previous_intern_required and not previous_intern_match:
+        return Eligibility(
+            False,
+            "restricted to previous or returning interns at this company",
+            score,
+            score_reasoning,
+        )
 
     authorization = profile.get("work_authorization", {})
     if listing.citizenship_required and not bool(authorization.get("us_citizen")):

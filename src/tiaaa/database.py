@@ -1228,6 +1228,20 @@ def ingest_listings(
                     ),
                 )
             eligibility = evaluate_listing(eligibility_listing, profile, settings)
+            agent_conflict = bool(
+                row is not None
+                and row["apply_reason_code"] == "eligibility_conflict"
+            )
+            if agent_conflict:
+                eligibility = replace(
+                    eligibility,
+                    eligible=False,
+                    reason=str(
+                        row["apply_error"]
+                        or row["eligibility_reason"]
+                        or "Agent found an unmet application requirement"
+                    ),
+                )
 
             if row is None:
                 is_new = not baseline
@@ -1314,7 +1328,7 @@ def ingest_listings(
                     "queued",
                     "ready",
                     "failed",
-                }:
+                } and not (next_status == "failed" and agent_conflict):
                     next_status = "skipped"
                     add_event(connection, job_id, "ineligible", eligibility.reason)
                 elif (
@@ -1477,8 +1491,9 @@ def refresh_qualification_scores(
     *,
     profile: dict[str, Any],
     settings: dict[str, Any],
+    preserve_scores: bool = False,
 ) -> int:
-    """Recompute active heuristic scores without role or location preferences."""
+    """Recompute active qualification gates and, unless requested, heuristic scores."""
 
     rows = connection.execute(
         """
@@ -1524,23 +1539,52 @@ def refresh_qualification_scores(
             citizenship_required=bool(row["citizenship_required"]),
         )
         evaluation = evaluate_listing(listing, profile, settings)
+        agent_conflict = row["apply_reason_code"] == "eligibility_conflict"
+        eligibility = (
+            "ineligible"
+            if agent_conflict
+            else "eligible" if evaluation.eligible else "ineligible"
+        )
+        eligibility_reason = (
+            str(
+                row["apply_error"]
+                or row["eligibility_reason"]
+                or "Agent found an unmet application requirement"
+            )
+            if agent_conflict
+            else evaluation.reason
+        )
+        keep_existing_score = preserve_scores and row["fit_score"] is not None
+        score = int(row["fit_score"]) if keep_existing_score else evaluation.score
+        score_reasoning = (
+            str(row["score_reasoning"] or evaluation.score_reasoning)
+            if keep_existing_score
+            else evaluation.score_reasoning
+        )
+        scored_at = row["scored_at"] if keep_existing_score else now
         connection.execute(
             """
             UPDATE jobs SET eligibility = ?, eligibility_reason = ?,
                             fit_score = ?, score_reasoning = ?, scored_at = ?,
                             updated_at = CASE
-                                WHEN fit_score != ? OR score_reasoning != ? THEN ?
+                                WHEN eligibility != ?
+                                  OR COALESCE(eligibility_reason, '') != ?
+                                  OR COALESCE(fit_score, -1) != ?
+                                  OR COALESCE(score_reasoning, '') != ?
+                                THEN ?
                                 ELSE updated_at END
             WHERE id = ?
             """,
             (
-                "eligible" if evaluation.eligible else "ineligible",
-                evaluation.reason,
-                evaluation.score,
-                evaluation.score_reasoning,
-                now,
-                evaluation.score,
-                evaluation.score_reasoning,
+                eligibility,
+                eligibility_reason,
+                score,
+                score_reasoning,
+                scored_at,
+                eligibility,
+                eligibility_reason,
+                score,
+                score_reasoning,
                 now,
                 row["id"],
             ),
@@ -2513,6 +2557,10 @@ def mark_apply_result(
                             THEN COALESCE(submitted_resume_path, resume_path)
                             ELSE submitted_resume_path END,
                         apply_error = ?, apply_reason_code = ?,
+                        eligibility = CASE WHEN ? = 'eligibility_conflict'
+                            THEN 'ineligible' ELSE eligibility END,
+                        eligibility_reason = CASE WHEN ? = 'eligibility_conflict'
+                            THEN ? ELSE eligibility_reason END,
                         manual_requested = 0, submission_requested = 0,
                         human_control_returned = 0,
                         worker_id = CASE WHEN ? THEN worker_id ELSE NULL END,
@@ -2531,6 +2579,9 @@ def mark_apply_result(
             result,
             None if result == "applied" else detail,
             None if result == "applied" else reason_code,
+            reason_code,
+            reason_code,
+            detail or "Agent found an unmet application requirement",
             int(retain_worker),
             now,
             job_id,

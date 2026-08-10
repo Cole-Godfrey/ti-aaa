@@ -377,10 +377,16 @@ def test_prompt_is_truth_constrained_and_stops_before_submit(
     assert "Do not take a snapshot after each field" in prompt
     assert "Leave optional fields blank" in prompt
     assert "Never wait more than 5 seconds" in prompt
-    assert "Do not create an employer account" in prompt
+    assert "REQUIRED EMPLOYER-ACCOUNT CREDENTIAL" in prompt
+    assert "create" in prompt
+    assert "never use LinkedIn, Facebook, Google" in prompt
+    assert "other 2FA" in prompt
+    assert "address-suggestion widget" in prompt
     assert "`input_type` set to `verification_code`" in prompt
     assert "same open code field" in prompt
-    assert "final Submit, Send, Finish, or Complete application control" in prompt
+    assert "final Submit, Send, Finish, or Complete application control" in " ".join(
+        prompt.split()
+    )
     assert "Distinguish Next/Continue controls" in prompt
     assert "separate submission-only message" in prompt
     assert "must-not-reach-the-agent" not in prompt
