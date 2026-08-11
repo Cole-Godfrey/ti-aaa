@@ -23,6 +23,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Fixed
 
+- package validation now accepts Core Metadata 2.5 emitted by current Hatchling releases
 - the browser agent no longer uses the final Submit control to trigger validation or discover unfinished fields
 - disabled or stuck **Submitting…** states without a receipt now become live human-interaction checkpoints instead of closing an intact application form
 - address suggestion widgets are completed from the candidate's full configured address and checked field by field
