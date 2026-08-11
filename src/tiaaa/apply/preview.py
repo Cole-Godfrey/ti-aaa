@@ -5,10 +5,14 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
+import platform
 import threading
 import time
 from contextlib import suppress
 from pathlib import Path
+from queue import Empty, Full, Queue
+from typing import Any
 
 import httpx
 from websockets.sync.client import connect
@@ -74,6 +78,103 @@ class PreviewFrameHub:
 
 preview_frame_hub = PreviewFrameHub()
 
+_SPECIAL_KEYS: dict[str, tuple[str, int]] = {
+    "Backspace": ("Backspace", 8),
+    "Tab": ("Tab", 9),
+    "Enter": ("Enter", 13),
+    "Escape": ("Escape", 27),
+    "PageUp": ("PageUp", 33),
+    "PageDown": ("PageDown", 34),
+    "End": ("End", 35),
+    "Home": ("Home", 36),
+    "ArrowLeft": ("ArrowLeft", 37),
+    "ArrowUp": ("ArrowUp", 38),
+    "ArrowRight": ("ArrowRight", 39),
+    "ArrowDown": ("ArrowDown", 40),
+    "Delete": ("Delete", 46),
+}
+
+
+def _finite_number(value: Any, *, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("Browser-control coordinate must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or number < minimum or number > maximum:
+        raise ValueError("Browser-control coordinate is outside the allowed range")
+    return number
+
+
+def _normalize_control_action(action: dict[str, Any]) -> dict[str, Any]:
+    """Validate the small input vocabulary accepted by the live browser relay."""
+
+    if not isinstance(action, dict):
+        raise ValueError("Browser-control action must be an object")
+    action_type = str(action.get("type") or "")
+    if action_type == "click":
+        return {
+            "type": action_type,
+            "x": _finite_number(action.get("x"), minimum=0, maximum=1),
+            "y": _finite_number(action.get("y"), minimum=0, maximum=1),
+        }
+    if action_type == "scroll":
+        return {
+            "type": action_type,
+            "x": _finite_number(action.get("x"), minimum=0, maximum=1),
+            "y": _finite_number(action.get("y"), minimum=0, maximum=1),
+            "delta_x": _finite_number(
+                action.get("delta_x", 0), minimum=-1200, maximum=1200
+            ),
+            "delta_y": _finite_number(
+                action.get("delta_y", 0), minimum=-1200, maximum=1200
+            ),
+        }
+    if action_type == "text":
+        value = action.get("text")
+        if not isinstance(value, str) or not value or len(value) > 2000 or "\x00" in value:
+            raise ValueError("Browser-control text is invalid or too long")
+        return {"type": action_type, "text": value}
+    if action_type == "key":
+        key = str(action.get("key") or "")
+        if key not in _SPECIAL_KEYS and key != "SelectAll":
+            raise ValueError("Browser-control key is not allowed")
+        return {"type": action_type, "key": key}
+    raise ValueError("Unknown browser-control action")
+
+
+class BrowserControlHub:
+    """Route validated dashboard input only to a process-local live browser worker."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._controllers: dict[str, Any] = {}
+
+    def register(self, worker_id: str, controller: Any) -> None:
+        with self._lock:
+            self._controllers[worker_id] = controller
+
+    def unregister(self, worker_id: str, controller: Any) -> None:
+        with self._lock:
+            if self._controllers.get(worker_id) is controller:
+                self._controllers.pop(worker_id, None)
+
+    def is_available(self, worker_id: str) -> bool:
+        with self._lock:
+            return worker_id in self._controllers
+
+    def dispatch(self, worker_id: str, action: dict[str, Any]) -> None:
+        with self._lock:
+            controller = self._controllers.get(worker_id)
+        if controller is None:
+            raise ValueError("The live browser is no longer available")
+        controller.enqueue_control(_normalize_control_action(action))
+
+    def clear(self) -> None:
+        with self._lock:
+            self._controllers.clear()
+
+
+browser_control_hub = BrowserControlHub()
+
 
 class PreviewCapture:
     """Stream a browser tab over its loopback-only Chrome DevTools endpoint."""
@@ -96,10 +197,14 @@ class PreviewCapture:
         self._last_persisted_at = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._control_actions: Queue[dict[str, Any]] = Queue(maxsize=256)
+        self._viewport_width = 1280.0
+        self._viewport_height = 900.0
 
     def start(self) -> None:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         preview_frame_hub.set_active(self.worker_id, True)
+        browser_control_hub.register(self.worker_id, self)
         self._thread = threading.Thread(
             target=self._run,
             name=f"tiaaa-preview-{self.port}",
@@ -111,7 +216,108 @@ class PreviewCapture:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3)
+        browser_control_hub.unregister(self.worker_id, self)
         preview_frame_hub.set_active(self.worker_id, False)
+
+    def enqueue_control(self, action: dict[str, Any]) -> None:
+        normalized = _normalize_control_action(action)
+        try:
+            self._control_actions.put_nowait(normalized)
+        except Full as exc:
+            raise ValueError("The live browser input queue is full") from exc
+
+    def _send_control_action(
+        self,
+        websocket: Any,
+        command_id: int,
+        action: dict[str, Any],
+    ) -> int:
+        def send(method: str, params: dict[str, Any]) -> None:
+            nonlocal command_id
+            command_id += 1
+            websocket.send(
+                json.dumps({"id": command_id, "method": method, "params": params})
+            )
+
+        action_type = action["type"]
+        if action_type in {"click", "scroll"}:
+            x = action["x"] * self._viewport_width
+            y = action["y"] * self._viewport_height
+            if action_type == "click":
+                send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+                send(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mousePressed",
+                        "x": x,
+                        "y": y,
+                        "button": "left",
+                        "buttons": 1,
+                        "clickCount": 1,
+                    },
+                )
+                send(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseReleased",
+                        "x": x,
+                        "y": y,
+                        "button": "left",
+                        "buttons": 0,
+                        "clickCount": 1,
+                    },
+                )
+            else:
+                send(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseWheel",
+                        "x": x,
+                        "y": y,
+                        "deltaX": action["delta_x"],
+                        "deltaY": action["delta_y"],
+                    },
+                )
+        elif action_type == "text":
+            send("Input.insertText", {"text": action["text"]})
+        elif action["key"] == "SelectAll":
+            modifier = 4 if platform.system() == "Darwin" else 2
+            for event_type in ("rawKeyDown", "keyUp"):
+                send(
+                    "Input.dispatchKeyEvent",
+                    {
+                        "type": event_type,
+                        "key": "a",
+                        "code": "KeyA",
+                        "windowsVirtualKeyCode": 65,
+                        "nativeVirtualKeyCode": 65,
+                        "modifiers": modifier,
+                    },
+                )
+        else:
+            key = action["key"]
+            code, virtual_key = _SPECIAL_KEYS[key]
+            for event_type in ("rawKeyDown", "keyUp"):
+                send(
+                    "Input.dispatchKeyEvent",
+                    {
+                        "type": event_type,
+                        "key": key,
+                        "code": code,
+                        "windowsVirtualKeyCode": virtual_key,
+                        "nativeVirtualKeyCode": virtual_key,
+                    },
+                )
+        return command_id
+
+    def _drain_control_actions(self, websocket: Any, command_id: int) -> int:
+        for _ in range(64):
+            try:
+                action = self._control_actions.get_nowait()
+            except Empty:
+                break
+            command_id = self._send_control_action(websocket, command_id, action)
+        return command_id
 
     def _page_websocket(self) -> str | None:
         response = httpx.get(f"http://127.0.0.1:{self.port}/json/list", timeout=2)
@@ -166,8 +372,9 @@ class PreviewCapture:
             started = False
             command_id = 1
             while not self._stop.is_set():
+                command_id = self._drain_control_actions(websocket, command_id)
                 try:
-                    message = json.loads(websocket.recv(timeout=0.75))
+                    message = json.loads(websocket.recv(timeout=0.25))
                 except TimeoutError:
                     continue
                 if message.get("id") == 1:
@@ -182,6 +389,13 @@ class PreviewCapture:
                 params = message.get("params") or {}
                 encoded = params.get("data")
                 session_id = params.get("sessionId")
+                metadata = params.get("metadata") or {}
+                width = metadata.get("deviceWidth")
+                height = metadata.get("deviceHeight")
+                if isinstance(width, (int, float)) and 1 <= width <= 10000:
+                    self._viewport_width = float(width)
+                if isinstance(height, (int, float)) and 1 <= height <= 10000:
+                    self._viewport_height = float(height)
                 now = time.monotonic()
                 if encoded and now - self._last_frame_at >= self.frame_interval:
                     self._publish_encoded_frame(str(encoded), throttle_disk=True)

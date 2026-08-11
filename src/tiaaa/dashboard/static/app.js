@@ -28,7 +28,7 @@ const viewCopy = {
   latest: ["DESK / 02", "Repository inbox", "Inspect current internship listings, open a dossier, and choose what the agent works on."],
   applications: ["DESK / 03", "Application register", "A spreadsheet-style record of submitted applications, resumes, and outcomes."],
   analytics: ["DESK / 04", "Response notebook", "Compare application outcomes across resumes, roles, sources, locations, and portals."],
-  live: ["DESK / 05", "Agent wire", "Watch the browser and the serial application queue without keeping this page open."],
+  live: ["DESK / 05", "Agent wire", "Watch the browser, handle live checkpoints, and follow the serial application queue."],
   resumes: ["DESK / 06", "Fact archive", "Original resumes the agent compares, selects, and submits without rewriting."],
   settings: ["DESK / 07", "Operating rules", "Change polling, matching, and application boundaries."],
 };
@@ -402,20 +402,27 @@ function renderLatestJobs() {
   const body = element("latestJobsBody");
   element("latestCount").textContent = jobs.length.toLocaleString();
   if (!jobs.length) {
-    body.innerHTML = '<tr><td colspan="6" class="loading">No active listings match this filter.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="loading">No active listings match this filter.</td></tr>';
     element("latestSummary").textContent = "Try another phrase or matching-rule filter.";
     return;
   }
-  body.innerHTML = jobs.map(job => `<tr data-job-id="${job.id}">
+  body.innerHTML = jobs.map(job => {
+    const qualified = job.eligibility === "eligible";
+    const qualificationReason = qualified && job.eligibility_reason === "eligible"
+      ? "Known requirements match"
+      : job.eligibility_reason || "Qualification not evaluated";
+    return `<tr data-job-id="${job.id}">
     <td class="date-cell">${escapeHtml(listingDate(job.posting_date, job.first_seen_at))}</td>
     <td class="role-cell"><button class="row-detail" type="button"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)}</span></button></td>
     <td>${escapeHtml(job.location || "Not listed")}</td>
-    <td><span class="fit-mark ${job.eligibility === "eligible" ? "good" : "warn"}">${escapeHtml(job.fit_score ?? "—")}/10</span></td>
+    <td><span class="fit-mark ${Number(job.fit_score) >= 7 ? "good" : "warn"}">${escapeHtml(job.fit_score ?? "—")}/10</span></td>
+    <td class="qualification-cell"><span class="qualification-mark ${qualified ? "qualified" : "unqualified"}">${qualified ? "Yes" : "No"}</span><small>${escapeHtml(qualificationReason)}</small></td>
     <td><span class="state-stamp state-${escapeHtml(job.pipeline_status)}">${escapeHtml(job.pipeline_status.replaceAll("_", " "))}</span></td>
     <td class="row-actions"><button class="text-button detail-job" type="button">Details</button>${job.availability_status === "manual_only"
       ? `<a class="mini-apply manual-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer">Open manually</a>`
       : `<button class="mini-apply" type="button"${jobActionDisabled(job) ? " disabled" : ""}>${escapeHtml(jobActionLabel(job))}</button>`}</td>
-  </tr>`).join("");
+  </tr>`;
+  }).join("");
   element("latestSummary").textContent = `${jobs.length} active listing${jobs.length === 1 ? "" : "s"} · ordered by repository posting date`;
   body.querySelectorAll(".row-detail, .detail-job").forEach(button => button.addEventListener("click", event => openJobDetail(event.target.closest("tr").dataset.jobId)));
   body.querySelectorAll(".mini-apply").forEach(button => button.addEventListener("click", event => requestJobApplication(event.target.closest("tr").dataset.jobId, button)));
@@ -691,21 +698,69 @@ function renderWorkers(items) {
     message: worker.message,
     preview_available: worker.preview_available,
     stream_active: worker.stream_active,
+    browser_interactive: worker.browser_interactive,
     updated_at: worker.updated_at,
   })));
   if (signature !== state.workerSignature) {
     state.workerSignature = signature;
-    element("workerGrid").innerHTML = items.length ? items.map(worker => `
-      <article class="worker-card"><div class="worker-head"><div class="worker-title"><strong>${escapeHtml(worker.company || worker.worker_id)}</strong><span>${escapeHtml(worker.role || "Waiting for a prepared application")}</span></div>
+    element("workerGrid").innerHTML = items.length ? items.map(worker => {
+      const interactive = Boolean(worker.browser_interactive);
+      return `
+      <article class="worker-card${interactive ? " human-control" : ""}"><div class="worker-head"><div class="worker-title"><strong>${escapeHtml(worker.company || worker.worker_id)}</strong><span>${escapeHtml(worker.role || "Waiting for a prepared application")}</span></div>
         <span class="worker-state ${escapeHtml(worker.status)}">${escapeHtml(worker.status)}</span></div>
-        <div class="preview-frame" data-preview-frame="${escapeHtml(worker.worker_id)}">
-          <canvas data-preview-canvas="${escapeHtml(worker.worker_id)}" aria-label="Live local browser view for ${escapeHtml(worker.worker_id)}"></canvas>
+        <div class="preview-frame${interactive ? " interactive" : ""}" data-preview-frame="${escapeHtml(worker.worker_id)}">
+          <canvas data-preview-canvas="${escapeHtml(worker.worker_id)}"${interactive ? ` data-browser-control="${escapeHtml(worker.worker_id)}" tabindex="0"` : ""} aria-label="${interactive ? "Interactive" : "Live"} local browser view for ${escapeHtml(worker.worker_id)}"></canvas>
           <p class="preview-empty">The live browser view appears here when a worker starts.</p>
         </div>
-        <p class="worker-message">${escapeHtml(worker.message || "Waiting for the next cycle")}</p></article>`).join("") : '<div class="empty tall">No browser worker has run yet. Enable browser automation in Settings, or keep watch-and-prepare mode.</div>';
+        ${interactive ? `<div class="browser-control-bar"><div><strong>YOU HAVE CONTROL OF THIS BROWSER</strong><span>Click the page, type or paste into the focused field, and scroll here. This is the agent's exact retained tab—not a new job link.</span></div><button class="button ink return-browser-control" type="button" data-return-browser-control="${worker.job_id}">Continue agent</button></div>` : ""}
+        <p class="worker-message">${escapeHtml(worker.message || "Waiting for the next cycle")}</p></article>`;
+    }).join("") : '<div class="empty tall">No browser worker has run yet. Enable browser automation in Settings, or keep watch-and-prepare mode.</div>';
   }
   syncPreviewStreams(items);
   renderAgentInputs(items);
+}
+
+function sendBrowserControl(canvas, action) {
+  const record = state.previewSockets.get(canvas.dataset.browserControl);
+  if (!record || record.socket.readyState !== WebSocket.OPEN) {
+    showToast("The live browser control channel is reconnecting", true);
+    return;
+  }
+  record.socket.send(JSON.stringify(action));
+}
+
+function browserControlPoint(canvas, event) {
+  const bounds = canvas.getBoundingClientRect();
+  const sourceWidth = Number(canvas.width);
+  const sourceHeight = Number(canvas.height);
+  if (!bounds.width || !bounds.height || !sourceWidth || !sourceHeight
+      || !canvas.closest(".preview-frame")?.classList.contains("has-frame")) return null;
+  const scale = Math.min(bounds.width / sourceWidth, bounds.height / sourceHeight);
+  const renderedWidth = sourceWidth * scale;
+  const renderedHeight = sourceHeight * scale;
+  const offsetX = (bounds.width - renderedWidth) / 2;
+  const offsetY = (bounds.height - renderedHeight) / 2;
+  const localX = event.clientX - bounds.left - offsetX;
+  const localY = event.clientY - bounds.top - offsetY;
+  if (localX < 0 || localX > renderedWidth || localY < 0 || localY > renderedHeight) return null;
+  return {
+    x: Math.max(0, Math.min(1, localX / renderedWidth)),
+    y: Math.max(0, Math.min(1, localY / renderedHeight)),
+  };
+}
+
+async function returnBrowserControl(button) {
+  button.disabled = true;
+  try {
+    await api(`/api/jobs/${button.dataset.returnBrowserControl}/continue-agent`, { method: "POST" });
+    state.workerSignature = null;
+    state.agentInputSignature = null;
+    showToast("Control returned; the agent is inspecting this same page");
+    await refreshLive();
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
 }
 
 function renderApplicationQueue(items, summary = {}) {
@@ -732,6 +787,8 @@ function renderApplicationQueue(items, summary = {}) {
   list.innerHTML = items.map(item => {
     const statusLabel = item.queue_state === "active" && item.worker_status === "review_ready"
       ? "Confirm submit"
+      : item.queue_state === "active" && item.worker_status === "captcha"
+        ? "Your control"
       : item.queue_state === "active" && item.worker_status === "needs_review"
         ? "Needs input"
         : stateLabels[item.queue_state] || "Waiting";
@@ -785,6 +842,7 @@ function renderAgentInputs(workers) {
     review_detail: worker.review_detail,
     questions: worker.questions,
     submission_ready: worker.submission_ready,
+    browser_interactive: worker.browser_interactive,
   })));
   if (signature === state.agentInputSignature) return;
   state.agentInputSignature = signature;
@@ -796,6 +854,12 @@ function renderAgentInputs(workers) {
   panel.innerHTML = actionable.map(worker => {
     const questions = worker.questions || [];
     const resumeName = worker.submitted_resume_name || worker.base_resume_name || "Prepared resume";
+    if (worker.browser_interactive) {
+      return `<article class="agent-checkpoint human-checkpoint">
+        <header><div><p class="kicker">LIVE BROWSER CONTROL</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>Same session</span></header>
+        <p class="checkpoint-note">Use the interactive browser above to complete the CAPTCHA or inspect the stalled submission. Click Continue agent only after the challenge is cleared or a receipt is visible.</p>
+      </article>`;
+    }
     if (questions.length && worker.availability_status !== "manual_only") {
       const verificationCodeRequested = questions.some(question => question.input_type === "verification_code");
       const checkpointTitle = verificationCodeRequested ? "VERIFICATION CODE NEEDED" : "CANDIDATE INPUT NEEDED";
@@ -1039,6 +1103,7 @@ function populateConfiguration(config) {
   const education = profile.education || {};
   const authorization = profile.work_authorization || {};
   const preferences = profile.preferences || {};
+  const experience = profile.experience || {};
   const answers = profile.answers || {};
   const eeo = profile.eeo_voluntary || {};
   const settings = config.settings;
@@ -1049,7 +1114,8 @@ function populateConfiguration(config) {
   setValue("fullName", personal.full_name); setValue("preferredName", personal.preferred_name);
   setValue("email", personal.email); setValue("phone", personal.phone);
   setValue("city", personal.city); setValue("state", personal.state); setValue("country", personal.country);
-  setValue("address", personal.address); setValue("postalCode", personal.postal_code);
+  setValue("address", personal.address); setValue("addressLine2", personal.address_line_2);
+  setValue("postalCode", personal.postal_code); setValue("county", personal.county);
   setValue("linkedin", personal.linkedin_url); setValue("github", personal.github_url); setValue("portfolio", personal.portfolio_url);
   setValue("school", education.school); setValue("degree", education.degree); setValue("major", education.major);
   setValue("graduation", education.graduation_date); setValue("currentYear", education.current_year); setValue("gpa", education.gpa);
@@ -1059,6 +1125,7 @@ function populateConfiguration(config) {
   setValue("roles", joinList(preferences.roles)); setValue("locations", joinList(preferences.locations)); setValue("terms", joinList(preferences.terms));
   const allSkills = Object.values(profile.skills || {}).flatMap(item => Array.isArray(item) ? item : []);
   setValue("skills", [...new Set(allSkills)].join(", "));
+  setValue("previousInternshipCompanies", joinList(experience.previous_internship_companies));
   setValue("includeKeywords", joinList(filters.include_role_keywords)); setValue("excludeKeywords", joinList(filters.exclude_keywords));
   setValue("allowedLocations", joinList(filters.allowed_locations)); setChecked("remoteOnly", filters.remote_only);
   setValue("pollInterval", settings.poll_interval_seconds);
@@ -1093,7 +1160,8 @@ function configurationPayload() {
   Object.assign(profile.personal, {
     full_name: value("fullName"), preferred_name: value("preferredName"), email: value("email"),
     phone: value("phone"), city: value("city"), state: value("state"), country: value("country"),
-    address: value("address"), postal_code: value("postalCode"), linkedin_url: value("linkedin"),
+    address: value("address"), address_line_2: value("addressLine2"), county: value("county"),
+    postal_code: value("postalCode"), linkedin_url: value("linkedin"),
     github_url: value("github"), portfolio_url: value("portfolio"),
   });
   profile.education = profile.education || {};
@@ -1111,6 +1179,8 @@ function configurationPayload() {
     roles: splitList(value("roles")), locations: splitList(value("locations")), terms: splitList(value("terms")), willing_to_relocate: checked("relocate"),
   });
   profile.skills = { keywords: splitList(value("skills")) };
+  profile.experience = profile.experience || {};
+  profile.experience.previous_internship_companies = splitList(value("previousInternshipCompanies"));
   profile.answers = profile.answers || {};
   Object.assign(profile.answers, {
     available_start_date: value("availableStartDate"), how_heard: value("howHeard"),
@@ -1363,6 +1433,63 @@ element("jobDetailScrim").addEventListener("click", event => {
   if (event.target === event.currentTarget) closeJobDetail();
 });
 element("applyJobButton").addEventListener("click", event => requestJobApplication(event.currentTarget.dataset.jobId, event.currentTarget));
+const workerGrid = element("workerGrid");
+const remoteBrowserKeys = new Set([
+  "Backspace", "Tab", "Enter", "Escape", "PageUp", "PageDown", "End", "Home",
+  "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Delete",
+]);
+workerGrid.addEventListener("pointerdown", event => {
+  const canvas = event.target.closest("canvas[data-browser-control]");
+  if (canvas) canvas.focus();
+});
+workerGrid.addEventListener("click", event => {
+  const returnButton = event.target.closest("[data-return-browser-control]");
+  if (returnButton) {
+    returnBrowserControl(returnButton);
+    return;
+  }
+  const canvas = event.target.closest("canvas[data-browser-control]");
+  if (!canvas) return;
+  event.preventDefault();
+  const point = browserControlPoint(canvas, event);
+  if (point) sendBrowserControl(canvas, { type: "click", ...point });
+});
+workerGrid.addEventListener("keydown", event => {
+  const canvas = event.target.closest("canvas[data-browser-control]");
+  if (!canvas) return;
+  let action = null;
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+    action = { type: "key", key: "SelectAll" };
+  } else if (!event.ctrlKey && !event.metaKey && !event.altKey && remoteBrowserKeys.has(event.key)) {
+    action = { type: "key", key: event.key };
+  } else if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
+    action = { type: "text", text: event.key };
+  }
+  if (!action) return;
+  event.preventDefault();
+  event.stopPropagation();
+  sendBrowserControl(canvas, action);
+});
+workerGrid.addEventListener("paste", event => {
+  const canvas = event.target.closest("canvas[data-browser-control]");
+  const text = event.clipboardData?.getData("text");
+  if (!canvas || !text) return;
+  event.preventDefault();
+  sendBrowserControl(canvas, { type: "text", text: text.slice(0, 2000) });
+});
+workerGrid.addEventListener("wheel", event => {
+  const canvas = event.target.closest("canvas[data-browser-control]");
+  if (!canvas) return;
+  event.preventDefault();
+  const point = browserControlPoint(canvas, event);
+  if (!point) return;
+  sendBrowserControl(canvas, {
+    type: "scroll",
+    ...point,
+    delta_x: Math.max(-1200, Math.min(1200, event.deltaX)),
+    delta_y: Math.max(-1200, Math.min(1200, event.deltaY)),
+  });
+}, { passive: false });
 document.addEventListener("keydown", event => { if (event.key === "Escape") { closeJobDetail(); closeWelcomeBack(); } });
 element("runButton").addEventListener("click", async () => {
   try { await api("/api/service/run", { method: "POST" }); showToast("Repository check scheduled"); }

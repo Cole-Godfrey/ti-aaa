@@ -21,6 +21,8 @@ TI-AAA reads these repositories:
 - Automatic apply considers only jobs that arrive after the baseline.
 - The default automatic fit limit is 7 out of 10.
 - The fit score measures candidate qualifications. It does not use role or location preferences.
+- The **Qualified** decision is a separate hard gate for degree, prior-intern, authorization, and
+  configured requirements. Auto mode never claims a job marked **Not qualified**.
 - Strict role, location, and authorization rules can stop an application. They do not change the fit score.
 - You can use preferences as an extra automatic application rule. This rule is off by default.
 - Auto mode applies to one best-fit role for each company.
@@ -38,7 +40,7 @@ TI-AAA reads these repositories:
 
 - A local web app with guided setup
 - An always-on Docker service
-- A latest-jobs table with search and job details
+- A latest-jobs table with search, qualification status and reasons, and job details
 - Manual and automatic application modes
 - A separate fit limit for automatic applications
 - An optional preference gate for automatic applications
@@ -48,6 +50,7 @@ TI-AAA reads these repositories:
 - Multiple resumes with job-specific selection
 - Byte-preserved application resume copies
 - A live view of the browser worker
+- Same-session browser control for manual CAPTCHA checkpoints—click, type, paste, and scroll without opening a second browser
 - Input fields for agent questions
 - A one-time-code input that continues the same open application and clears the code after use
 - Final submission confirmation on the live completed form
@@ -90,6 +93,11 @@ Complete these setup tasks:
 
 Use **Connect Claude account** with a Claude Pro or Max account. You do not need an Anthropic API key for this method. An Anthropic API key is an optional alternative.
 
+Enter your complete mailing address in **Settings**, including address line 1, ZIP/postal code,
+city, state/region, county, and country. Address-suggestion forms cannot be completed truthfully from
+city and state alone. If you have interned at an employer before, also list it under **Previous
+internship employers** so returning-intern roles can be qualified correctly.
+
 Claude subscription login is a Claude Code compatibility path. Anthropic may change or discontinue subscription login for this workflow in the future; if it stops working, use `ANTHROPIC_API_KEY` instead.
 
 The first repository check creates the baseline. You can close the dashboard after setup. The Docker service continues to poll.
@@ -106,7 +114,12 @@ Open **Settings**. Use these controls:
 - **Daily application cap** limits submissions for one day.
 - **Per-cycle cap** limits one poll cycle.
 
-Auto mode submits one best-fit role for each company. It does not ask for user input. If a required personal fact is not available, it stops the application and adds the reason to the next welcome-back summary. Manual **Apply** actions ignore the automatic fit limit.
+Auto mode submits one best-fit qualified role for each company. It does not ask for user input. Jobs
+whose titles explicitly require a higher degree or prior internship at that company are marked **Not
+qualified** before application. If the employer page later reveals another unmet hard requirement,
+the agent records that reason and the job remains excluded from Auto mode. If a required personal fact
+is not available, it stops the application and adds the reason to the next welcome-back summary.
+Manual **Apply** actions ignore the automatic fit limit.
 
 Browser alerts work on `localhost` and use the browser's Web Push service. TI-AAA creates and stores the required keys in its private data volume. It does not ask you to configure a notification account or key.
 
@@ -114,7 +127,14 @@ Browser alerts work on `localhost` and use the browser's Web Push service. TI-AA
 
 Open **Latest jobs**. Select a job, then select **Apply**. Open **Agent** to watch the browser and answer factual questions or paste a one-time verification code if an employer sends one. By default, review the completed form and select **Submit application**. If **Auto-submit manually selected applications** is enabled, the agent submits after completing the form without this second confirmation.
 
+If an employer requires an ordinary email/password careers account, the agent creates it with the
+profile email and a stable password unique to that careers portal. TI-AAA derives that password from a
+private installation key; it does not reuse one shared password or store the generated plaintext.
+Email/SMS codes and other 2FA still pause the account flow. Social sign-in is not automated.
+
 The manual action does not require automatic apply. It also does not use the automatic fit limit.
+
+If the employer presents a CAPTCHA—or Submit stays disabled on **Submitting…** without producing a receipt—the manual application pauses with the exact Chromium tab still open. In **Agent**, use the live canvas to click the challenge, focus and type or paste into fields, and scroll. Select **Continue agent** when the challenge is clear or a receipt is visible. TI-AAA then inspects and continues that same page; it does not send you to a fresh job link or browser where the form state could be lost. Auto mode remains unattended and records CAPTCHA checkpoints as stopped attempts.
 
 If a **Confirm in Agent** checkpoint needs to start over, open **Applications** and select **Retry**. TI-AAA closes any retained live form, clears pending checkpoint inputs, and queues a fresh browser attempt.
 
@@ -317,7 +337,8 @@ These secrets are optional:
 - Native mode stores data in `~/.tiaaa`.
 - TI-AAA has no developer-operated server and sends no product telemetry.
 - Repository sync sends requests to GitHub. A configured `GITHUB_TOKEN` is sent only to GitHub.
-- Claude browser automation receives the selected resume text, candidate profile, prepared answers, and job metadata. It interacts with the employer site, which receives the fields and files entered for that application.
+- Claude browser automation receives the selected resume text, candidate profile, prepared answers, job metadata, and the generated per-portal account password. It interacts with the employer site, which receives the fields, files, and account credential entered for that application.
+- During a manual CAPTCHA checkpoint, dashboard mouse and keyboard actions travel only through the local same-origin WebSocket to the retained Chromium tab. TI-AAA does not expose a remote navigation command or send the application URL to another browser.
 - A one-time code entered in **Agent** passes through the active Claude browser session to the employer's code field. TI-AAA clears the stored local answer after that browser turn.
 - Optional OpenAI, Gemini, or custom LLM preparation sends resume text and job metadata to the provider you configure.
 - Optional Web Push sends the company and role in an encrypted notification through your browser vendor's push service.
@@ -329,8 +350,8 @@ These secrets are optional:
 - Manual applications ask for unknown, ordinary candidate facts and can pause for a one-time code sent to the candidate's configured email address or phone.
 - Auto mode does not ask for input. A missing required personal fact stops that application and is recorded.
 - Auto mode can answer subjective questions and compensation questions without inventing candidate facts.
-- One-time verification codes can be entered in the local Agent view and are cleared after the browser turn uses them. CAPTCHA, SSO, non-code MFA, assessments, and identity checks require a manual handoff.
-- Employer account creation and passwords require manual action; TI-AAA does not store or send an application-site password.
+- One-time verification codes can be entered in the local Agent view and are cleared after the browser turn uses them. CAPTCHAs can be completed by the candidate in the retained live browser; TI-AAA does not solve or bypass them. Social SSO, non-code MFA, assessments, and identity checks still require a manual handoff.
+- Required ordinary employer accounts use the candidate email and a deterministic password unique to the careers-portal hostname. The private derivation key is stored with local user-only permissions; the generated plaintext password is sent to the browser agent when needed but is not stored.
 - The agent refuses payment, bank, government ID, and biometric requests.
 - Application limits stay active in automatic mode.
 

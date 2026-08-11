@@ -27,6 +27,7 @@ from tiaaa.database import (
     recover_stale_work,
     refresh_qualification_scores,
     request_final_submission,
+    request_human_control_return,
     request_manual_application,
     retry_manual_application,
     set_app_state,
@@ -184,6 +185,24 @@ class AutomationService:
         self._wake.set()
         return job
 
+    def return_browser_control(self, job_id: int) -> dict[str, Any]:
+        """Tell a retained CAPTCHA session that candidate interaction is complete."""
+
+        connection = get_connection(self.db_path)
+        if bool(get_app_state(connection).get("service_paused")):
+            raise RuntimeError("Resume the background service before returning browser control")
+        job = request_human_control_return(connection, job_id)
+        if job is None:
+            raise LookupError("Job not found")
+        set_app_state(connection, "service_status", "applying")
+        set_app_state(
+            connection,
+            "service_message",
+            f"Resuming application for {job['company']} · {job['role']}",
+        )
+        self._wake.set()
+        return job
+
     def snapshot(self) -> dict[str, Any]:
         state = get_app_state(get_connection(self.db_path))
         state["process_running"] = self.running
@@ -260,12 +279,13 @@ class AutomationService:
                 "queued": sum(result.queued for result in sync_results),
                 "errors": sum(result.status == "error" for result in sync_results),
             }
-            if not settings.get("preparation", {}).get("use_llm"):
-                refresh_qualification_scores(
-                    connection,
-                    profile=profile,
-                    settings=settings,
-                )
+            use_llm_scores = bool(settings.get("preparation", {}).get("use_llm"))
+            refresh_qualification_scores(
+                connection,
+                profile=profile,
+                settings=settings,
+                preserve_scores=use_llm_scores,
+            )
 
             state = get_app_state(connection)
             prepared = {"prepared": 0, "errors": 0}

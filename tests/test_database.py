@@ -17,18 +17,23 @@ from tiaaa.database import (
     get_analytics,
     get_job,
     get_stats,
+    human_control_returned,
     ingest_listings,
     init_db,
     list_agent_inputs,
     list_application_queue,
     list_jobs,
+    live_human_interaction_checkpoint,
     live_submission_checkpoint,
     mark_apply_result,
     mark_prepared,
     reconcile_source_registry,
     recover_stale_work,
+    refresh_qualification_scores,
     request_final_submission,
+    request_human_control_return,
     request_manual_application,
+    resume_application_after_human_control,
     resume_application_after_input,
     resume_application_for_submission,
     retry_manual_application,
@@ -144,7 +149,7 @@ def test_service_restart_releases_a_stale_manual_review_session(
     connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'manual_review', worker_id = 'worker-0',
-                        submission_requested = 1
+                        submission_requested = 1, human_control_returned = 1
         WHERE id = 1
         """
     )
@@ -160,6 +165,7 @@ def test_service_restart_releases_a_stale_manual_review_session(
     assert recovered["pipeline_status"] == "manual_review"
     assert recovered["worker_id"] is None
     assert recovered["submission_requested"] == 0
+    assert recovered["human_control_returned"] == 0
     assert request_manual_application(connection, 1)["pipeline_status"] == "queued"
     close_connection(path)
 
@@ -188,6 +194,65 @@ def test_manual_request_cannot_replace_a_live_review_session(
         assert "already manual review" in str(exc)
     else:
         raise AssertionError("A live review session must not be replaced")
+    close_connection(path)
+
+
+def test_human_captcha_checkpoint_retains_and_resumes_the_same_worker(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "human-captcha.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(
+        source,
+        "Capula",
+        "Trading and Research Intern",
+        "https://jobs.test/capula",
+    )
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'applying', worker_id = 'worker-0' WHERE id = 1"
+    )
+    connection.commit()
+    mark_apply_result(
+        connection,
+        1,
+        "captcha",
+        "Submit is stuck on Submitting with no receipt",
+        reason_code="captcha",
+        retain_worker=True,
+    )
+    update_worker_state(
+        connection,
+        "worker-0",
+        status="captcha",
+        job=get_job(connection, 1),
+    )
+
+    assert live_human_interaction_checkpoint(connection, 1, "worker-0") is True
+    with pytest.raises(ValueError, match="already manual review"):
+        request_manual_application(connection, 1)
+
+    returned = request_human_control_return(connection, 1)
+
+    assert returned is not None
+    assert returned["human_control_returned"] == 1
+    assert human_control_returned(connection, 1, "worker-0") is True
+    with pytest.raises(ValueError, match="already been returned"):
+        request_human_control_return(connection, 1)
+    assert resume_application_after_human_control(
+        connection, 1, "worker-0"
+    ) is True
+    resumed = get_job(connection, 1)
+    assert resumed["pipeline_status"] == "applying"
+    assert resumed["worker_id"] == "worker-0"
+    assert resumed["human_control_returned"] == 0
+    assert resumed["apply_error"] is None
+    assert resumed["apply_reason_code"] is None
+    event = connection.execute(
+        "SELECT event_type FROM events WHERE job_id = 1 ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert event["event_type"] == "agent_resumed_after_human_control"
     close_connection(path)
 
 
@@ -870,6 +935,84 @@ def test_application_claim_rejects_inactive_and_ineligible_jobs(
 
     assert claimable_application_count(connection, max_attempts=3) == 0
     assert claim_next_job(connection, worker_id="worker-0", max_attempts=3) is None
+    close_connection(path)
+
+
+def test_agent_discovered_qualification_conflict_persists_and_blocks_auto_apply(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "agent-qualification-conflict.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    job = make_listing(source, "Acme", "Research Intern", "https://jobs.test/research")
+    ingest_listings(
+        connection, source, [job], profile=profile, settings=settings, include_existing=True
+    )
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'ready', discovered_as_new = 1 WHERE id = 1"
+    )
+    connection.commit()
+
+    detail = "Applicants must have previously interned at Acme"
+    mark_apply_result(
+        connection,
+        1,
+        "failed",
+        detail,
+        reason_code="eligibility_conflict",
+    )
+    ingest_listings(connection, source, [job], profile=profile, settings=settings)
+    refresh_qualification_scores(connection, profile=profile, settings=settings)
+
+    row = get_job(connection, 1)
+    assert row is not None
+    assert row["eligibility"] == "ineligible"
+    assert row["eligibility_reason"] == detail
+    assert row["pipeline_status"] == "failed"
+    assert row["apply_reason_code"] == "eligibility_conflict"
+    assert claimable_application_count(connection, max_attempts=3) == 0
+    close_connection(path)
+
+
+def test_qualification_refresh_preserves_llm_fit_while_updating_hard_gate(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "qualification-refresh.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    job = make_listing(
+        source,
+        "Acme",
+        "Research Intern (PhD)",
+        "https://jobs.test/phd-research",
+    )
+    ingest_listings(connection, source, [job], profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs SET eligibility = 'eligible', eligibility_reason = 'old',
+                        fit_score = 9, score_reasoning = 'LLM score',
+                        scored_at = '2026-08-10T00:00:00+00:00'
+        WHERE id = 1
+        """
+    )
+    connection.commit()
+
+    refresh_qualification_scores(
+        connection,
+        profile=profile,
+        settings=settings,
+        preserve_scores=True,
+    )
+
+    row = get_job(connection, 1)
+    assert row is not None
+    assert row["eligibility"] == "ineligible"
+    assert row["eligibility_reason"] == (
+        "requires a doctoral degree not present in the profile"
+    )
+    assert row["fit_score"] == 9
+    assert row["score_reasoning"] == "LLM score"
+    assert row["scored_at"] == "2026-08-10T00:00:00+00:00"
     close_connection(path)
 
 

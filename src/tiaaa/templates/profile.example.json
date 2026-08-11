@@ -5,8 +5,10 @@
     "email": "you@example.com",
     "phone": "+1 555 123 4567",
     "address": "",
+    "address_line_2": "",
     "city": "",
     "state": "",
+    "county": "",
     "country": "United States",
     "postal_code": "",
     "linkedin_url": "",
@@ -37,6 +39,9 @@
     "languages": ["Python", "Java", "JavaScript"],
     "frameworks": ["React", "FastAPI"],
     "tools": ["Git", "Docker"]
+  },
+  "experience": {
+    "previous_internship_companies": []
   },
   "answers": {
     "age_18_or_older": true,

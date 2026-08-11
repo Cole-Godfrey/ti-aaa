@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from tiaaa.config import AppPaths
+from tiaaa.credentials import application_account_password
 from tiaaa.resumes import candidate_resume_filename
 
 
@@ -81,8 +82,50 @@ def build_submission_prompt() -> str:
 7. If the completed form or live site session is gone, return FAILED. Do not restart the application.
 8. If a new required factual field or one-time verification-code field appears, return NEEDS_REVIEW
    under the original accuracy rules.
+9. If Submit remains disabled or stuck on Submitting for at least 10 seconds with the completed form
+   intact and no receipt, do not click it repeatedly. An invisible anti-bot challenge may be blocking
+   the request; leave the page open and return CAPTCHA so the candidate can take control in TI-AAA.
 """
     )
+
+
+def build_human_control_prompt(
+    *,
+    submission_authorized: bool,
+    submission_started: bool,
+) -> str:
+    """Resume after the candidate interacted with the exact retained browser tab."""
+
+    if submission_started:
+        next_step = (
+            "A final submission attempt had already begun before control was handed over. If a visible "
+            "receipt is now present, return APPLIED. Otherwise re-audit the current form and use only "
+            "the remaining final action once after the human-resolved blocker is gone."
+        )
+    elif submission_authorized:
+        next_step = (
+            "Final submission is authorized, but remain in the completion-and-review stage. Do not "
+            "click the final Submit action in this turn. Return REVIEW_READY after a clean audit; "
+            "TI-AAA will send the separate submission-only turn."
+        )
+    else:
+        next_step = (
+            "You still do not have permission to click the final Submit action. If the candidate "
+            "personally submitted while controlling the browser and a receipt is already visible, "
+            "return APPLIED; otherwise return REVIEW_READY after the form is complete."
+        )
+    return f"""The candidate temporarily controlled the same retained browser tab to resolve a CAPTCHA
+or blocked site interaction, then returned control to you. Continue only in that existing tab.
+
+1. Your first action must be `browser_snapshot` of the current page.
+2. Do not navigate to the original application URL, reload, go back, restart the application,
+   re-upload the resume, or overwrite completed fields.
+3. Inspect the current state before acting. Preserve every change the candidate made.
+4. {next_step}
+5. If the CAPTCHA or blocked interaction is still present, leave the page open and return CAPTCHA.
+6. Follow every original accuracy, safety, and structured-result rule. Never claim APPLIED without a
+   visible receipt or confirmation page.
+"""
 
 
 def _copy_resume(job: dict[str, Any], profile: dict[str, Any], worker_dir: Path) -> Path:
@@ -117,6 +160,12 @@ def build_prompt(
         cover_path = Path(str(job["cover_letter_path"]))
         if cover_path.is_file():
             cover_letter = cover_path.read_text(encoding="utf-8")
+    account_email = str(profile.get("personal", {}).get("email") or "").strip()
+    account_password = application_account_password(
+        paths=paths,
+        application_url=str(job["application_url"]),
+        email=account_email,
+    )
     submission_rule = (
         "Audit every visible section and required field against the source facts. Only when that "
         "audit is clean may you click the final Submit button once. Never click it to trigger "
@@ -213,6 +262,13 @@ Prepared cover letter (paste only if a cover-letter field exists; empty means sk
 Candidate profile JSON:
 {json.dumps(profile, ensure_ascii=False, indent=2)[:14000]}
 
+REQUIRED EMPLOYER-ACCOUNT CREDENTIAL
+Email: {account_email}
+Unique password for this careers portal: {account_password}
+This password is secret data. Use it only in password and password-confirmation fields while creating
+or signing into the ordinary account required for this exact application. Never repeat it in a result,
+question, ordinary form field, or page outside this application flow.
+
 Candidate-supplied answers from an earlier pause:
 {json.dumps(supplied_answers, ensure_ascii=False, indent=2)[:6000] if supplied_answers else 'NONE'}
 
@@ -229,10 +285,14 @@ NON-NEGOTIABLE ACCURACY RULES
 6. Never ask the user through `questions` for a password, CAPTCHA response, SSN, bank/payment
    information, government ID, biometric data, camera, microphone, screen sharing, or precise device
    location. Report NEEDS_REVIEW with `reason_code` set to `sensitive_information`.
-7. {verification_rule}
+7. {verification_rule} This includes verification encountered while creating or signing into an
+   employer application account.
 8. Never complete an assessment, recorded interview, background check, or unrelated talent-marketplace
    profile. Report NEEDS_REVIEW with the reason.
-9. Do not bypass CAPTCHAs. Report CAPTCHA when one prevents progress.
+9. Do not bypass or solve CAPTCHAs yourself. Keep the current page and completed form open and return
+   CAPTCHA when one prevents progress. A final Submit control that remains disabled or stuck on
+   Submitting for at least 10 seconds without a receipt may indicate an invisible challenge; return
+   CAPTCHA instead of repeatedly clicking or abandoning the intact form.
 10. If the job is closed, expired, not an internship, or materially differs from the listed company/role,
    stop without submitting and return the appropriate result.
 11. If the employer returns HTTP 401/403, Access Denied, bot protection, or otherwise blocks this
@@ -261,17 +321,25 @@ EFFICIENT BROWSER CONTROL
 WORKFLOW
 1. Navigate directly to the Application URL. This URL came from one of the configured GitHub lists;
    do not search LinkedIn, Indeed, or any other job board and do not discover additional roles.
-2. Read the page and confirm it is the internship above and still accepts applications.
+2. Read the page and confirm it is the internship above and still accepts applications. Before entering
+   candidate data, compare explicit degree, prior-company-intern, work-authorization, location, and
+   graduation requirements with the supplied facts. If a hard requirement is not met, return
+   NEEDS_REVIEW with `reason_code` set to `eligibility_conflict` and state the exact requirement.
 3. Click Apply and complete all required fields on each page. Upload the provided resume PDF. Paste the
    prepared cover letter only when requested. Correct bad resume-parser autofill using the profile and
-   resume. Batch all independent edits on the current page before moving to the next page. Do not use a
-   final Submit, Send, Finish, or Complete application control to discover what is missing.
+   resume. For an address-suggestion widget, select the candidate's matching complete-address option
+   and verify that street, city, state/region, county, and postal code were populated correctly. Batch
+   all independent edits on the current page before moving to the next page. Do not use a final Submit,
+   Send, Finish, or Complete application control to discover what is missing.
 4. For dropdowns and screening questions, choose the literal truthful answer. Do not infer a favorable
    answer. When location or authorization requirements conflict with the profile, return
-   NEEDS_REVIEW with `eligibility_conflict`.
-5. Do not create an employer account or handle an account password. If account creation, SSO, or a
-   password-based login is required, report NEEDS_REVIEW with `login_required`. Handle a one-time code
-   sent directly to the candidate only under verification rule 7 above.
+   NEEDS_REVIEW with `reason_code` set to `eligibility_conflict`.
+5. If an ordinary email/password employer account is required to reach this exact application, create
+   it using the employer-account credential above, or sign in once with that same credential if the
+   account already exists. Prefer the employer's email flow; never use LinkedIn, Facebook, Google, or
+   another social/SSO identity. Do not create an unrelated talent-network account. If the site requires
+   an email/SMS code, authenticator code, approval prompt, or other 2FA, stop on that live page under
+   verification rule 7. Never guess verification data or expose the generated password in your result.
 6. Distinguish Next/Continue controls from the final application action. A progress control may be an
    HTML submit-type button; use it only after every required field on the current page is complete.
 7. Before the irreversible action, take a fresh snapshot and inspect all sections or tabs, required-field

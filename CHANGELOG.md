@@ -9,18 +9,29 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - an opt-in setting to auto-submit applications that the user explicitly selects
 - a local Agent input for employer one-time verification codes that continues the live form
 - a Retry action for **Confirm in Agent** checkpoints in the Applications tab
+- same-session human browser control for CAPTCHA and blocked-interaction checkpoints, including clicking, typing, pasting, scrolling, and returning the retained tab to the agent
+- complete address settings for address line 1/2, ZIP/postal code, city, state/region, county, and country
+- a **Qualified** column and filter in Latest jobs, including visible hard-gate reasons
+- previous-internship employer facts for returning-intern qualification checks
+- required ordinary employer account creation with a stable per-portal credential
 
 ### Changed
 
 - submission-authorized runs now complete and audit the full form before a separate final-action browser turn
+- advanced-degree and previous-company-intern requirements now make a listing ineligible instead of only lowering its fit score
+- hard qualification conflicts discovered on an employer page remain ineligible during later sync cycles and are excluded from Auto mode
 
 ### Fixed
 
 - the browser agent no longer uses the final Submit control to trigger validation or discover unfinished fields
+- disabled or stuck **Submitting…** states without a receipt now become live human-interaction checkpoints instead of closing an intact application form
+- address suggestion widgets are completed from the candidate's full configured address and checked field by field
 
 ### Security
 
-- one-time verification-code answers are cleared after the browser turn consumes them; passwords and other sensitive-input requests remain blocked
+- one-time verification-code answers are cleared after the browser turn consumes them; user-supplied password and other sensitive-input requests remain blocked
+- browser-control messages are accepted only for the currently retained CAPTCHA checkpoint and expose no URL-navigation command
+- employer account passwords are derived from a private local key, remain stable per careers portal and candidate email, and are never stored as shared plaintext credentials
 
 ## [0.7.0] - 2026-08-07
 

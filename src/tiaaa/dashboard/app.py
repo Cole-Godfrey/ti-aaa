@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse, urlsplit
@@ -26,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from tiaaa import __version__
-from tiaaa.apply.preview import preview_frame_hub
+from tiaaa.apply.preview import browser_control_hub, preview_frame_hub
 from tiaaa.claude_auth import ClaudeAuthManager
 from tiaaa.config import (
     SOURCE_DOCUMENTS,
@@ -52,12 +53,15 @@ from tiaaa.database import (
     get_job,
     get_stats,
     get_worker_states,
+    human_control_returned,
     init_db,
     list_agent_inputs,
     list_application_queue,
     list_jobs,
     list_resumes,
+    live_human_interaction_checkpoint,
     record_dashboard_visit,
+    refresh_qualification_scores,
     set_app_state,
     source_baseline_complete,
     source_status,
@@ -450,6 +454,16 @@ def create_app(
                     if not list_resumes(connection()):
                         raise ValueError("Upload at least one resume before finishing onboarding")
                 set_app_state(connection(), "onboarding_complete", update.onboarding_complete)
+            if update.profile is not None or update.settings is not None:
+                current_settings = load_settings(paths)
+                refresh_qualification_scores(
+                    connection(),
+                    profile=load_profile(paths),
+                    settings=current_settings,
+                    preserve_scores=bool(
+                        current_settings.get("preparation", {}).get("use_llm")
+                    ),
+                )
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if background_service is not None:
@@ -581,6 +595,17 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "submitting", "job": _public_job(row)}
 
+    @app.post("/api/jobs/{job_id}/continue-agent", status_code=202)
+    def continue_agent_after_browser_control(job_id: int) -> dict[str, Any]:
+        service = require_service()
+        try:
+            row = service.return_browser_control(job_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "continuing", "job": _public_job(row)}
+
     @app.patch("/api/jobs/{job_id}")
     def patch_job(
         job_id: int,
@@ -705,6 +730,7 @@ def create_app(
         items = get_worker_states(database)
         for item in items:
             screenshot = item.pop("screenshot_path", None)
+            item["browser_interactive"] = False
             item["preview_available"] = bool(screenshot and Path(screenshot).is_file())
             item["preview_url"] = (
                 f"/api/workers/{item['worker_id']}/preview" if item["preview_available"] else None
@@ -736,6 +762,15 @@ def create_app(
                     and item.get("status") == "review_ready"
                     and not item["questions"]
                     and job_row.get("availability_status") != "manual_only"
+                )
+                item["browser_interactive"] = bool(
+                    browser_control_hub.is_available(str(item["worker_id"]))
+                    and not job_row.get("human_control_returned")
+                    and live_human_interaction_checkpoint(
+                        database,
+                        int(item["job_id"]),
+                        str(item["worker_id"]),
+                    )
                 )
         settings = load_settings(paths)
         automation = settings.get("automation", {})
@@ -786,8 +821,8 @@ def create_app(
             await websocket.close(code=1008)
             return
         await websocket.accept()
-        sequence = -1
-        try:
+        async def send_frames() -> None:
+            sequence = -1
             while True:
                 frame = await asyncio.to_thread(
                     preview_frame_hub.wait_for_frame,
@@ -800,8 +835,67 @@ def create_app(
                     continue
                 sequence, data = frame
                 await websocket.send_bytes(data)
-        except (RuntimeError, WebSocketDisconnect):
+
+        async def receive_controls() -> None:
+            while True:
+                try:
+                    action = await websocket.receive_json()
+                except WebSocketDisconnect:
+                    return
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if not isinstance(action, dict):
+                    continue
+                database = connection()
+                worker = database.execute(
+                    "SELECT job_id FROM worker_state WHERE worker_id = ?",
+                    (worker_id,),
+                ).fetchone()
+                if (
+                    worker is None
+                    or not worker["job_id"]
+                    or human_control_returned(
+                        database,
+                        int(worker["job_id"]),
+                        worker_id,
+                    )
+                    or not live_human_interaction_checkpoint(
+                        database,
+                        int(worker["job_id"]),
+                        worker_id,
+                    )
+                ):
+                    continue
+                try:
+                    browser_control_hub.dispatch(worker_id, action)
+                except ValueError:
+                    continue
+
+        tasks = {
+            asyncio.create_task(send_frames()),
+            asyncio.create_task(receive_controls()),
+        }
+        try:
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                with suppress(
+                    asyncio.CancelledError, RuntimeError, WebSocketDisconnect
+                ):
+                    task.result()
+        except asyncio.CancelledError:
+            # Starlette's TestClient (and some ASGI servers) cancel the owning
+            # socket task immediately after delivering a clean disconnect. Do
+            # not await child cleanup inside that cancelled scope: doing so can
+            # leak the cancellation into the session's completion future.
             return
+        finally:
+            for task in tasks:
+                task.cancel()
 
     @app.get("/api/sources")
     def sources() -> dict[str, Any]:

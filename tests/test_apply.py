@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 
 import pytest
 
 import tiaaa.apply.runner as runner
-from tiaaa.apply.preview import PreviewCapture, preview_frame_hub
+from tiaaa.apply.preview import PreviewCapture, browser_control_hub, preview_frame_hub
 from tiaaa.apply.prompt import (
     build_continuation_prompt,
+    build_human_control_prompt,
     build_prompt,
     build_submission_prompt,
 )
@@ -21,6 +23,7 @@ from tiaaa.apply.runner import (
     _ClaudeProcess,
     _extract_agent_text,
     _failure_detail,
+    _human_interaction_result,
     _mcp_config,
     _mcp_server_command,
     _parse_agent_result,
@@ -31,6 +34,7 @@ from tiaaa.apply.runner import (
     _unattended_result,
     _verification_code_fallback,
     _wait_for_agent_answers,
+    _wait_for_human_control_return,
     _wait_for_submission_confirmation,
     run_applications,
 )
@@ -373,10 +377,16 @@ def test_prompt_is_truth_constrained_and_stops_before_submit(
     assert "Do not take a snapshot after each field" in prompt
     assert "Leave optional fields blank" in prompt
     assert "Never wait more than 5 seconds" in prompt
-    assert "Do not create an employer account" in prompt
+    assert "REQUIRED EMPLOYER-ACCOUNT CREDENTIAL" in prompt
+    assert "create" in prompt
+    assert "never use LinkedIn, Facebook, Google" in prompt
+    assert "other 2FA" in prompt
+    assert "address-suggestion widget" in prompt
     assert "`input_type` set to `verification_code`" in prompt
     assert "same open code field" in prompt
-    assert "final Submit, Send, Finish, or Complete application control" in prompt
+    assert "final Submit, Send, Finish, or Complete application control" in " ".join(
+        prompt.split()
+    )
     assert "Distinguish Next/Continue controls" in prompt
     assert "separate submission-only message" in prompt
     assert "must-not-reach-the-agent" not in prompt
@@ -427,6 +437,45 @@ def test_submission_prompt_uses_only_the_completed_live_form() -> None:
     assert "Never click Submit merely to trigger validation" in prompt
     assert "click the existing final Submit application button exactly once" in prompt
     assert "Do not restart the application" in prompt
+    assert "stuck on Submitting for at least 10 seconds" in prompt
+    assert "return CAPTCHA" in prompt
+
+
+def test_human_control_prompt_preserves_the_retained_form_and_submission_boundary() -> None:
+    before_submission = build_human_control_prompt(
+        submission_authorized=False,
+        submission_started=False,
+    )
+    during_submission = build_human_control_prompt(
+        submission_authorized=True,
+        submission_started=True,
+    )
+
+    assert "same retained browser tab" in before_submission
+    assert "Do not navigate to the original application URL" in before_submission
+    assert "personally submitted" in before_submission
+    assert "do not have permission to click the final Submit" in before_submission
+    assert "final submission attempt had already begun" in during_submission
+    assert "visible receipt" in during_submission
+
+
+def test_stalled_submitting_state_becomes_a_human_captcha_checkpoint() -> None:
+    detail = (
+        'The button remained stuck in a disabled "Submitting…" state for over 14 seconds '
+        "with no confirmation page or receipt appearing; the completed form remains intact."
+    )
+
+    checkpoint = _human_interaction_result(AgentResult("failed", detail))
+
+    assert checkpoint.result == "captcha"
+    assert checkpoint.reason_code == "captcha"
+    assert checkpoint.detail == detail
+    unrelated = AgentResult("failed", "The employer returned a server error")
+    assert _human_interaction_result(unrelated) is unrelated
+    explicit = _human_interaction_result(
+        AgentResult("failed", "The challenge blocked progress", "captcha")
+    )
+    assert explicit.result == "captcha"
 
 
 def test_authorized_session_uses_a_separate_submission_turn() -> None:
@@ -605,6 +654,25 @@ def test_wait_for_submission_confirmation_stops_when_retry_cancels_checkpoint(
     ) is False
 
 
+def test_wait_for_human_control_returns_after_candidate_finishes(monkeypatch) -> None:
+    returned = iter([False, True])
+    monkeypatch.setattr(
+        runner,
+        "live_human_interaction_checkpoint",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        runner,
+        "human_control_returned",
+        lambda *_args, **_kwargs: next(returned),
+    )
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+
+    assert _wait_for_human_control_return(
+        object(), 1, "worker-0", timeout=1, poll_interval=0.01
+    ) is True
+
+
 def test_empty_application_queue_does_not_require_browser_tools(
     tmp_path, profile, settings, monkeypatch
 ) -> None:
@@ -668,3 +736,72 @@ def test_live_preview_publishes_frames_and_keeps_a_private_jpeg_fallback(tmp_pat
     assert preview.reconnect_delay == 0.5
     assert output.read_bytes() == frame
     assert preview_frame_hub.wait_for_frame("worker-0", 0, timeout=0) == (1, frame)
+
+
+def test_live_preview_relays_only_validated_input_to_the_same_browser(tmp_path) -> None:
+    browser_control_hub.clear()
+    preview = PreviewCapture(port=9330, output_path=tmp_path / "worker-0.jpg")
+    preview._viewport_width = 1280
+    preview._viewport_height = 900
+    browser_control_hub.register("worker-0", preview)
+    browser_control_hub.dispatch("worker-0", {"type": "click", "x": 0.5, "y": 0.25})
+    browser_control_hub.dispatch("worker-0", {"type": "text", "text": "A1B2"})
+    browser_control_hub.dispatch("worker-0", {"type": "key", "key": "Tab"})
+    browser_control_hub.dispatch("worker-0", {"type": "key", "key": "SelectAll"})
+    browser_control_hub.dispatch(
+        "worker-0",
+        {
+            "type": "scroll",
+            "x": 0.5,
+            "y": 0.5,
+            "delta_x": 0,
+            "delta_y": 240,
+        },
+    )
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.messages: list[dict] = []
+
+        def send(self, payload: str) -> None:
+            self.messages.append(json.loads(payload))
+
+    websocket = FakeWebSocket()
+    final_id = preview._drain_control_actions(websocket, 10)
+
+    assert final_id == 19
+    assert [message["method"] for message in websocket.messages] == [
+        "Input.dispatchMouseEvent",
+        "Input.dispatchMouseEvent",
+        "Input.dispatchMouseEvent",
+        "Input.insertText",
+        "Input.dispatchKeyEvent",
+        "Input.dispatchKeyEvent",
+        "Input.dispatchKeyEvent",
+        "Input.dispatchKeyEvent",
+        "Input.dispatchMouseEvent",
+    ]
+    pressed = websocket.messages[1]["params"]
+    assert pressed["type"] == "mousePressed"
+    assert pressed["x"] == 640
+    assert pressed["y"] == 225
+    assert websocket.messages[3]["params"] == {"text": "A1B2"}
+    assert websocket.messages[6]["params"]["modifiers"] == (
+        4 if sys.platform == "darwin" else 2
+    )
+    assert websocket.messages[-1]["params"]["deltaY"] == 240
+
+    with pytest.raises(ValueError, match="outside the allowed range"):
+        browser_control_hub.dispatch(
+            "worker-0", {"type": "click", "x": 2, "y": 0.5}
+        )
+    with pytest.raises(ValueError, match="not allowed"):
+        browser_control_hub.dispatch(
+            "worker-0", {"type": "key", "key": "F12"}
+        )
+    with pytest.raises(ValueError, match="Unknown browser-control action"):
+        browser_control_hub.dispatch(
+            "worker-0", {"type": "navigate", "url": "https://example.test"}
+        )
+    browser_control_hub.unregister("worker-0", preview)
+    assert browser_control_hub.is_available("worker-0") is False

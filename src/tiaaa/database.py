@@ -232,6 +232,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             apply_origin          TEXT,
             apply_reason_code     TEXT,
             submission_requested  INTEGER NOT NULL DEFAULT 0,
+            human_control_returned INTEGER NOT NULL DEFAULT 0,
             applied_at            TEXT,
             apply_error           TEXT,
             last_attempted_at      TEXT,
@@ -350,6 +351,9 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     _ensure_column(connection, "jobs", "apply_reason_code", "TEXT")
     _ensure_column(
         connection, "jobs", "submission_requested", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(
+        connection, "jobs", "human_control_returned", "INTEGER NOT NULL DEFAULT 0"
     )
     _ensure_column(
         connection, "jobs", "availability_status", "TEXT NOT NULL DEFAULT 'unknown'"
@@ -921,6 +925,7 @@ def answer_agent_inputs(
                             WHEN resume_path IS NULL THEN 'queued' ELSE 'ready' END,
                         manual_requested = 1, manual_requested_at = ?,
                         apply_error = NULL, worker_id = NULL,
+                        human_control_returned = 0,
                         apply_attempts = CASE WHEN apply_attempts > 0
                             THEN apply_attempts - 1 ELSE 0 END,
                         updated_at = ?
@@ -950,6 +955,7 @@ def resume_application_after_input(
         """
         UPDATE jobs SET pipeline_status = 'applying', worker_id = ?,
                         manual_requested = 0, apply_error = NULL, updated_at = ?,
+                        human_control_returned = 0,
                         apply_attempts = apply_attempts + 1
         WHERE id = ?
           AND pipeline_status IN ('queued', 'ready')
@@ -976,14 +982,16 @@ def recover_stale_work(connection: sqlite3.Connection) -> int:
     applying = connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'ready', worker_id = NULL,
-                        apply_error = 'Recovered after service restart', updated_at = ?
+                        apply_error = 'Recovered after service restart',
+                        human_control_returned = 0, updated_at = ?
         WHERE pipeline_status = 'applying'
         """,
         (now,),
     )
     checkpoints = connection.execute(
         """
-        UPDATE jobs SET worker_id = NULL, submission_requested = 0, updated_at = ?
+        UPDATE jobs SET worker_id = NULL, submission_requested = 0,
+                        human_control_returned = 0, updated_at = ?
         WHERE pipeline_status = 'manual_review' AND worker_id IS NOT NULL
         """,
         (now,),
@@ -1220,6 +1228,20 @@ def ingest_listings(
                     ),
                 )
             eligibility = evaluate_listing(eligibility_listing, profile, settings)
+            agent_conflict = bool(
+                row is not None
+                and row["apply_reason_code"] == "eligibility_conflict"
+            )
+            if agent_conflict:
+                eligibility = replace(
+                    eligibility,
+                    eligible=False,
+                    reason=str(
+                        row["apply_error"]
+                        or row["eligibility_reason"]
+                        or "Agent found an unmet application requirement"
+                    ),
+                )
 
             if row is None:
                 is_new = not baseline
@@ -1306,7 +1328,7 @@ def ingest_listings(
                     "queued",
                     "ready",
                     "failed",
-                }:
+                } and not (next_status == "failed" and agent_conflict):
                     next_status = "skipped"
                     add_event(connection, job_id, "ineligible", eligibility.reason)
                 elif (
@@ -1469,8 +1491,9 @@ def refresh_qualification_scores(
     *,
     profile: dict[str, Any],
     settings: dict[str, Any],
+    preserve_scores: bool = False,
 ) -> int:
-    """Recompute active heuristic scores without role or location preferences."""
+    """Recompute active qualification gates and, unless requested, heuristic scores."""
 
     rows = connection.execute(
         """
@@ -1516,23 +1539,52 @@ def refresh_qualification_scores(
             citizenship_required=bool(row["citizenship_required"]),
         )
         evaluation = evaluate_listing(listing, profile, settings)
+        agent_conflict = row["apply_reason_code"] == "eligibility_conflict"
+        eligibility = (
+            "ineligible"
+            if agent_conflict
+            else "eligible" if evaluation.eligible else "ineligible"
+        )
+        eligibility_reason = (
+            str(
+                row["apply_error"]
+                or row["eligibility_reason"]
+                or "Agent found an unmet application requirement"
+            )
+            if agent_conflict
+            else evaluation.reason
+        )
+        keep_existing_score = preserve_scores and row["fit_score"] is not None
+        score = int(row["fit_score"]) if keep_existing_score else evaluation.score
+        score_reasoning = (
+            str(row["score_reasoning"] or evaluation.score_reasoning)
+            if keep_existing_score
+            else evaluation.score_reasoning
+        )
+        scored_at = row["scored_at"] if keep_existing_score else now
         connection.execute(
             """
             UPDATE jobs SET eligibility = ?, eligibility_reason = ?,
                             fit_score = ?, score_reasoning = ?, scored_at = ?,
                             updated_at = CASE
-                                WHEN fit_score != ? OR score_reasoning != ? THEN ?
+                                WHEN eligibility != ?
+                                  OR COALESCE(eligibility_reason, '') != ?
+                                  OR COALESCE(fit_score, -1) != ?
+                                  OR COALESCE(score_reasoning, '') != ?
+                                THEN ?
                                 ELSE updated_at END
             WHERE id = ?
             """,
             (
-                "eligible" if evaluation.eligible else "ineligible",
-                evaluation.reason,
-                evaluation.score,
-                evaluation.score_reasoning,
-                now,
-                evaluation.score,
-                evaluation.score_reasoning,
+                eligibility,
+                eligibility_reason,
+                score,
+                score_reasoning,
+                scored_at,
+                eligibility,
+                eligibility_reason,
+                score,
+                score_reasoning,
                 now,
                 row["id"],
             ),
@@ -2012,7 +2064,7 @@ def request_manual_application(
     live_review = bool(
         row["pipeline_status"] == "manual_review"
         and worker is not None
-        and worker["status"] in {"needs_review", "review_ready"}
+        and worker["status"] in {"captcha", "needs_review", "review_ready"}
         and int(worker["job_id"] or 0) == job_id
     )
     if row["pipeline_status"] in {"applied", "applying", "withdrawn"} or live_review:
@@ -2026,6 +2078,7 @@ def request_manual_application(
         UPDATE jobs SET pipeline_status = ?, manual_requested = 1,
                         manual_requested_at = ?, apply_error = NULL, updated_at = ?,
                         apply_reason_code = NULL, submission_requested = 0,
+                        human_control_returned = 0,
                         apply_attempts = CASE WHEN pipeline_status = 'failed'
                             THEN 0 ELSE apply_attempts END
         WHERE id = ?
@@ -2073,7 +2126,8 @@ def retry_manual_application(
             UPDATE jobs SET pipeline_status = ?, manual_requested = 1,
                             manual_requested_at = ?, apply_error = NULL,
                             apply_reason_code = NULL, submission_requested = 0,
-                            worker_id = NULL, apply_attempts = 0, updated_at = ?
+                            human_control_returned = 0, worker_id = NULL,
+                            apply_attempts = 0, updated_at = ?
             WHERE id = ? AND pipeline_status = 'manual_review'
             """,
             (next_status, now, now, job_id),
@@ -2293,7 +2347,8 @@ def claim_next_job(
             UPDATE jobs SET pipeline_status = 'applying', worker_id = ?,
                             last_attempted_at = ?, apply_attempts = apply_attempts + 1,
                             apply_origin = ?, apply_reason_code = NULL,
-                            submission_requested = 0, updated_at = ? WHERE id = ?
+                            submission_requested = 0, human_control_returned = 0,
+                            updated_at = ? WHERE id = ?
             """,
             (worker_id, now, origin, now, row["id"]),
         )
@@ -2352,7 +2407,7 @@ def list_application_queue(
                OR (
                     j.pipeline_status = 'manual_review'
                     AND j.worker_id IS NOT NULL
-                    AND w.status IN ('needs_review', 'review_ready')
+                    AND w.status IN ('captcha', 'needs_review', 'review_ready')
                )
             ORDER BY j.last_attempted_at ASC, j.id ASC
             """
@@ -2502,7 +2557,12 @@ def mark_apply_result(
                             THEN COALESCE(submitted_resume_path, resume_path)
                             ELSE submitted_resume_path END,
                         apply_error = ?, apply_reason_code = ?,
+                        eligibility = CASE WHEN ? = 'eligibility_conflict'
+                            THEN 'ineligible' ELSE eligibility END,
+                        eligibility_reason = CASE WHEN ? = 'eligibility_conflict'
+                            THEN ? ELSE eligibility_reason END,
                         manual_requested = 0, submission_requested = 0,
+                        human_control_returned = 0,
                         worker_id = CASE WHEN ? THEN worker_id ELSE NULL END,
                         updated_at = ?
         WHERE id = ?
@@ -2519,6 +2579,9 @@ def mark_apply_result(
             result,
             None if result == "applied" else detail,
             None if result == "applied" else reason_code,
+            reason_code,
+            reason_code,
+            detail or "Agent found an unmet application requirement",
             int(retain_worker),
             now,
             job_id,
@@ -2567,6 +2630,109 @@ def request_final_submission(
     return get_job(connection, job_id)
 
 
+def live_human_interaction_checkpoint(
+    connection: sqlite3.Connection,
+    job_id: int,
+    worker_id: str,
+) -> bool:
+    """Return whether a retained browser is waiting for human CAPTCHA interaction."""
+
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM jobs j
+        JOIN worker_state w ON w.worker_id = j.worker_id AND w.job_id = j.id
+        WHERE j.id = ? AND j.pipeline_status = 'manual_review'
+          AND j.worker_id = ? AND j.availability_status != 'manual_only'
+          AND (w.status = 'captcha'
+               OR (w.status = 'needs_review' AND j.apply_reason_code = 'captcha'))
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_inputs ai
+              WHERE ai.job_id = j.id AND ai.status = 'pending'
+          )
+        """,
+        (job_id, worker_id),
+    ).fetchone()
+    return row is not None
+
+
+def request_human_control_return(
+    connection: sqlite3.Connection,
+    job_id: int,
+) -> dict[str, Any] | None:
+    """Signal that the candidate finished interacting with the retained browser."""
+
+    job = get_job(connection, job_id)
+    if job is None:
+        return None
+    worker_id = str(job.get("worker_id") or "")
+    if not worker_id or not live_human_interaction_checkpoint(
+        connection, job_id, worker_id
+    ):
+        raise ValueError("The application is not waiting for live browser interaction")
+    if bool(job.get("human_control_returned")):
+        raise ValueError("Browser control has already been returned to the agent")
+    now = utc_now()
+    connection.execute(
+        """
+        UPDATE jobs SET human_control_returned = 1, updated_at = ?
+        WHERE id = ? AND pipeline_status = 'manual_review' AND worker_id = ?
+        """,
+        (now, job_id, worker_id),
+    )
+    add_event(
+        connection,
+        job_id,
+        "human_control_returned",
+        "Candidate returned the retained browser to the agent",
+    )
+    connection.commit()
+    return get_job(connection, job_id)
+
+
+def human_control_returned(
+    connection: sqlite3.Connection,
+    job_id: int,
+    worker_id: str,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT human_control_returned FROM jobs
+        WHERE id = ? AND pipeline_status = 'manual_review' AND worker_id = ?
+        """,
+        (job_id, worker_id),
+    ).fetchone()
+    return bool(row and row["human_control_returned"])
+
+
+def resume_application_after_human_control(
+    connection: sqlite3.Connection,
+    job_id: int,
+    worker_id: str,
+) -> bool:
+    """Return a human-resolved CAPTCHA checkpoint to its still-live agent."""
+
+    now = utc_now()
+    cursor = connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applying', human_control_returned = 0,
+                        apply_error = NULL, apply_reason_code = NULL, updated_at = ?
+        WHERE id = ? AND pipeline_status = 'manual_review' AND worker_id = ?
+          AND human_control_returned = 1
+        """,
+        (now, job_id, worker_id),
+    )
+    if cursor.rowcount:
+        add_event(
+            connection,
+            job_id,
+            "agent_resumed_after_human_control",
+            f"Continued in the retained browser on {worker_id}",
+        )
+    connection.commit()
+    return bool(cursor.rowcount)
+
+
 def final_submission_requested(
     connection: sqlite3.Connection,
     job_id: int,
@@ -2610,7 +2776,8 @@ def resume_application_for_submission(
     cursor = connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'applying', submission_requested = 0,
-                        apply_error = NULL, apply_reason_code = NULL, updated_at = ?
+                        human_control_returned = 0, apply_error = NULL,
+                        apply_reason_code = NULL, updated_at = ?
         WHERE id = ? AND pipeline_status = 'manual_review' AND worker_id = ?
           AND submission_requested = 1
           AND NOT EXISTS (
@@ -2640,7 +2807,8 @@ def close_live_checkpoint(
 
     cursor = connection.execute(
         """
-        UPDATE jobs SET worker_id = NULL, submission_requested = 0, updated_at = ?
+        UPDATE jobs SET worker_id = NULL, submission_requested = 0,
+                        human_control_returned = 0, updated_at = ?
         WHERE id = ? AND worker_id = ? AND pipeline_status = 'manual_review'
         """,
         (utc_now(), job_id, worker_id),
@@ -2658,7 +2826,8 @@ def close_live_checkpoint(
 def release_claim(connection: sqlite3.Connection, job_id: int, detail: str = "released") -> None:
     connection.execute(
         """
-        UPDATE jobs SET pipeline_status = 'ready', worker_id = NULL, updated_at = ?
+        UPDATE jobs SET pipeline_status = 'ready', worker_id = NULL,
+                        human_control_returned = 0, updated_at = ?
         WHERE id = ? AND pipeline_status = 'applying'
         """,
         (utc_now(), job_id),

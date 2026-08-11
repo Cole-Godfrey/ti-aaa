@@ -53,14 +53,16 @@ The browser agent must:
 
 - use only profile/resume facts
 - stop on unknown required answers
-- stop on CAPTCHA, SSO, non-code MFA, or verification that cannot be completed with a candidate-supplied one-time code
+- stop agent actions on CAPTCHA and retain the exact browser for candidate control; never automate, solve, or bypass the challenge
+- create a required ordinary employer email/password account with TI-AAA's generated per-portal credential; never use social SSO, a shared password, or a user-supplied password
+- stop on social SSO, non-code MFA, or verification that cannot be completed with a candidate-supplied one-time code
 - keep the live browser session open while requesting a one-time code and clear the code after use
 - avoid sensitive financial, identity, biometric, and device-permission flows
 - complete and audit every form page before a separate final-submission turn; never use the final Submit control to trigger validation or discover fields
 - verify visible confirmation before recording an application
 - require an explicit manual Apply action followed by dashboard confirmation or enabled `automation.manual_auto_submit`, or an enabled `automation.auto_apply_new` unattended mode
 - keep terminal final submission behind both `automation.allow_submission` and `--submit`
-- stop for manual action instead of creating an employer account or handling its password
+- preserve agent-discovered hard qualification conflicts so Auto mode cannot reclaim the job
 
 ## Licensing
 
