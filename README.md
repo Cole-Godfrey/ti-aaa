@@ -1,6 +1,27 @@
-# TI-AAA
+<p align="center">
+  <img src="logo.png" alt="TI-AAA logo" width="700">
+</p>
 
-**Tech Internship Autonomous Application Agent**
+<h1 align="center">TI-AAA</h1>
+
+<p align="center">
+  <strong>Tech Internship Autonomous Application Agent</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Cole-Godfrey/ti-aaa/actions/workflows/ci.yml">
+    <img src="https://github.com/Cole-Godfrey/ti-aaa/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI">
+  </a>
+  <a href="https://github.com/Cole-Godfrey/ti-aaa/actions/workflows/ci.yml">
+    <img src="https://img.shields.io/badge/coverage-%E2%89%A565%25-brightgreen" alt="Coverage: at least 65%">
+  </a>
+  <a href="pyproject.toml">
+    <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&amp;logoColor=white" alt="Python 3.11 through 3.14">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/github/license/Cole-Godfrey/ti-aaa" alt="License">
+  </a>
+</p>
 
 TI-AAA is a local app for tech internship applications. It runs in the background, checks fixed GitHub lists, prepares truthful application files, and tracks submitted applications.
 
