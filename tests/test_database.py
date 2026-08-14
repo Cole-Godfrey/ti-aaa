@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
 from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.database import (
     add_resume_record,
+    agent_stop_requested,
     answer_agent_inputs,
     answered_agent_inputs,
     claim_next_job,
     claimable_application_count,
     clear_ephemeral_agent_inputs,
+    clear_missing_fact_blocks,
     close_all_connections,
     close_connection,
     get_analytics,
@@ -23,13 +26,18 @@ from tiaaa.database import (
     list_agent_inputs,
     list_application_queue,
     list_jobs,
+    list_manual_handoff_jobs,
     live_human_interaction_checkpoint,
     live_submission_checkpoint,
+    manual_application_ids,
+    mark_applied_manually,
     mark_apply_result,
     mark_prepared,
+    profile_facts_changed,
     reconcile_source_registry,
     recover_stale_work,
     refresh_qualification_scores,
+    request_agent_stop,
     request_final_submission,
     request_human_control_return,
     request_manual_application,
@@ -1097,6 +1105,326 @@ def test_access_block_becomes_manual_handoff_instead_of_retry(
     assert row["pipeline_status"] == "manual_review"
     assert row["availability_status"] == "manual_only"
     assert claimable_application_count(connection, max_attempts=3, target_job_id=1) == 0
+    close_connection(path)
+
+
+def test_upgrade_reimports_sources_once_for_the_advanced_degree_flag(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "flag-backfill.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Research Intern", "https://jobs.test/flag")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        "UPDATE sources SET etag = 'W/\"cached\"', content_sha256 = 'unchanged'"
+    )
+    connection.commit()
+    # An installation that already imported the flag keeps its source cache.
+    init_db(path)
+    assert connection.execute(
+        "SELECT content_sha256 FROM sources WHERE document_key = ?",
+        (source.document_key,),
+    ).fetchone()[0] == "unchanged"
+
+    connection.execute(
+        "DELETE FROM app_state WHERE key = 'advanced_degree_flag_imported'"
+    )
+    connection.commit()
+    init_db(path)
+
+    cached = connection.execute(
+        "SELECT etag, content_sha256 FROM sources WHERE document_key = ?",
+        (source.document_key,),
+    ).fetchone()
+    assert cached["etag"] is None
+    assert cached["content_sha256"] is None
+    close_connection(path)
+
+
+def test_supplying_a_missing_fact_releases_blocked_applications(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "missing-fact.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listings = [
+        make_listing(source, "Acme", "Software Intern", "https://jobs.test/blocked"),
+        make_listing(source, "Beta", "Backend Intern", "https://jobs.test/other"),
+    ]
+    settings["automation"]["auto_apply_new"] = True
+    ingest_listings(
+        connection, source, listings, profile=profile, settings=settings, include_existing=True
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applying', apply_origin = 'auto',
+                        apply_attempts = 1, resume_path = 'resume.pdf'
+        WHERE id = 1
+        """
+    )
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'expired', apply_reason_code = 'missing_input' WHERE id = 2"
+    )
+    connection.commit()
+    mark_apply_result(
+        connection,
+        1,
+        "failed",
+        "Required home address is not configured",
+        reason_code="missing_input",
+        manual_handoff=False,
+    )
+    assert claimable_application_count(connection, max_attempts=3, minimum_fit_score=1) == 0
+
+    assert profile_facts_changed(connection, profile) is True
+    assert profile_facts_changed(connection, profile) is False
+
+    profile["personal"]["address"] = "123 Pine Street"
+    assert profile_facts_changed(connection, profile) is True
+    assert clear_missing_fact_blocks(connection) == 1
+
+    released = get_job(connection, 1)
+    assert released["pipeline_status"] == "ready"
+    assert released["apply_reason_code"] is None
+    assert released["apply_error"] is None
+    assert released["apply_attempts"] == 0
+    assert claimable_application_count(connection, max_attempts=3, minimum_fit_score=1) == 1
+    # A listing that left the source stays expired.
+    assert get_job(connection, 2)["pipeline_status"] == "expired"
+    assert clear_missing_fact_blocks(connection) == 0
+    close_connection(path)
+
+
+def test_stopping_a_live_checkpoint_releases_it_for_a_manual_record(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "stop-session.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/captcha")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'manual_review', worker_id = 'worker-0',
+                        apply_reason_code = 'captcha', apply_attempts = 1,
+                        resume_path = 'resume.pdf'
+        WHERE id = 1
+        """
+    )
+    connection.commit()
+    update_worker_state(
+        connection, "worker-0", status="captcha", job=get_job(connection, 1)
+    )
+    assert live_human_interaction_checkpoint(connection, 1, "worker-0") is True
+
+    row = request_agent_stop(connection, 1)
+
+    assert row["pipeline_status"] == "skipped"
+    assert row["apply_reason_code"] == "cancelled"
+    assert row["worker_id"] is None
+    assert row["manual_requested"] == 0
+    assert row["stop_requested"] == 0
+    # The waiting worker sees its checkpoint disappear and can end the run.
+    assert live_human_interaction_checkpoint(connection, 1, "worker-0") is False
+    assert live_submission_checkpoint(connection, 1, "worker-0") is False
+    assert list_application_queue(
+        connection, auto_enabled=True, max_attempts=3, minimum_fit_score=1
+    ) == []
+    assert [item["id"] for item in list_manual_handoff_jobs(connection)] == [1]
+    assert list_manual_handoff_jobs(connection)[0]["handoff"] == "stopped"
+
+    applied = mark_applied_manually(connection, 1)
+    assert applied["pipeline_status"] == "applied"
+    assert applied["apply_origin"] == "self"
+    close_connection(path)
+
+
+def test_stop_flags_a_running_agent_and_survives_a_service_restart(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "stop-running.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/live")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'applying', worker_id = 'worker-0' WHERE id = 1"
+    )
+    connection.commit()
+
+    row = request_agent_stop(connection, 1)
+
+    # A live agent turn owns the browser, so only the flag its worker polls is set.
+    assert row["pipeline_status"] == "applying"
+    assert row["stop_requested"] == 1
+    assert agent_stop_requested(connection, 1) is True
+
+    recovered = recover_stale_work(connection)
+
+    assert recovered == 1
+    stopped = get_job(connection, 1)
+    assert stopped["pipeline_status"] == "skipped"
+    assert stopped["apply_reason_code"] == "cancelled"
+    assert stopped["stop_requested"] == 0
+    assert claimable_application_count(connection, max_attempts=3) == 0
+    close_connection(path)
+
+
+def test_stop_is_rejected_for_listings_without_a_session(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "stop-idle.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/idle")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+
+    with pytest.raises(ValueError, match="no queued or running agent session"):
+        request_agent_stop(connection, 1)
+    assert request_agent_stop(connection, 404) is None
+
+    # A queued request that has not started yet leaves the queue immediately.
+    request_manual_application(connection, 1)
+    row = request_agent_stop(connection, 1)
+
+    assert row["pipeline_status"] == "skipped"
+    assert row["manual_requested"] == 0
+    assert manual_application_ids(connection) == []
+    # Re-applying clears the stop so the fresh attempt is not cancelled.
+    assert request_manual_application(connection, 1)["stop_requested"] == 0
+    close_connection(path)
+
+
+def test_bot_blocked_listing_can_be_recorded_as_applied_by_the_candidate(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "applied-manually.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/blocked")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    mark_apply_result(
+        connection,
+        1,
+        "needs_review",
+        "Employer returned HTTP 403",
+        reason_code="access_blocked",
+    )
+    store_agent_inputs(
+        connection,
+        1,
+        [{"key": "preferred_team", "label": "Which team?", "input_type": "text"}],
+    )
+
+    handoffs = list_manual_handoff_jobs(connection)
+    assert [item["company"] for item in handoffs] == ["Acme"]
+    assert handoffs[0]["detail"] == "Employer returned HTTP 403"
+
+    row = mark_applied_manually(connection, 1)
+
+    assert row["pipeline_status"] == "applied"
+    assert row["applied_at"] is not None
+    assert row["apply_origin"] == "self"
+    assert row["manual_requested"] == 0
+    assert row["worker_id"] is None
+    assert list_agent_inputs(connection, 1, pending_only=True) == []
+    assert list_manual_handoff_jobs(connection) == []
+    assert claimable_application_count(connection, max_attempts=3, target_job_id=1) == 0
+    assert get_stats(connection)["applications"] == 1
+    assert [item["company"] for item in list_jobs(connection, applied_only=True)] == ["Acme"]
+    with pytest.raises(ValueError, match="already recorded"):
+        mark_applied_manually(connection, 1)
+    close_connection(path)
+
+
+def test_manual_apply_record_is_refused_while_the_agent_is_applying(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "applied-manually-busy.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/live")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'applying', worker_id = 'worker-0' WHERE id = 1"
+    )
+    connection.commit()
+
+    with pytest.raises(ValueError, match="applying to this listing right now"):
+        mark_applied_manually(connection, 1)
+
+    assert mark_applied_manually(connection, 404) is None
+    assert get_job(connection, 1)["applied_at"] is None
+    close_connection(path)
+
+
+def test_source_advanced_degree_flag_survives_sync_and_blocks_auto_apply(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "advanced-degree-flag.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(
+        source, "Acme", "Research Scientist Intern", "https://jobs.test/research"
+    )
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    row = get_job(connection, 1)
+    assert row["eligibility"] == "eligible"
+
+    flagged = replace(listing, advanced_degree_required=True)
+    ingest_listings(connection, source, [flagged], profile=profile, settings=settings)
+    row = get_job(connection, 1)
+
+    assert row["advanced_degree_required"] == 1
+    assert row["eligibility"] == "ineligible"
+    assert row["eligibility_reason"] == (
+        "source list marks this role advanced-degree only (master's, PhD, or MBA)"
+    )
+    assert row["pipeline_status"] == "skipped"
+    assert claimable_application_count(connection, max_attempts=3) == 0
+
+    # A later poll of a source that does not repeat the flag keeps the gate.
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    assert get_job(connection, 1)["eligibility"] == "ineligible"
+
+    profile["education"]["degree"] = "Master of Science"
+    refresh_qualification_scores(connection, profile=profile, settings=settings)
+    assert get_job(connection, 1)["eligibility"] == "eligible"
+    close_connection(path)
+
+
+def test_agent_discovered_conflict_lowers_the_heuristic_fit_score(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "conflict-fit.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/conflict")
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    assert get_job(connection, 1)["fit_score"] >= 7
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applying', apply_origin = 'auto',
+                        apply_attempts = 1
+        WHERE id = 1
+        """
+    )
+    connection.commit()
+    mark_apply_result(
+        connection,
+        1,
+        "failed",
+        "Posting requires an enrolled master's student",
+        reason_code="eligibility_conflict",
+        manual_handoff=False,
+    )
+
+    refresh_qualification_scores(connection, profile=profile, settings=settings)
+
+    row = get_job(connection, 1)
+    assert row["eligibility"] == "ineligible"
+    assert row["fit_score"] <= 2
     close_connection(path)
 
 

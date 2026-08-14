@@ -66,15 +66,21 @@ def _profile_skill_terms(profile: dict[str, Any]) -> set[str]:
 
 def _degree_markers(value: str) -> tuple[bool, bool, bool]:
     normalized = value.casefold().replace(".", "").replace("'", "").replace("’", "")
-    doctoral = bool(re.search(r"\b(?:phd|doctoral|doctorate)\b", normalized))
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    doctoral = bool(
+        re.search(r"\b(?:phd|dphil|doctoral|doctorate|post ?doctoral)\b", normalized)
+    )
     masters = bool(
         re.search(
-            r"\b(?:masters?|ms|msc|meng|mba|graduate student)\b",
+            r"\b(?:masters?|ms|msc|meng|mba|mfe|"
+            r"grad(?:uate)? students?|graduate degree|advanced degree)\b",
             normalized,
         )
     )
     bachelors = bool(
-        re.search(r"\b(?:bachelors?|bs|bsc|ba|undergrad|undergraduate)\b", normalized)
+        re.search(
+            r"\b(?:bachelors?|bs|bsc|ba|beng|undergrad|undergraduate)\b", normalized
+        )
     )
     return doctoral, masters, bachelors
 
@@ -249,7 +255,16 @@ def evaluate_listing(
         score += 1
         reasons.append("programming background for a general software role")
 
-    required_degree_level = _required_advanced_degree(role_text)
+    title_degree_level = _required_advanced_degree(role_text)
+    # The source lists carry a curated "advanced degree required (Master's, PhD,
+    # MBA)" flag for roles whose requirement never reaches the job title. An
+    # explicit bachelor's mention in the title still wins: it is more specific.
+    flagged_degree_level = (
+        2
+        if listing.advanced_degree_required and not _degree_markers(role_text)[2]
+        else 0
+    )
+    required_degree_level = max(title_degree_level, flagged_degree_level)
     profile_degree_level = _degree_level(degree_text)
     degree_mismatch = bool(
         required_degree_level and profile_degree_level < required_degree_level
@@ -258,22 +273,51 @@ def evaluate_listing(
     previous_intern_match = _has_previous_internship_at_company(
         profile, listing.company
     )
+    previous_intern_gap = previous_intern_required and not previous_intern_match
+    authorization = profile.get("work_authorization", {})
+    citizenship_gap = bool(
+        listing.citizenship_required and not bool(authorization.get("us_citizen"))
+    )
+    sponsorship_gap = bool(
+        listing.no_sponsorship and bool(authorization.get("requires_sponsorship"))
+    )
+
     if degree_mismatch:
-        score -= 4
-        reasons.append("advanced-degree requirement does not match the profile")
+        reasons.append(
+            "advanced-degree requirement does not match the profile"
+            if title_degree_level
+            else "source list marks the role advanced-degree only"
+        )
     if previous_intern_required:
-        if previous_intern_match:
-            reasons.append("previous internship at this company is recorded")
-        else:
-            score -= 4
-            reasons.append("role is restricted to previous company interns")
+        reasons.append(
+            "role is restricted to previous company interns"
+            if previous_intern_gap
+            else "previous internship at this company is recorded"
+        )
+    if citizenship_gap:
+        reasons.append("role requires U.S. citizenship")
+    if sponsorship_gap:
+        reasons.append("employer does not sponsor the required work authorization")
 
     score = max(1, min(10, score))
+    if degree_mismatch or previous_intern_gap or citizenship_gap or sponsorship_gap:
+        # A hard qualification gate is not a partial deduction. The candidate
+        # cannot hold the role at all, so the fit column must read that way
+        # instead of showing a mid-range score next to "Not qualified".
+        score = min(score, 2)
     score_reasoning = "; ".join(reasons)
 
     if listing.closed:
         return Eligibility(False, "listing marked closed", score, score_reasoning)
     if degree_mismatch:
+        if not title_degree_level:
+            return Eligibility(
+                False,
+                "source list marks this role advanced-degree only "
+                "(master's, PhD, or MBA)",
+                score,
+                score_reasoning,
+            )
         required = "doctoral" if required_degree_level == 3 else "master's or doctoral"
         return Eligibility(
             False,
@@ -281,18 +325,16 @@ def evaluate_listing(
             score,
             score_reasoning,
         )
-    if previous_intern_required and not previous_intern_match:
+    if previous_intern_gap:
         return Eligibility(
             False,
             "restricted to previous or returning interns at this company",
             score,
             score_reasoning,
         )
-
-    authorization = profile.get("work_authorization", {})
-    if listing.citizenship_required and not bool(authorization.get("us_citizen")):
+    if citizenship_gap:
         return Eligibility(False, "requires U.S. citizenship", score, score_reasoning)
-    if listing.no_sponsorship and bool(authorization.get("requires_sponsorship")):
+    if sponsorship_gap:
         return Eligibility(False, "does not offer sponsorship", score, score_reasoning)
 
     filters = settings.get("filters", {})

@@ -13,6 +13,7 @@ const state = {
   agentInputSignature: null,
   workerSignature: null,
   queueSignature: null,
+  manualApplySignature: null,
   previewSockets: new Map(),
   analytics: null,
   analyticsDimension: "resume",
@@ -313,12 +314,13 @@ function renderJobs(jobs) {
     const retryAction = job.pipeline_status === "manual_review" && job.availability_status !== "manual_only"
       ? `<button class="mini-apply retry-application" type="button" aria-label="Retry application for ${escapeHtml(job.company)}">Retry</button>`
       : "";
+    const appliedNote = submitted && job.apply_origin === "self" ? "<span>applied by you</span>" : "";
     return `<tr data-job-id="${job.id}">
       <td class="role-cell"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)} · ${escapeHtml(job.location || "location not listed")}</span></td>
       <td><select class="status-select pipeline-select" aria-label="Application status for ${escapeHtml(job.company)}">${optionsMarkup(applicationPipelineOptions, job.pipeline_status)}</select></td>
       <td class="resume-cell">${resumeName ? `<a href="/api/jobs/${job.id}/resume" target="_blank">${escapeHtml(resumeName)}</a><span>${resumeState}</span>` : "Not recorded"}</td>
       <td><select class="status-select outcome-select" aria-label="Outcome for ${escapeHtml(job.company)}"${submitted ? "" : " disabled"}>${optionsMarkup(outcomeOptions, job.outcome_status)}</select></td>
-      <td>${submitted ? escapeHtml(shortDate(job.applied_at)) : "Not submitted"}</td>
+      <td class="applied-cell">${submitted ? `${escapeHtml(shortDate(job.applied_at))}${appliedNote}` : "Not submitted"}</td>
       <td><div class="application-actions">${retryAction}<a class="open-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer" title="Open application">↗</a></div></td>
     </tr>`;
   }).join("");
@@ -699,6 +701,8 @@ function renderWorkers(items) {
     preview_available: worker.preview_available,
     stream_active: worker.stream_active,
     browser_interactive: worker.browser_interactive,
+    stoppable: worker.stoppable,
+    stop_requested: worker.stop_requested,
     updated_at: worker.updated_at,
   })));
   if (signature !== state.workerSignature) {
@@ -713,7 +717,8 @@ function renderWorkers(items) {
           <p class="preview-empty">The live browser view appears here when a worker starts.</p>
         </div>
         ${interactive ? `<div class="browser-control-bar"><div><strong>YOU HAVE CONTROL OF THIS BROWSER</strong><span>Click the page, type or paste into the focused field, and scroll here. This is the agent's exact retained tab—not a new job link.</span></div><button class="button ink return-browser-control" type="button" data-return-browser-control="${worker.job_id}">Continue agent</button></div>` : ""}
-        <p class="worker-message">${escapeHtml(worker.message || "Waiting for the next cycle")}</p></article>`;
+        <p class="worker-message">${escapeHtml(worker.message || "Waiting for the next cycle")}</p>
+        ${worker.stoppable ? `<div class="worker-actions" data-stop-job="${worker.job_id}"><span>${worker.stop_requested ? "Stopping this session…" : "Stuck, or did you finish this one yourself?"}</span><button class="button ghost stop-agent" type="button"${worker.stop_requested ? " disabled" : ""}>${worker.stop_requested ? "Stopping…" : "Stop session"}</button></div>` : ""}</article>`;
     }).join("") : '<div class="empty tall">No browser worker has run yet. Enable browser automation in Settings, or keep watch-and-prepare mode.</div>';
   }
   syncPreviewStreams(items);
@@ -806,6 +811,75 @@ function renderApplicationQueue(items, summary = {}) {
   }));
 }
 
+async function stopAgentSession(jobId, button) {
+  if (!window.confirm("Stop this agent session?\n\nThe browser closes and the application is recorded as stopped, so nothing is queued again. If you completed it yourself, select I applied manually afterwards.")) return;
+  button.disabled = true;
+  try {
+    await api(`/api/jobs/${jobId}/stop`, { method: "POST" });
+    state.workerSignature = null;
+    state.agentInputSignature = null;
+    state.queueSignature = null;
+    state.manualApplySignature = null;
+    showToast("Stopping the agent session");
+    await refreshAll();
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
+}
+
+function bindStopButtons(root) {
+  root.querySelectorAll(".stop-agent").forEach(button => button.addEventListener("click", event => {
+    const control = event.currentTarget;
+    stopAgentSession(control.closest("[data-stop-job]").dataset.stopJob, control);
+  }));
+}
+
+function renderManualApplications(items) {
+  const signature = JSON.stringify(items);
+  if (signature === state.manualApplySignature) return;
+  state.manualApplySignature = signature;
+  element("manualApplyCount").textContent = `${items.length} open`;
+  const list = element("manualApplyList");
+  if (!items.length) {
+    list.innerHTML = '<div class="empty">No employer has blocked the browser agent, and no session was stopped.</div>';
+    return;
+  }
+  list.innerHTML = items.map(item => `
+    <div class="manual-apply-row" data-manual-job="${item.id}">
+      <span class="queue-role"><strong>${escapeHtml(item.company)}</strong><span>${escapeHtml(item.role)}${item.location ? ` · ${escapeHtml(item.location)}` : ""}</span><em>${escapeHtml(item.detail)}</em></span>
+      <span class="queue-origin">${item.handoff === "stopped" ? "You stopped it" : "Employer block"}</span>
+      <span class="manual-apply-actions">
+        <a class="text-button" href="${safeExternalUrl(item.application_url)}" target="_blank" rel="noopener noreferrer">Open listing ↗</a>
+        <button class="button ink mark-applied-manually" type="button">I applied manually</button>
+      </span>
+    </div>`).join("");
+  bindManualApplyButtons(list);
+}
+
+function bindManualApplyButtons(root) {
+  root.querySelectorAll(".mark-applied-manually").forEach(button => button.addEventListener("click", event => {
+    const control = event.currentTarget;
+    markAppliedManually(control.closest("[data-manual-job]").dataset.manualJob, control);
+  }));
+}
+
+async function markAppliedManually(jobId, button) {
+  if (!window.confirm("Record this application as submitted by you?\n\nTI-AAA counts it in your application statistics and stops queueing this role for the browser agent.")) return;
+  button.disabled = true;
+  try {
+    await api(`/api/jobs/${jobId}/applied-manually`, { method: "POST" });
+    state.manualApplySignature = null;
+    state.agentInputSignature = null;
+    state.queueSignature = null;
+    showToast("Recorded as applied; the role now appears in Applications");
+    await refreshAll();
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
+}
+
 function agentInputControl(question) {
   const key = escapeHtml(question.input_key);
   const current = question.answer ?? "";
@@ -855,9 +929,10 @@ function renderAgentInputs(workers) {
     const questions = worker.questions || [];
     const resumeName = worker.submitted_resume_name || worker.base_resume_name || "Prepared resume";
     if (worker.browser_interactive) {
-      return `<article class="agent-checkpoint human-checkpoint">
+      return `<article class="agent-checkpoint human-checkpoint" data-manual-job="${worker.job_id}" data-stop-job="${worker.job_id}">
         <header><div><p class="kicker">LIVE BROWSER CONTROL</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>Same session</span></header>
-        <p class="checkpoint-note">Use the interactive browser above to complete the CAPTCHA or inspect the stalled submission. Click Continue agent only after the challenge is cleared or a receipt is visible.</p>
+        <p class="checkpoint-note">Use the interactive browser above to complete the CAPTCHA or inspect the stalled submission. Click Continue agent only after the challenge is cleared or a receipt is visible. If the challenge keeps coming back, stop the session—and record it if you finished the application yourself.</p>
+        <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><div><button class="button ghost stop-agent" type="button">Stop session</button><button class="button ink mark-applied-manually" type="button">I applied manually</button></div></div>
       </article>`;
     }
     if (questions.length && worker.availability_status !== "manual_only") {
@@ -866,29 +941,31 @@ function renderAgentInputs(workers) {
       const checkpointNote = worker.review_detail || (verificationCodeRequested
         ? "Paste the one-time code sent by the employer. TI-AAA uses it only for this open application and clears it after the agent continues."
         : "Answer only with truthful information. TI-AAA keeps the current form open and continues it with your answers.");
-      return `<article class="agent-checkpoint" data-agent-job="${worker.job_id}">
+      return `<article class="agent-checkpoint" data-agent-job="${worker.job_id}" data-stop-job="${worker.job_id}">
         <header><div><p class="kicker">${checkpointTitle}</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>${questions.length} field${questions.length === 1 ? "" : "s"}</span></header>
         <p class="checkpoint-note">${escapeHtml(checkpointNote)}</p>
         <form class="agent-input-form">${questions.map(question => `<label>${escapeHtml(question.label)}${question.required ? "" : " <span>optional</span>"}${agentInputControl(question)}</label>`).join("")}
-          <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><button class="button ink" type="submit">Save answers & continue</button></div>
+          <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><div><button class="button ghost stop-agent" type="button">Stop session</button><button class="button ink" type="submit">Save answers & continue</button></div></div>
         </form></article>`;
     }
     if (worker.submission_ready) {
-      return `<article class="agent-checkpoint submit-checkpoint" data-submit-job="${worker.job_id}">
+      return `<article class="agent-checkpoint submit-checkpoint" data-submit-job="${worker.job_id}" data-stop-job="${worker.job_id}">
         <header><div><p class="kicker">FINAL CONFIRMATION</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>Form complete</span></header>
         <p class="checkpoint-note">The completed form is still open in the browser window above. Confirming below tells the agent to use that same form, click Submit once, and verify the receipt.</p>
-        <div class="checkpoint-actions submit-actions"><span>Resume: ${escapeHtml(resumeName)}</span><button class="button signal submit-application" type="button">Submit application</button></div>
+        <div class="checkpoint-actions submit-actions"><span>Resume: ${escapeHtml(resumeName)}</span><div><button class="button ghost stop-agent" type="button">Stop session</button><button class="button signal submit-application" type="button">Submit application</button></div></div>
       </article>`;
     }
     const blocked = worker.availability_status === "manual_only";
-    return `<article class="agent-checkpoint handoff">
+    return `<article class="agent-checkpoint handoff" data-manual-job="${worker.job_id}">
       <header><div><p class="kicker">${blocked ? "EMPLOYER ACCESS BLOCK" : "MANUAL CHECKPOINT"}</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>${blocked ? "Manual browser" : "Your review"}</span></header>
       <p class="checkpoint-note">${escapeHtml(worker.availability_detail || worker.review_detail || worker.message || "The agent cannot safely continue this step on its own.")}</p>
-      <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><div>${worker.resume_url ? `<a class="text-button" href="${escapeHtml(worker.resume_url)}" target="_blank">Open resume</a>` : ""}${blocked ? `<a class="button ink" href="${safeExternalUrl(worker.application_url)}" target="_blank" rel="noopener noreferrer">Open manually</a>` : ""}</div></div>
+      <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><div>${worker.resume_url ? `<a class="text-button" href="${escapeHtml(worker.resume_url)}" target="_blank">Open resume</a>` : ""}<button class="button ghost mark-applied-manually" type="button">I applied manually</button>${blocked ? `<a class="button ink" href="${safeExternalUrl(worker.application_url)}" target="_blank" rel="noopener noreferrer">Open manually</a>` : ""}</div></div>
     </article>`;
   }).join("");
   panel.querySelectorAll(".agent-input-form").forEach(form => form.addEventListener("submit", submitAgentInputs));
   panel.querySelectorAll(".submit-application").forEach(button => button.addEventListener("click", confirmApplicationSubmission));
+  bindManualApplyButtons(panel);
+  bindStopButtons(panel);
 }
 
 async function confirmApplicationSubmission(event) {
@@ -941,6 +1018,7 @@ async function refreshWorkers() {
   const workers = await api("/api/workers");
   renderWorkers(workers.items);
   renderApplicationQueue(workers.queue || [], workers.queue_summary || {});
+  renderManualApplications(workers.manual_applications || []);
 }
 
 async function refreshEvents() {
@@ -1443,6 +1521,11 @@ workerGrid.addEventListener("pointerdown", event => {
   if (canvas) canvas.focus();
 });
 workerGrid.addEventListener("click", event => {
+  const stopButton = event.target.closest(".stop-agent");
+  if (stopButton) {
+    stopAgentSession(stopButton.closest("[data-stop-job]").dataset.stopJob, stopButton);
+    return;
+  }
   const returnButton = event.target.closest("[data-return-browser-control]");
   if (returnButton) {
     returnBrowserControl(returnButton);

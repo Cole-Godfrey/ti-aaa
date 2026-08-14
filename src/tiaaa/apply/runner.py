@@ -29,6 +29,7 @@ from tiaaa.apply.prompt import (
 )
 from tiaaa.config import AppPaths
 from tiaaa.database import (
+    agent_stop_requested,
     answered_agent_inputs,
     applications_today,
     claim_next_job,
@@ -457,10 +458,15 @@ def _stream_input_message(prompt: str) -> dict[str, Any]:
     }
 
 
+class AgentSessionStopped(Exception):
+    """Raised when the candidate stops a running application from the dashboard."""
+
+
 class _ClaudeProcess:
     """Keep one Claude/MCP conversation alive across candidate-input checkpoints."""
 
     _END = object()
+    _STOP_POLL_SECONDS = 0.5
 
     def __init__(
         self,
@@ -507,7 +513,13 @@ class _ClaudeProcess:
         finally:
             self._lines.put(self._END)
 
-    def turn(self, prompt: str, *, timeout: int | float) -> tuple[str, int]:
+    def turn(
+        self,
+        prompt: str,
+        *,
+        timeout: int | float,
+        should_stop: Any = None,
+    ) -> tuple[str, int]:
         """Send one user turn and read through its terminal result message."""
 
         if not self.alive or self.process.stdin is None:
@@ -535,9 +547,22 @@ class _ClaudeProcess:
                     timeout,
                     output=partial,
                 )
+            if should_stop is not None and should_stop():
+                stop_process_tree(self.process)
+                raise AgentSessionStopped("".join(lines))
             try:
-                item = self._lines.get(timeout=remaining)
+                # Wait in slices so a dashboard stop ends a long browser turn
+                # instead of waiting out the whole agent timeout.
+                item = self._lines.get(
+                    timeout=(
+                        min(remaining, self._STOP_POLL_SECONDS)
+                        if should_stop is not None
+                        else remaining
+                    )
+                )
             except Empty as exc:
+                if should_stop is not None and time.monotonic() < deadline:
+                    continue
                 partial = "".join(lines)
                 stop_process_tree(self.process)
                 raise subprocess.TimeoutExpired(
@@ -743,11 +768,19 @@ def _run_agent_turn(
     timeout: int,
     submit: bool,
     turn_number: int,
+    should_stop: Any = None,
 ) -> tuple[AgentResult, dict[str, Any]]:
     """Run one turn without closing the live Claude or browser session."""
 
     try:
-        output, returncode = process.turn(prompt, timeout=timeout)
+        output, returncode = process.turn(
+            prompt, timeout=timeout, should_stop=should_stop
+        )
+    except AgentSessionStopped:
+        return (
+            AgentResult("cancelled", "Stopped in the dashboard", "cancelled"),
+            {"browser_actions": [], "mcp_servers": []},
+        )
     except subprocess.TimeoutExpired as exc:
         partial_output = _timeout_output(exc)
         _write_safe_diagnostic(
@@ -819,6 +852,7 @@ class _ApplicationAgentSession:
         submit: bool,
         unattended: bool,
         application_answers: dict[str, dict[str, Any]] | None = None,
+        should_stop: Any = None,
     ) -> None:
         self.job = job
         self.paths = paths
@@ -826,6 +860,7 @@ class _ApplicationAgentSession:
         self.timeout = timeout
         self.submit = submit
         self.unattended = unattended
+        self.should_stop = should_stop
         self.submission_authorized = submit
         self.submission_started = False
         self.turn_number = 0
@@ -880,6 +915,7 @@ class _ApplicationAgentSession:
             timeout=self.timeout,
             submit=self.submit if submit is None else submit,
             turn_number=self.turn_number,
+            should_stop=self.should_stop,
         )
 
     def start(self) -> AgentResult:
@@ -962,11 +998,14 @@ def _wait_for_agent_answers(
     *,
     timeout: int | float = 1800,
     poll_interval: float = 0.25,
+    should_stop: Any = None,
 ) -> dict[str, dict[str, Any]] | None:
     """Wait while the browser stays open for answers submitted through the dashboard."""
 
     deadline = time.monotonic() + max(0, float(timeout))
     while True:
+        if should_stop is not None and should_stop():
+            return None
         if not list_agent_inputs(connection, job_id, pending_only=True):
             answers = answered_agent_inputs(connection, job_id)
             return answers or None
@@ -982,11 +1021,14 @@ def _wait_for_submission_confirmation(
     *,
     timeout: int | float = 1800,
     poll_interval: float = 0.25,
+    should_stop: Any = None,
 ) -> bool:
     """Wait for an in-dashboard Submit confirmation while the form stays live."""
 
     deadline = time.monotonic() + max(0, float(timeout))
     while True:
+        if should_stop is not None and should_stop():
+            return False
         if not live_submission_checkpoint(connection, job_id, worker_id):
             return False
         if final_submission_requested(connection, job_id, worker_id):
@@ -1003,11 +1045,14 @@ def _wait_for_human_control_return(
     *,
     timeout: int | float = 1800,
     poll_interval: float = 0.25,
+    should_stop: Any = None,
 ) -> bool:
     """Wait while the candidate controls the exact retained browser tab."""
 
     deadline = time.monotonic() + max(0, float(timeout))
     while True:
+        if should_stop is not None and should_stop():
+            return False
         if not live_human_interaction_checkpoint(connection, job_id, worker_id):
             return False
         if human_control_returned(connection, job_id, worker_id):
@@ -1015,6 +1060,19 @@ def _wait_for_human_control_return(
         if time.monotonic() >= deadline:
             return False
         time.sleep(max(0.01, min(float(poll_interval), 1.0)))
+
+
+def _stop_check(connection: Any, job_id: int):
+    """Return a cheap poll the live session uses to notice a dashboard stop."""
+
+    def requested() -> bool:
+        try:
+            return agent_stop_requested(connection, job_id)
+        except Exception:  # a transient database error must not kill the run
+            log.debug("Stop check failed for job %s", job_id, exc_info=True)
+            return False
+
+    return requested
 
 
 def _agent_input_wait_timeout() -> int:
@@ -1045,7 +1103,7 @@ def _worker(
     preview: PreviewCapture | None = None
     worker_name = f"worker-{worker_id}"
     preview_path = paths.previews / f"{worker_name}.jpg"
-    totals = {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+    totals = {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
     update_worker_state(
         connection,
         worker_name,
@@ -1110,6 +1168,7 @@ def _worker(
                 screenshot_path=str(preview_path.resolve()),
             )
             agent_session: _ApplicationAgentSession | None = None
+            stop_requested = _stop_check(connection, int(job["id"]))
             try:
                 agent_session = _ApplicationAgentSession(
                     job=job,
@@ -1124,6 +1183,7 @@ def _worker(
                     application_answers=answered_agent_inputs(
                         connection, int(job["id"])
                     ),
+                    should_stop=stop_requested,
                 )
                 try:
                     agent_result = agent_session.start()
@@ -1201,12 +1261,17 @@ def _worker(
                             "Human control is enabled in Agent; solve the CAPTCHA or inspect the "
                             "stalled submission in this same browser"
                         ),
+                        "cancelled": "Session stopped by the candidate",
                         "failed": "Application attempt failed",
                     }.get(result, result.replace("_", " ").title())
                     update_worker_state(
                         connection,
                         worker_name,
-                        status="complete" if result == "applied" else result,
+                        status=(
+                            "complete"
+                            if result == "applied"
+                            else "stopped" if result == "cancelled" else result
+                        ),
                         job=job,
                         message=f"{result_message}{f': {detail}' if detail else ''}",
                         screenshot_path=str(preview_path.resolve()),
@@ -1217,6 +1282,7 @@ def _worker(
                             connection,
                             int(job["id"]),
                             timeout=_agent_input_wait_timeout(),
+                            should_stop=stop_requested,
                         )
                         if answers is not None and resume_application_after_input(
                             connection,
@@ -1250,6 +1316,7 @@ def _worker(
                             int(job["id"]),
                             worker_name,
                             timeout=_agent_input_wait_timeout(),
+                            should_stop=stop_requested,
                         )
                         if returned and resume_application_after_human_control(
                             connection,
@@ -1278,6 +1345,7 @@ def _worker(
                             int(job["id"]),
                             worker_name,
                             timeout=_agent_input_wait_timeout(),
+                            should_stop=stop_requested,
                         )
                         if confirmed and resume_application_for_submission(
                             connection,
@@ -1300,10 +1368,34 @@ def _worker(
                             worker_name,
                         )
 
+                    if result != "cancelled" and stop_requested():
+                        # The candidate ended this session while it waited at a
+                        # checkpoint. Release the claim instead of leaving the
+                        # listing parked in a retained review state.
+                        mark_apply_result(
+                            connection,
+                            int(job["id"]),
+                            "cancelled",
+                            "Stopped in the dashboard",
+                            reason_code="cancelled",
+                        )
+                        update_worker_state(
+                            connection,
+                            worker_name,
+                            status="stopped",
+                            job=job,
+                            message="Session stopped by the candidate",
+                            screenshot_path=str(preview_path.resolve()),
+                        )
+                        totals["stopped"] += 1
+                        break
+
                     if result == "applied":
                         totals["applied"] += 1
                     elif result == "expired":
                         totals["expired"] += 1
+                    elif result == "cancelled":
+                        totals["stopped"] += 1
                     elif result in {"review_ready", "needs_review", "captcha"}:
                         totals["review"] += 1
                     else:
@@ -1439,7 +1531,7 @@ def run_applications(
         ),
     )
     if requested <= 0:
-        return {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+        return {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
     if shutil.which("claude") is None:
         raise FileNotFoundError("Claude Code CLI was not found on PATH")
     if not os.environ.get("TIAAA_PLAYWRIGHT_MCP_COMMAND") and shutil.which("npx") is None:
@@ -1447,7 +1539,7 @@ def run_applications(
 
     base, extra = divmod(requested, workers)
     quotas = [base + (1 if worker_id < extra else 0) for worker_id in range(workers)]
-    totals = {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+    totals = {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
     lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tiaaa-apply") as executor:
         futures = [
@@ -1471,5 +1563,5 @@ def run_applications(
             result = future.result()
             with lock:
                 for key in totals:
-                    totals[key] += result[key]
+                    totals[key] += int(result.get(key, 0))
     return totals

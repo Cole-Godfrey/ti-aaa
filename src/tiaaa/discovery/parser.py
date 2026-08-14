@@ -251,6 +251,8 @@ def _make_listing(
         closed="🔒" in row_raw or "application closed" in row_raw.casefold(),
         no_sponsorship="🛂" in row_raw,
         citizenship_required="🇺🇸" in row_raw,
+        # The upstream legend reads: 🎓 Advanced degree required (Master's, PhD, MBA).
+        advanced_degree_required="🎓" in row_raw,
         metadata={"season": source.season},
     )
     return listing, next_inherited

@@ -58,10 +58,13 @@ from tiaaa.database import (
     list_agent_inputs,
     list_application_queue,
     list_jobs,
+    list_manual_handoff_jobs,
     list_resumes,
     live_human_interaction_checkpoint,
+    mark_applied_manually,
     record_dashboard_visit,
     refresh_qualification_scores,
+    request_agent_stop,
     set_app_state,
     source_baseline_complete,
     source_status,
@@ -606,6 +609,29 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "continuing", "job": _public_job(row)}
 
+    @app.post("/api/jobs/{job_id}/stop", status_code=202)
+    def stop_agent_session(job_id: int) -> dict[str, Any]:
+        try:
+            row = request_agent_stop(connection(), job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {
+            "status": "stopping" if row["pipeline_status"] == "applying" else "stopped",
+            "job": _public_job(row),
+        }
+
+    @app.post("/api/jobs/{job_id}/applied-manually")
+    def record_manual_application(job_id: int) -> dict[str, Any]:
+        try:
+            row = mark_applied_manually(connection(), job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if row is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"status": "applied", "job": _public_job(row)}
+
     @app.patch("/api/jobs/{job_id}")
     def patch_job(
         job_id: int,
@@ -756,6 +782,11 @@ def create_app(
                     else None
                 )
                 item["apply_origin"] = job_row.get("apply_origin")
+                item["stop_requested"] = bool(job_row.get("stop_requested"))
+                item["stoppable"] = bool(
+                    job_row.get("pipeline_status") in {"applying", "manual_review"}
+                    and job_row.get("worker_id") == item.get("worker_id")
+                )
                 item["submission_ready"] = bool(
                     job_row.get("pipeline_status") == "manual_review"
                     and job_row.get("worker_id") == item.get("worker_id")
@@ -789,6 +820,7 @@ def create_app(
         return {
             "items": items,
             "queue": queue,
+            "manual_applications": list_manual_handoff_jobs(database),
             "queue_summary": {
                 "serial": True,
                 "active": sum(item["queue_state"] == "active" for item in queue),

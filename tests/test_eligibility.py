@@ -25,11 +25,15 @@ def listing(**overrides) -> InternshipListing:
 
 def test_sponsorship_and_citizenship_are_hard_gates(profile, settings) -> None:
     profile["work_authorization"]["requires_sponsorship"] = True
-    assert not evaluate_listing(listing(no_sponsorship=True), profile, settings).eligible
+    sponsorship = evaluate_listing(listing(no_sponsorship=True), profile, settings)
+    assert not sponsorship.eligible
+    assert sponsorship.score <= 2
 
     profile["work_authorization"]["requires_sponsorship"] = False
     profile["work_authorization"]["us_citizen"] = False
-    assert not evaluate_listing(listing(citizenship_required=True), profile, settings).eligible
+    citizenship = evaluate_listing(listing(citizenship_required=True), profile, settings)
+    assert not citizenship.eligible
+    assert citizenship.score <= 2
 
 
 def test_qualification_score_does_not_use_role_or_location_preferences(
@@ -119,6 +123,72 @@ def test_degree_alternatives_and_matching_advanced_degrees_remain_qualified(
     assert evaluate_listing(
         listing(role="Machine Learning Intern (MS/PhD)"), profile, settings
     ).eligible
+
+
+def test_source_advanced_degree_flag_is_a_hard_gate_without_a_title_hint(
+    profile, settings
+) -> None:
+    flagged = listing(role="Research Scientist Intern", advanced_degree_required=True)
+
+    result = evaluate_listing(flagged, profile, settings)
+
+    assert result.eligible is False
+    assert result.reason == (
+        "source list marks this role advanced-degree only (master's, PhD, or MBA)"
+    )
+    assert result.score <= 2
+    assert "advanced-degree only" in result.score_reasoning
+
+
+def test_advanced_degree_flag_clears_for_matching_and_bachelor_friendly_roles(
+    profile, settings
+) -> None:
+    profile["education"]["degree"] = "Master of Science"
+    assert evaluate_listing(
+        listing(role="Research Scientist Intern", advanced_degree_required=True),
+        profile,
+        settings,
+    ).eligible
+
+    profile["education"]["degree"] = "Bachelor of Science"
+    # An explicit bachelor's option in the title is more specific than the
+    # repository-wide flag, so the listing stays qualified.
+    assert evaluate_listing(
+        listing(role="Software Intern (BS/MS)", advanced_degree_required=True),
+        profile,
+        settings,
+    ).eligible
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        "Research Intern (Graduate Students)",
+        "Product Management Intern - MBA",
+        "Postdoctoral Research Intern",
+        "Quantitative Intern - Advanced Degree",
+    ],
+)
+def test_graduate_only_titles_are_detected_beyond_the_phd_keyword(
+    profile, settings, role
+) -> None:
+    assert evaluate_listing(listing(role=role), profile, settings).eligible is False
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["New Grad Software Engineer Intern", "Graduate Program Intern", "Data Science Intern"],
+)
+def test_new_grad_and_general_titles_stay_qualified(profile, settings, role) -> None:
+    assert evaluate_listing(listing(role=role), profile, settings).eligible is True
+
+
+def test_hard_qualification_gates_pin_the_fit_score_low(profile, settings) -> None:
+    qualified = evaluate_listing(listing(), profile, settings)
+    blocked = evaluate_listing(listing(role="Research Intern (PhD)"), profile, settings)
+
+    assert qualified.score >= 7
+    assert blocked.score <= 2
 
 
 def test_previous_company_intern_roles_require_recorded_experience(

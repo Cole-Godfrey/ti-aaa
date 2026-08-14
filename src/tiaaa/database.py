@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import re
 import sqlite3
@@ -68,6 +69,7 @@ _VERIFICATION_CODE_PATTERN = re.compile(
 _AUTO_TERMINAL_REASON_CODES = {
     "access_blocked",
     "assessment_required",
+    "cancelled",
     "captcha",
     "eligibility_conflict",
     "login_required",
@@ -152,10 +154,28 @@ atexit.register(close_all_connections)
 
 def _ensure_column(
     connection: sqlite3.Connection, table: str, column: str, declaration: str
-) -> None:
+) -> bool:
+    """Add one missing column and report whether this call created it."""
+
     columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
-    if column not in columns:
-        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    if column in columns:
+        return False
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    return True
+
+
+def invalidate_source_cache(connection: sqlite3.Connection) -> int:
+    """Force the next poll to re-read every source document.
+
+    Sources are normally skipped while their content hash is unchanged. A new
+    listing field has to be imported for rows that already exist, so the stored
+    validators are cleared once when that field is introduced.
+    """
+
+    cursor = connection.execute(
+        "UPDATE sources SET etag = NULL, last_modified = NULL, content_sha256 = NULL"
+    )
+    return cursor.rowcount
 
 
 def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -211,6 +231,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             availability_checked_at TEXT,
             no_sponsorship        INTEGER NOT NULL DEFAULT 0,
             citizenship_required  INTEGER NOT NULL DEFAULT 0,
+            advanced_degree_required INTEGER NOT NULL DEFAULT 0,
             eligibility           TEXT NOT NULL DEFAULT 'eligible',
             eligibility_reason    TEXT,
             fit_score             INTEGER,
@@ -233,6 +254,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             apply_reason_code     TEXT,
             submission_requested  INTEGER NOT NULL DEFAULT 0,
             human_control_returned INTEGER NOT NULL DEFAULT 0,
+            stop_requested        INTEGER NOT NULL DEFAULT 0,
             applied_at            TEXT,
             apply_error           TEXT,
             last_attempted_at      TEXT,
@@ -355,6 +377,10 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     _ensure_column(
         connection, "jobs", "human_control_returned", "INTEGER NOT NULL DEFAULT 0"
     )
+    _ensure_column(connection, "jobs", "stop_requested", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(
+        connection, "jobs", "advanced_degree_required", "INTEGER NOT NULL DEFAULT 0"
+    )
     _ensure_column(
         connection, "jobs", "availability_status", "TEXT NOT NULL DEFAULT 'unknown'"
     )
@@ -419,6 +445,12 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             "INSERT OR IGNORE INTO app_state (key, value, updated_at) VALUES (?, ?, ?)",
             (key, value, now),
         )
+    if not get_app_state(connection).get("advanced_degree_flag_imported"):
+        # Existing rows were imported before the source lists' advanced-degree
+        # marker was read. Sources are skipped while their content is unchanged,
+        # so clear the validators once to re-import every listing with it.
+        invalidate_source_cache(connection)
+        set_app_state(connection, "advanced_degree_flag_imported", True)
     backfill_legacy_agent_inputs(connection)
     reconcile_source_registry(connection, SOURCE_DOCUMENTS)
     connection.commit()
@@ -979,6 +1011,19 @@ def resume_application_after_input(
 
 def recover_stale_work(connection: sqlite3.Connection) -> int:
     now = utc_now()
+    # A stop requested before the restart outlives the worker it targeted.
+    stopped = connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'skipped', worker_id = NULL,
+                        manual_requested = 0, submission_requested = 0,
+                        human_control_returned = 0, stop_requested = 0,
+                        apply_reason_code = 'cancelled',
+                        apply_error = 'Stopped in the dashboard', updated_at = ?
+        WHERE stop_requested = 1
+          AND pipeline_status IN ('applying', 'manual_review', 'queued', 'ready', 'failed')
+        """,
+        (now,),
+    )
     applying = connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'ready', worker_id = NULL,
@@ -1001,7 +1046,7 @@ def recover_stale_work(connection: sqlite3.Connection) -> int:
         (now,),
     )
     connection.commit()
-    return applying.rowcount + checkpoints.rowcount
+    return stopped.rowcount + applying.rowcount + checkpoints.rowcount
 
 
 def add_event(
@@ -1226,6 +1271,10 @@ def ingest_listings(
                     citizenship_required=bool(
                         listing.citizenship_required or row["citizenship_required"]
                     ),
+                    advanced_degree_required=bool(
+                        listing.advanced_degree_required
+                        or row["advanced_degree_required"]
+                    ),
                 )
             eligibility = evaluate_listing(eligibility_listing, profile, settings)
             agent_conflict = bool(
@@ -1263,11 +1312,12 @@ def ingest_listings(
                         fingerprint, canonical_url, application_url, company, role, location,
                         category, posting_date, first_seen_at, last_seen_at, is_active,
                         availability_status, availability_detail, availability_checked_at,
-                        no_sponsorship, citizenship_required, eligibility, eligibility_reason,
+                        no_sponsorship, citizenship_required, advanced_degree_required,
+                        eligibility, eligibility_reason,
                         fit_score, score_reasoning, scored_at, pipeline_status, discovered_as_new,
                         created_at, updated_at
                     ) VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -1286,6 +1336,7 @@ def ingest_listings(
                         now if listing.closed else None,
                         int(listing.no_sponsorship),
                         int(listing.citizenship_required),
+                        int(listing.advanced_degree_required),
                         "eligible" if eligibility.eligible else "ineligible",
                         eligibility.reason,
                         eligibility.score,
@@ -1365,6 +1416,7 @@ def ingest_listings(
                         availability_checked_at = ?,
                         no_sponsorship = no_sponsorship OR ?,
                         citizenship_required = citizenship_required OR ?,
+                        advanced_degree_required = advanced_degree_required OR ?,
                         eligibility = ?, eligibility_reason = ?,
                         fit_score = COALESCE(fit_score, ?),
                         score_reasoning = COALESCE(score_reasoning, ?),
@@ -1385,6 +1437,7 @@ def ingest_listings(
                         availability_checked_at,
                         int(listing.no_sponsorship),
                         int(listing.citizenship_required),
+                        int(listing.advanced_degree_required),
                         "eligible" if eligibility.eligible else "ineligible",
                         eligibility.reason,
                         eligibility.score,
@@ -1537,6 +1590,7 @@ def refresh_qualification_scores(
             closed=bool(row["availability_status"] == "closed"),
             no_sponsorship=bool(row["no_sponsorship"]),
             citizenship_required=bool(row["citizenship_required"]),
+            advanced_degree_required=bool(row["advanced_degree_required"]),
         )
         evaluation = evaluate_listing(listing, profile, settings)
         agent_conflict = row["apply_reason_code"] == "eligibility_conflict"
@@ -1556,6 +1610,11 @@ def refresh_qualification_scores(
         )
         keep_existing_score = preserve_scores and row["fit_score"] is not None
         score = int(row["fit_score"]) if keep_existing_score else evaluation.score
+        if agent_conflict and not keep_existing_score:
+            # The agent read the employer page and found an unmet hard
+            # requirement. A heuristic fit computed from the title alone must
+            # not keep advertising this listing as a good match.
+            score = min(score, 2)
         score_reasoning = (
             str(row["score_reasoning"] or evaluation.score_reasoning)
             if keep_existing_score
@@ -1929,6 +1988,10 @@ def update_tracker(
         if pipeline_status == "applied" and not row.get("applied_at"):
             updates.append("applied_at = ?")
             values.append(now)
+            # The browser agent always records its own submission time, so a
+            # tracker row that reaches 'applied' without one was submitted by
+            # the candidate outside TI-AAA.
+            updates.append("apply_origin = 'self'")
         if pipeline_status == "applied":
             updates.append("submitted_resume_id = COALESCE(submitted_resume_id, base_resume_id)")
             updates.append("submitted_resume_path = COALESCE(submitted_resume_path, resume_path)")
@@ -2078,7 +2141,7 @@ def request_manual_application(
         UPDATE jobs SET pipeline_status = ?, manual_requested = 1,
                         manual_requested_at = ?, apply_error = NULL, updated_at = ?,
                         apply_reason_code = NULL, submission_requested = 0,
-                        human_control_returned = 0,
+                        human_control_returned = 0, stop_requested = 0,
                         apply_attempts = CASE WHEN pipeline_status = 'failed'
                             THEN 0 ELSE apply_attempts END
         WHERE id = ?
@@ -2126,8 +2189,8 @@ def retry_manual_application(
             UPDATE jobs SET pipeline_status = ?, manual_requested = 1,
                             manual_requested_at = ?, apply_error = NULL,
                             apply_reason_code = NULL, submission_requested = 0,
-                            human_control_returned = 0, worker_id = NULL,
-                            apply_attempts = 0, updated_at = ?
+                            human_control_returned = 0, stop_requested = 0,
+                            worker_id = NULL, apply_attempts = 0, updated_at = ?
             WHERE id = ? AND pipeline_status = 'manual_review'
             """,
             (next_status, now, now, job_id),
@@ -2143,6 +2206,219 @@ def retry_manual_application(
     except Exception:
         connection.rollback()
         raise
+
+
+def profile_facts_changed(
+    connection: sqlite3.Connection, profile: dict[str, Any]
+) -> bool:
+    """Record the candidate-fact fingerprint and report whether it just changed."""
+
+    digest = hashlib.sha256(
+        json.dumps(profile, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+    stored = get_app_state(connection).get("profile_facts_digest")
+    if stored == digest:
+        return False
+    set_app_state(connection, "profile_facts_digest", digest)
+    return True
+
+
+def clear_missing_fact_blocks(connection: sqlite3.Connection) -> int:
+    """Requeue listings the agent stopped only because a candidate fact was absent.
+
+    Auto mode treats a missing fact as terminal so it cannot loop on the same
+    unanswerable form. Once the candidate supplies that fact, the block is stale
+    and those listings deserve a fresh attempt.
+    """
+
+    rows = connection.execute(
+        """
+        SELECT id FROM jobs
+        WHERE apply_reason_code = 'missing_input'
+          AND applied_at IS NULL
+          AND is_active = 1
+          AND pipeline_status = 'failed'
+          AND availability_status NOT IN ('closed', 'manual_only')
+        """
+    ).fetchall()
+    if not rows:
+        return 0
+    now = utc_now()
+    for row in rows:
+        job_id = int(row["id"])
+        connection.execute(
+            """
+            UPDATE jobs
+            SET pipeline_status = CASE WHEN resume_path IS NULL THEN 'queued' ELSE 'ready' END,
+                apply_error = NULL, apply_reason_code = NULL, apply_attempts = 0,
+                submission_requested = 0, human_control_returned = 0,
+                worker_id = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, job_id),
+        )
+        add_event(
+            connection,
+            job_id,
+            "requeued",
+            "Candidate facts changed; the missing-fact block was cleared",
+        )
+    connection.commit()
+    return len(rows)
+
+
+STOPPABLE_PIPELINE_STATUSES = {"queued", "ready", "applying", "manual_review", "failed"}
+
+
+def request_agent_stop(
+    connection: sqlite3.Connection,
+    job_id: int,
+    *,
+    detail: str | None = None,
+) -> dict[str, Any] | None:
+    """Cancel one queued or running browser-agent attempt.
+
+    A live agent turn cannot be interrupted from here, so 'applying' rows only
+    raise the flag its worker polls. Every other state has no agent turn in
+    flight and is ended immediately.
+    """
+
+    row = get_job(connection, job_id)
+    if row is None:
+        return None
+    status = str(row["pipeline_status"])
+    if status not in STOPPABLE_PIPELINE_STATUSES:
+        raise ValueError("This listing has no queued or running agent session")
+    now = utc_now()
+    message = detail or "Stopped in the dashboard"
+    connection.execute(
+        "UPDATE jobs SET stop_requested = 1, updated_at = ? WHERE id = ?",
+        (now, job_id),
+    )
+    add_event(connection, job_id, "stop_requested", message)
+    connection.commit()
+    if status != "applying":
+        mark_apply_result(
+            connection,
+            job_id,
+            "cancelled",
+            message,
+            reason_code="cancelled",
+        )
+    return get_job(connection, job_id)
+
+
+def agent_stop_requested(connection: sqlite3.Connection, job_id: int) -> bool:
+    """Return whether the candidate asked this application attempt to stop."""
+
+    row = connection.execute(
+        "SELECT stop_requested FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    return bool(row and row["stop_requested"])
+
+
+def list_manual_handoff_jobs(
+    connection: sqlite3.Connection, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Return active listings the browser agent cannot or no longer will apply to."""
+
+    rows = connection.execute(
+        """
+        SELECT j.id, j.company, j.role, j.location, j.application_url,
+               j.fit_score, j.pipeline_status, j.availability_status,
+               j.availability_detail, j.apply_error, j.apply_reason_code,
+               j.availability_checked_at, j.updated_at
+        FROM jobs j
+        WHERE j.applied_at IS NULL
+          AND j.is_active = 1
+          AND j.pipeline_status NOT IN ('applied', 'withdrawn', 'expired')
+          AND (
+              j.availability_status = 'manual_only'
+              OR j.apply_reason_code = 'cancelled'
+          )
+        ORDER BY COALESCE(j.availability_checked_at, j.updated_at) DESC, j.id DESC
+        LIMIT ?
+        """,
+        (max(1, min(int(limit), 200)),),
+    ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "company": row["company"],
+            "role": row["role"],
+            "location": row["location"] or "",
+            "application_url": row["application_url"],
+            "fit_score": row["fit_score"],
+            "pipeline_status": row["pipeline_status"],
+            "handoff": (
+                "stopped"
+                if row["apply_reason_code"] == "cancelled"
+                else "employer_block"
+            ),
+            "detail": (
+                row["apply_error"]
+                if row["apply_reason_code"] == "cancelled"
+                else row["availability_detail"] or row["apply_error"]
+            )
+            or (
+                "You stopped this agent session"
+                if row["apply_reason_code"] == "cancelled"
+                else "This employer blocks the automated browser"
+            ),
+            "blocked_at": row["availability_checked_at"] or row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+def mark_applied_manually(
+    connection: sqlite3.Connection,
+    job_id: int,
+    *,
+    detail: str | None = None,
+) -> dict[str, Any] | None:
+    """Record an application the candidate submitted outside the browser agent."""
+
+    row = get_job(connection, job_id)
+    if row is None:
+        return None
+    if row.get("applied_at") or row["pipeline_status"] == "applied":
+        raise ValueError("This application is already recorded as submitted")
+    if row["pipeline_status"] == "applying":
+        raise ValueError(
+            "The browser agent is applying to this listing right now; wait for it to finish"
+        )
+    now = utc_now()
+    cursor = connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applied', applied_at = ?,
+                        apply_origin = 'self', apply_error = NULL,
+                        apply_reason_code = NULL, manual_requested = 0,
+                        submission_requested = 0, human_control_returned = 0,
+                        worker_id = NULL, updated_at = ?
+        WHERE id = ? AND applied_at IS NULL AND pipeline_status != 'applying'
+        """,
+        (now, now, job_id),
+    )
+    if not cursor.rowcount:
+        connection.rollback()
+        raise ValueError("This application can no longer be recorded as applied")
+    # A retained review session polls the job row; resolving its open questions
+    # lets that browser wait end instead of holding a checkpoint for a job the
+    # candidate already submitted.
+    connection.execute(
+        "UPDATE agent_inputs SET status = 'resolved', updated_at = ? "
+        "WHERE job_id = ? AND status = 'pending'",
+        (now, job_id),
+    )
+    add_event(
+        connection,
+        job_id,
+        "applied_manually",
+        detail or "Recorded as applied by the candidate outside the browser agent",
+    )
+    connection.commit()
+    return get_job(connection, job_id)
 
 
 def manual_application_ids(connection: sqlite3.Connection) -> list[int]:
@@ -2509,6 +2785,7 @@ def mark_apply_result(
         "expired": "expired",
         "needs_review": "manual_review",
         "captcha": "manual_review",
+        "cancelled": "skipped",
         "failed": "failed",
     }
     status = status_map.get(result, "failed")
@@ -2562,7 +2839,7 @@ def mark_apply_result(
                         eligibility_reason = CASE WHEN ? = 'eligibility_conflict'
                             THEN ? ELSE eligibility_reason END,
                         manual_requested = 0, submission_requested = 0,
-                        human_control_returned = 0,
+                        human_control_returned = 0, stop_requested = 0,
                         worker_id = CASE WHEN ? THEN worker_id ELSE NULL END,
                         updated_at = ?
         WHERE id = ?
