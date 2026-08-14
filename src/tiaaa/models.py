@@ -44,4 +44,5 @@ class InternshipListing:
     closed: bool = False
     no_sponsorship: bool = False
     citizenship_required: bool = False
+    advanced_degree_required: bool = False
     metadata: dict[str, str] = field(default_factory=dict)

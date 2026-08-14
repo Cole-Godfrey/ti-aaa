@@ -14,15 +14,24 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - a **Qualified** column and filter in Latest jobs, including visible hard-gate reasons
 - previous-internship employer facts for returning-intern qualification checks
 - required ordinary employer account creation with a stable per-portal credential
+- a **Stop session** control in the Agent tab that ends a running application attempt, including a looping CAPTCHA checkpoint, and releases the listing instead of queueing it again
+- an **I applied manually** record in the Agent tab, including a list of the roles whose employers block the browser agent or whose session you stopped
+- the source lists' advanced-degree marker is now imported and enforced, so master's-, PhD-, and MBA-only roles are **Not qualified** for a bachelor's profile even when the title omits the requirement
 
 ### Changed
 
+- the Applications tab opens on submitted applications instead of every ledger row
+- a hard qualification mismatch (degree, prior-intern, citizenship, sponsorship, or an agent-discovered conflict) now caps the fit score at 2 instead of leaving a mid-range score beside **Not qualified**
+- graduate-only titles are recognized beyond the PhD keyword, including MBA, MFE, DPhil, postdoctoral, "graduate students", and "advanced degree" phrasing
+- a stop requested before a restart is honored on the next start instead of resuming the attempt
+- applications recorded outside the browser agent are marked as candidate-submitted and are excluded from the application queue
 - submission-authorized runs now complete and audit the full form before a separate final-action browser turn
 - advanced-degree and previous-company-intern requirements now make a listing ineligible instead of only lowering its fit score
 - hard qualification conflicts discovered on an employer page remain ineligible during later sync cycles and are excluded from Auto mode
 
 ### Fixed
 
+- an application Auto mode stopped for a missing candidate fact is queued again after the profile supplies that fact, instead of staying permanently benched
 - package validation now accepts Core Metadata 2.5 emitted by current Hatchling releases
 - the browser agent no longer uses the final Submit control to trigger validation or discover unfinished fields
 - disabled or stuck **Submitting…** states without a receipt now become live human-interaction checkpoints instead of closing an intact application form

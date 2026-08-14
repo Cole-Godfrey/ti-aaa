@@ -659,6 +659,106 @@ def test_applications_page_retries_a_confirm_in_agent_checkpoint(
     assert client.get("/api/jobs?view=applications").json()["items"] == []
 
 
+def test_agent_page_records_a_bot_blocked_application_as_applied_manually(
+    tmp_path, profile, settings
+) -> None:
+    paths = AppPaths(tmp_path)
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    listing = InternshipListing(
+        company="Blocked Co",
+        role="Software Engineer Intern",
+        location="Remote",
+        application_url="https://jobs.test/blocked",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+    )
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    mark_apply_result(
+        connection,
+        1,
+        "needs_review",
+        "Employer returned HTTP 403",
+        reason_code="access_blocked",
+    )
+    client = TestClient(create_app(paths.database, paths=paths))
+
+    blocked = client.get("/api/workers").json()["manual_applications"]
+    assert [item["company"] for item in blocked] == ["Blocked Co"]
+    assert blocked[0]["application_url"] == "https://jobs.test/blocked"
+    assert blocked[0]["detail"] == "Employer returned HTTP 403"
+
+    response = client.post("/api/jobs/1/applied-manually")
+
+    assert response.status_code == 200
+    assert response.json()["job"]["pipeline_status"] == "applied"
+    assert response.json()["job"]["apply_origin"] == "self"
+    assert client.get("/api/workers").json()["manual_applications"] == []
+    applications = client.get("/api/jobs?view=applications&status=applied").json()["items"]
+    assert [item["company"] for item in applications] == ["Blocked Co"]
+    assert client.get("/api/stats").json()["applications"] == 1
+    assert client.post("/api/jobs/1/applied-manually").status_code == 409
+    assert client.post("/api/jobs/404/applied-manually").status_code == 404
+
+
+def test_agent_page_stops_a_looping_captcha_session_and_records_it(
+    tmp_path, profile, settings
+) -> None:
+    paths = AppPaths(tmp_path)
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    listing = InternshipListing(
+        company="Acme",
+        role="Software Engineer Intern",
+        location="Remote",
+        application_url="https://jobs.test/captcha",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+    )
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'manual_review', worker_id = 'worker-0',
+                        apply_reason_code = 'captcha', resume_path = ?
+        WHERE id = 1
+        """,
+        (str(tmp_path / "resume.pdf"),),
+    )
+    connection.commit()
+    update_worker_state(
+        connection,
+        "worker-0",
+        status="captcha",
+        job=get_job(connection, 1),
+        message="Solve the CAPTCHA in this browser",
+    )
+    client = TestClient(create_app(paths.database, paths=paths))
+
+    worker = client.get("/api/workers").json()["items"][0]
+    assert worker["stoppable"] is True
+    assert worker["stop_requested"] is False
+
+    response = client.post("/api/jobs/1/stop")
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "stopped"
+    assert response.json()["job"]["pipeline_status"] == "skipped"
+    payload = client.get("/api/workers").json()
+    assert payload["queue"] == []
+    assert [item["id"] for item in payload["manual_applications"]] == [1]
+    assert payload["manual_applications"][0]["handoff"] == "stopped"
+
+    recorded = client.post("/api/jobs/1/applied-manually")
+    assert recorded.status_code == 200
+    assert recorded.json()["job"]["apply_origin"] == "self"
+    assert client.get("/api/workers").json()["manual_applications"] == []
+    assert client.post("/api/jobs/1/stop").status_code == 409
+
+
 def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     paths = AppPaths(tmp_path)
     client = TestClient(create_app(paths.database, paths=paths))
@@ -680,6 +780,10 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'id="previousInternshipCompanies"' in index
     assert "Applications & checkpoints" in index
     assert '<option value="manual_review">Confirm in Agent</option>' in index
+    assert '<option value="applied" selected>Applied</option>' in index
+    assert 'id="manualApplyList"' in index
+    assert 'id="manualApplyCount"' in index
+    assert "Roles you apply to yourself" in index
     assert 'id="webPushOption" class="web-push-option hidden"' in index
     assert 'id="webPushNotifications"' in index
     assert 'id="autoApplyMinimumFit"' not in index
@@ -721,6 +825,13 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert "Any form currently open in Agent will close" in javascript
     assert 'api(`/api/jobs/${jobId}/retry`' in javascript
     assert 'renderApplicationQueue(workers.queue || [], workers.queue_summary || {})' in javascript
+    assert 'renderManualApplications(workers.manual_applications || [])' in javascript
+    assert 'api(`/api/jobs/${jobId}/applied-manually`' in javascript
+    assert 'api(`/api/jobs/${jobId}/stop`' in javascript
+    assert "I applied manually" in javascript
+    assert "Stop session" in javascript
+    assert "If the challenge keeps coming back, stop the session" in javascript
+    assert 'job.apply_origin === "self"' in javascript
     assert "Notification.requestPermission()" in javascript
     assert 'navigator.serviceWorker.register("/sw.js"' in javascript
     assert 'web_push_notifications: checked("autoMode") && checked("webPushNotifications")' in javascript

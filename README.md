@@ -44,11 +44,18 @@ TI-AAA reads these repositories:
 - The fit score measures candidate qualifications. It does not use role or location preferences.
 - The **Qualified** decision is a separate hard gate for degree, prior-intern, authorization, and
   configured requirements. Auto mode never claims a job marked **Not qualified**.
-- Strict role, location, and authorization rules can stop an application. They do not change the fit score.
+- The degree gate reads both the job title and the source list's advanced-degree marker, so a
+  master's-, PhD-, or MBA-only role is **Not qualified** for a bachelor's profile even when its
+  title says nothing about a degree.
+- A hard qualification mismatch—degree, prior-intern, citizenship, or sponsorship—caps the fit score
+  at 2 out of 10, so the ledger never shows a mid-range fit beside **Not qualified**.
+- Strict role and location filters can stop an application. They do not change the fit score.
 - You can use preferences as an extra automatic application rule. This rule is off by default.
 - Auto mode applies to one best-fit role for each company.
 - New job batches stay in a visible queue. One browser applies to them in order.
 - A manual **Apply** action ignores the automatic fit limit.
+- Some employers block the browser agent. Apply to those roles yourself, then record the submission with **I applied manually** in **Agent**. TI-AAA then counts the application and stops queueing that role.
+- **Stop session** ends a running attempt at any point. The listing is recorded as stopped, leaves the queue, and is never claimed again automatically.
 - By default, a manual application stops on the completed form for confirmation in **Agent**. You can opt into auto-submit for jobs you explicitly select.
 - The agent completes and audits the form before TI-AAA starts a separate final-submission turn. It does not use the final Submit control to discover missing fields.
 - Auto mode does not wait for user input. It submits safe applications and records why it stops others.
@@ -62,6 +69,7 @@ TI-AAA reads these repositories:
 - A local web app with guided setup
 - An always-on Docker service
 - A latest-jobs table with search, qualification status and reasons, and job details
+- Degree, prior-intern, and work-authorization gates that read the source list's own markers
 - Manual and automatic application modes
 - A separate fit limit for automatic applications
 - An optional preference gate for automatic applications
@@ -75,7 +83,9 @@ TI-AAA reads these repositories:
 - Input fields for agent questions
 - A one-time-code input that continues the same open application and clears the code after use
 - Final submission confirmation on the live completed form
-- An application tracker that includes submitted roles and **Confirm in Agent** checkpoints
+- A **Stop session** control that ends the running browser attempt from the Agent tab
+- A manual-application list in **Agent** for employers that block the browser agent and for sessions you stopped, with a one-click **I applied manually** record
+- An application tracker that opens on submitted applications and can filter to **Confirm in Agent** checkpoints
 - A clean Retry action for application checkpoints
 - Resume records for each submitted application
 - Application, online assessment (OA), interview, and offer statistics
@@ -157,7 +167,14 @@ The manual action does not require automatic apply. It also does not use the aut
 
 If the employer presents a CAPTCHA—or Submit stays disabled on **Submitting…** without producing a receipt—the manual application pauses with the exact Chromium tab still open. In **Agent**, use the live canvas to click the challenge, focus and type or paste into fields, and scroll. Select **Continue agent** when the challenge is clear or a receipt is visible. TI-AAA then inspects and continues that same page; it does not send you to a fresh job link or browser where the form state could be lost. Auto mode remains unattended and records CAPTCHA checkpoints as stopped attempts.
 
-If a **Confirm in Agent** checkpoint needs to start over, open **Applications** and select **Retry**. TI-AAA closes any retained live form, clears pending checkpoint inputs, and queues a fresh browser attempt.
+If a challenge keeps returning, or you finish the form yourself, you do not have to keep answering the
+agent. **Stop session** on the worker card and on every Agent checkpoint ends that attempt: TI-AAA
+closes the Claude turn and its browser, releases the listing, and records it as stopped instead of
+queueing it again. A running turn stops within about a second; nothing waits for the agent timeout.
+
+If an employer blocks the automated browser, or you stopped a session, that role moves to **Roles you apply to yourself** in **Agent**. Open the listing, complete the application in your own browser, then select **I applied manually**. TI-AAA records the submission with today's date, counts it in **Applications** and **Analytics**, and never queues that role for the browser agent again. The same action appears on the live-browser and employer-access-block checkpoint cards.
+
+If a **Confirm in Agent** checkpoint needs to start over, open **Applications**, switch the filter to **Confirm in Agent**, and select **Retry**. TI-AAA closes any retained live form, clears pending checkpoint inputs, and queues a fresh browser attempt.
 
 ### Docker commands
 
@@ -262,8 +279,12 @@ tiaaa jobs
 tiaaa status
 tiaaa prepare
 tiaaa apply --job-id 42
+tiaaa mark 42 --pipeline applied
 tiaaa mark 42 --outcome oa
 ```
+
+`tiaaa mark <id> --pipeline applied` is the terminal equivalent of **I applied manually**: it records the
+submission with the current time and marks it as candidate-submitted.
 
 Run a continuous foreground worker:
 
@@ -369,7 +390,7 @@ These secrets are optional:
 - Community internship lists and their outbound links are third-party data. TI-AAA rejects listed links that directly target local/private-network addresses, but you should review the sources and employers before enabling Auto mode.
 - The agent does not invent candidate facts.
 - Manual applications ask for unknown, ordinary candidate facts and can pause for a one-time code sent to the candidate's configured email address or phone.
-- Auto mode does not ask for input. A missing required personal fact stops that application and is recorded.
+- Auto mode does not ask for input. A missing required personal fact stops that application and is recorded. Add the fact in **Settings** and save: TI-AAA queues those stopped applications again on the next cycle.
 - Auto mode can answer subjective questions and compensation questions without inventing candidate facts.
 - One-time verification codes can be entered in the local Agent view and are cleared after the browser turn uses them. CAPTCHAs can be completed by the candidate in the retained live browser; TI-AAA does not solve or bypass them. Social SSO, non-code MFA, assessments, and identity checks still require a manual handoff.
 - Required ordinary employer accounts use the candidate email and a deterministic password unique to the careers-portal hostname. The private derivation key is stored with local user-only permissions; the generated plaintext password is sent to the browser agent when needed but is not stored.

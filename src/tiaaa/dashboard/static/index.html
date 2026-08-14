@@ -110,11 +110,11 @@
       <section class="view" data-view="applications">
         <article class="panel table-panel">
           <div class="panel-head tracker-head">
-            <div><p class="kicker">APPLICATION LEDGER</p><h2>Applications & checkpoints</h2><p>Submitted roles and applications waiting for action in Agent appear here.</p></div>
+            <div><p class="kicker">APPLICATION LEDGER</p><h2>Applications & checkpoints</h2><p>Submitted roles are shown by default. Switch the filter to see applications waiting for action in Agent.</p></div>
             <div class="filters">
               <input id="searchInput" type="search" placeholder="Search company, role, location" autocomplete="off">
               <select id="statusFilter" aria-label="Filter applications by status">
-                <option value="all">All applications</option><option value="manual_review">Confirm in Agent</option><option value="applied">Applied</option>
+                <option value="all">All applications</option><option value="manual_review">Confirm in Agent</option><option value="applied" selected>Applied</option>
                 <option value="oa">OA received</option><option value="interview">Interviewing</option>
                 <option value="offer">Offer</option><option value="rejected">Rejected</option>
                 <option value="withdrawn">Withdrawn</option>
@@ -169,6 +169,11 @@
           <div class="panel-head"><div><p class="kicker">APPLICATION QUEUE</p><h2>One job at a time</h2></div><span id="agentQueueCount" class="tag">0 waiting</span></div>
           <p class="queue-explainer">Repository batches stay in this local queue. One browser finishes or safely stops the current application before it starts the next one.</p>
           <div id="agentQueueList" class="agent-queue-list"><div class="empty">No applications are waiting.</div></div>
+        </article>
+        <article class="panel manual-apply-panel">
+          <div class="panel-head"><div><p class="kicker">MANUAL APPLICATIONS</p><h2>Roles you apply to yourself</h2></div><span id="manualApplyCount" class="tag">0 open</span></div>
+          <p class="queue-explainer">Some employers block the browser agent, and you can stop any session yourself. Those roles wait here: open the listing, apply in your own browser, then record the submission so TI-AAA counts it, stops queueing the role, and includes it in your statistics.</p>
+          <div id="manualApplyList" class="manual-apply-list"><div class="empty">No employer has blocked the browser agent, and no session was stopped.</div></div>
         </article>
         <div id="workerGrid" class="worker-grid"></div>
         <div id="agentInputPanel" class="agent-input-stack"></div>

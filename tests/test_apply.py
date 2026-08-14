@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -17,6 +18,7 @@ from tiaaa.apply.prompt import (
 )
 from tiaaa.apply.runner import (
     AgentResult,
+    AgentSessionStopped,
     _bridge_is_unavailable,
     _bridge_needs_retry,
     _claude_command,
@@ -197,6 +199,78 @@ def test_streaming_claude_process_accepts_multiple_turns(tmp_path) -> None:
     assert second_returncode == 0
     assert _extract_agent_text(first) == "turn-1"
     assert _extract_agent_text(second) == "turn-2"
+
+
+def test_streaming_claude_turn_ends_when_the_dashboard_stops_the_session(tmp_path) -> None:
+    silent_agent = (
+        "import sys, time\n"
+        "for line in sys.stdin:\n"
+        "    time.sleep(30)\n"
+    )
+    session = _ClaudeProcess(
+        [sys.executable, "-u", "-c", silent_agent],
+        cwd=tmp_path,
+        environment=os.environ.copy(),
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(AgentSessionStopped):
+            session.turn("apply", timeout=30, should_stop=lambda: True)
+    finally:
+        session.close()
+
+    assert time.monotonic() - started < 10
+    assert session.alive is False
+
+
+def test_stopped_turn_reports_a_cancelled_result(tmp_path) -> None:
+    class StoppedProcess:
+        alive = True
+
+        def turn(self, _prompt, *, timeout, should_stop=None):
+            raise AgentSessionStopped("")
+
+    result, summary = runner._run_agent_turn(
+        process=StoppedProcess(),
+        prompt="apply",
+        job={"id": 1},
+        paths=AppPaths(tmp_path),
+        worker_id=0,
+        timeout=5,
+        submit=False,
+        turn_number=1,
+        should_stop=lambda: True,
+    )
+
+    assert result.result == "cancelled"
+    assert result.reason_code == "cancelled"
+    assert summary["browser_actions"] == []
+
+
+def test_checkpoint_waits_end_immediately_on_a_dashboard_stop(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runner,
+        "live_human_interaction_checkpoint",
+        lambda *_args, **_kwargs: pytest.fail("a stopped checkpoint was polled"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "live_submission_checkpoint",
+        lambda *_args, **_kwargs: pytest.fail("a stopped checkpoint was polled"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "list_agent_inputs",
+        lambda *_args, **_kwargs: pytest.fail("a stopped checkpoint was polled"),
+    )
+
+    assert _wait_for_human_control_return(
+        object(), 1, "worker-0", timeout=5, should_stop=lambda: True
+    ) is False
+    assert _wait_for_submission_confirmation(
+        object(), 1, "worker-0", timeout=5, should_stop=lambda: True
+    ) is False
+    assert _wait_for_agent_answers(object(), 1, timeout=5, should_stop=lambda: True) is None
 
 
 def test_missing_result_reports_pre_navigation_failure_without_retaining_text() -> None:
@@ -566,7 +640,7 @@ def test_manual_auto_submit_authorizes_only_a_selected_job(
         db_path=tmp_path / "manual-auto-submit.sqlite3",
     )
 
-    assert result == {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+    assert result == {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
 
     with pytest.raises(PermissionError, match="terminal or API submission"):
         run_applications(
@@ -686,7 +760,7 @@ def test_empty_application_queue_does_not_require_browser_tools(
         db_path=tmp_path / "empty.sqlite3",
     )
 
-    assert totals == {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+    assert totals == {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
 
 
 def test_repository_batch_uses_one_serial_worker(

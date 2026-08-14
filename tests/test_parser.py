@@ -30,6 +30,7 @@ def test_markdown_table_flags_dates_and_inherited_company() -> None:
     assert jobs[0].no_sponsorship is True
     assert jobs[0].application_url == "https://jobs.example.com/acme"
     assert jobs[0].posting_date == "2026-07-16"
+    assert jobs[0].advanced_degree_required is False
     assert jobs[1].company == "Acme"
     assert jobs[1].citizenship_required is True
     assert jobs[1].posting_date == "2026-07-09"
@@ -55,6 +56,7 @@ def test_html_table_prefers_direct_apply_link_over_simplify_tracking_link() -> N
     assert len(jobs) == 1
     assert jobs[0].company == "Acme"
     assert jobs[0].role == "Platform Engineer Intern"
+    assert jobs[0].advanced_degree_required is True
     assert jobs[0].category == "Software Engineering"
     assert jobs[0].application_url == "https://jobs.ashbyhq.com/acme/abc/application"
     assert jobs[0].posting_date == "2026-07-16"

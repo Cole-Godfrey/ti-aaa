@@ -19,11 +19,13 @@ from tiaaa.config import (
 )
 from tiaaa.database import (
     answer_agent_inputs,
+    clear_missing_fact_blocks,
     get_app_state,
     get_connection,
     init_db,
     list_application_queue,
     manual_application_ids,
+    profile_facts_changed,
     recover_stale_work,
     refresh_qualification_scores,
     request_final_submission,
@@ -286,10 +288,17 @@ class AutomationService:
                 settings=settings,
                 preserve_scores=use_llm_scores,
             )
+            # A fact the agent could not find is only terminal while it is still
+            # missing. Editing the profile releases those applications.
+            unblocked = (
+                clear_missing_fact_blocks(connection)
+                if profile_facts_changed(connection, profile)
+                else 0
+            )
 
             state = get_app_state(connection)
             prepared = {"prepared": 0, "errors": 0}
-            applied = {"applied": 0, "review": 0, "failed": 0, "expired": 0}
+            applied = {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
             push_delivery = {
                 "subscriptions": 0,
                 "sent": 0,
@@ -385,7 +394,7 @@ class AutomationService:
                         db_path=self.db_path,
                     )
                     for key in applied:
-                        applied[key] += result[key]
+                        applied[key] += int(result.get(key, 0))
                 if auto_mode:
                     result = run_applications(
                         profile=profile,
@@ -397,7 +406,7 @@ class AutomationService:
                         db_path=self.db_path,
                     )
                     for key in applied:
-                        applied[key] += result[key]
+                        applied[key] += int(result.get(key, 0))
 
             summary: dict[str, Any] = {
                 "status": "complete",
@@ -405,6 +414,7 @@ class AutomationService:
                 "completed_at": datetime.now(UTC).isoformat(),
                 "sync": sync_summary,
                 "baseline_complete": baseline_complete,
+                "unblocked_missing_facts": unblocked,
                 "preparation": prepared,
                 "applications": applied,
                 "web_push": push_delivery,
