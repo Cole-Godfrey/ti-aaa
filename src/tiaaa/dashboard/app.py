@@ -504,6 +504,7 @@ def create_app(
     @app.get("/api/jobs")
     def jobs(
         status: str | None = None,
+        decision: Literal["all", "apply", "skip", "pending"] = "all",
         search: str | None = Query(default=None, max_length=200),
         view: Literal["tracker", "latest", "applications"] = "tracker",
         limit: int = Query(default=100, ge=1, le=500),
@@ -512,6 +513,7 @@ def create_app(
         rows = list_jobs(
             connection(),
             status=status,
+            decision=decision,
             search=search,
             limit=limit,
             offset=offset,

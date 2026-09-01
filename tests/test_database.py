@@ -1032,6 +1032,54 @@ def test_applications_view_contains_only_submitted_jobs(tmp_path, profile, setti
     close_connection(path)
 
 
+def test_list_jobs_filters_review_decisions_before_applying_the_limit(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "decision-filter.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    jobs = [
+        replace(
+            make_listing(source, "No Co", "Newest Intern", "https://jobs.test/no"),
+            posting_date="2026-09-03",
+        ),
+        replace(
+            make_listing(
+                source, "Pending Co", "Middle Intern", "https://jobs.test/pending"
+            ),
+            posting_date="2026-09-02",
+        ),
+        replace(
+            make_listing(source, "Yes Co", "Oldest Intern", "https://jobs.test/yes"),
+            posting_date="2026-09-01",
+        ),
+    ]
+    ingest_listings(connection, source, jobs, profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs
+        SET apply_decision = CASE company
+            WHEN 'Yes Co' THEN 'apply'
+            WHEN 'No Co' THEN 'skip'
+            ELSE NULL
+        END
+        """
+    )
+    connection.commit()
+
+    assert [
+        row["company"]
+        for row in list_jobs(
+            connection, decision="apply", latest=True, active_only=True, limit=1
+        )
+    ] == ["Yes Co"]
+    assert [row["company"] for row in list_jobs(connection, decision="skip")] == ["No Co"]
+    assert [row["company"] for row in list_jobs(connection, decision="pending")] == [
+        "Pending Co"
+    ]
+    close_connection(path)
+
+
 def test_application_ledger_includes_agent_checkpoints(tmp_path, profile, settings) -> None:
     path = tmp_path / "application-ledger.db"
     connection = init_db(path)

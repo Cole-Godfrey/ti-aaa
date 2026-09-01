@@ -1987,6 +1987,7 @@ def list_jobs(
     connection: sqlite3.Connection,
     *,
     status: str | None = None,
+    decision: str | None = None,
     search: str | None = None,
     limit: int = 100,
     offset: int = 0,
@@ -2003,6 +2004,12 @@ def list_jobs(
         else:
             clauses.append("j.pipeline_status = ?")
         parameters.append(status)
+    if decision == "apply":
+        clauses.append("j.apply_decision = 'apply'")
+    elif decision == "skip":
+        clauses.append("j.apply_decision = 'skip'")
+    elif decision == "pending":
+        clauses.append("j.apply_decision IS NULL")
     if search:
         clauses.append("(j.company LIKE ? OR j.role LIKE ? OR j.location LIKE ?)")
         token = f"%{search}%"

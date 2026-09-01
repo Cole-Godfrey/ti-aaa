@@ -531,7 +531,9 @@ function renderLatestJobs() {
 async function loadLatestJobs() {
   const parameters = new URLSearchParams({ view: "latest", limit: "500" });
   const search = value("latestSearch");
+  const decision = element("latestDecision").value;
   if (search) parameters.set("search", search);
+  if (decision !== "all") parameters.set("decision", decision);
   const response = await api(`/api/jobs?${parameters}`);
   state.latestJobs = response.items;
   renderLatestJobs();
@@ -1780,7 +1782,7 @@ element("searchInput").addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.searchTimer = setTimeout(() => loadJobs().catch(error => showToast(error.message, true)), 250);
 });
-element("latestDecision").addEventListener("change", renderLatestJobs);
+element("latestDecision").addEventListener("change", () => loadLatestJobs().catch(error => showToast(error.message, true)));
 element("retryTodayReviews").addEventListener("click", event => retryTodaysReviews(event.currentTarget));
 element("latestSearch").addEventListener("input", () => {
   clearTimeout(state.latestSearchTimer);

@@ -776,6 +776,49 @@ def test_latest_jobs_records_an_application_without_starting_the_agent(
     assert 'class="text-button mark-applied"' in javascript
 
 
+def test_latest_jobs_can_filter_to_reviews_that_said_yes(
+    tmp_path, profile, settings
+) -> None:
+    paths = AppPaths(tmp_path)
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    listings = [
+        InternshipListing(
+            company=company,
+            role=f"{company} Intern",
+            location="Remote",
+            application_url=f"https://jobs.test/{company.casefold()}",
+            source_key=source.key,
+            source_label=source.label,
+            source_repo_url=source.repo_url,
+            source_path=source.path,
+        )
+        for company in ("Yes", "No", "Pending")
+    ]
+    ingest_listings(connection, source, listings, profile=profile, settings=settings)
+    connection.execute(
+        """
+        UPDATE jobs
+        SET apply_decision = CASE company
+            WHEN 'Yes' THEN 'apply'
+            WHEN 'No' THEN 'skip'
+            ELSE NULL
+        END
+        """
+    )
+    connection.commit()
+    client = TestClient(create_app(paths.database, paths=paths))
+
+    yes = client.get("/api/jobs?view=latest&decision=apply")
+    no = client.get("/api/jobs?view=latest&decision=skip")
+    pending = client.get("/api/jobs?view=latest&decision=pending")
+
+    assert [item["company"] for item in yes.json()["items"]] == ["Yes"]
+    assert [item["company"] for item in no.json()["items"]] == ["No"]
+    assert [item["company"] for item in pending.json()["items"]] == ["Pending"]
+    assert client.get("/api/jobs?view=latest&decision=maybe").status_code == 422
+
+
 def test_agent_page_stops_a_looping_captcha_session_and_records_it(
     tmp_path, profile, settings
 ) -> None:
@@ -854,7 +897,8 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'id="decisionModal"' in index
     assert 'id="autoModeUsePreferences"' in index
     assert 'id="manualAutoSubmit"' in index
-    assert '<option value="apply">Apply</option>' in index
+    assert '<option value="apply">Review said Yes</option>' in index
+    assert '<option value="skip">Review said No</option>' in index
     assert 'colspan="6"' in index
     assert 'id="addressLine2"' in index
     assert 'id="county"' in index
@@ -903,6 +947,8 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert "&& !job.apply_decision" in javascript
     assert "Existing YES/NO decisions will not be reviewed again or changed" in javascript
     assert "timezone: browserTimeZone()" in javascript
+    assert 'parameters.set("decision", decision)' in javascript
+    assert 'element("latestDecision").addEventListener("change", () => loadLatestJobs()' in javascript
     # The review controls are populated from saved settings, not from the
     # auto-mode toggle handler, which has no `review` in scope.
     populate = javascript.split("function populateConfiguration(")[1]
