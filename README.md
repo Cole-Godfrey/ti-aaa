@@ -27,6 +27,20 @@ TI-AAA is a local app for tech internship applications. It runs in the backgroun
 
 TI-AAA does not scrape LinkedIn, Indeed, Glassdoor, Google Jobs, or employer job catalogs. It opens only the direct application link a supported GitHub list already published — one page per listing, never a catalog crawl.
 
+## Quick install
+
+Install and start [Docker Desktop](https://www.docker.com/products/docker-desktop/), then run:
+
+```bash
+git clone https://github.com/Cole-Godfrey/ti-aaa.git
+cd ti-aaa
+docker compose up -d --build
+```
+
+Open [http://127.0.0.1:8787](http://127.0.0.1:8787), enter your profile, upload a PDF resume,
+and connect your Claude account. See [Detailed Docker setup](#detailed-docker-setup) for the remaining
+settings and operating instructions.
+
 ## Job sources
 
 TI-AAA reads these repositories:
@@ -138,7 +152,7 @@ were explicit in it; **low** means the employer blocked the read and only list m
 - A welcome-back summary of applications and stopped Auto mode attempts
 - A command-line interface (CLI) and a Python API
 
-## Quick start with Docker
+## Detailed Docker setup
 
 Docker is the recommended setup. It includes Python, Chromium, Node.js, Claude Code, and the browser bridge.
 
