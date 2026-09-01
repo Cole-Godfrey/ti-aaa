@@ -23,9 +23,9 @@
   </a>
 </p>
 
-TI-AAA is a local app for tech internship applications. It runs in the background, checks fixed GitHub lists, prepares truthful application files, and tracks submitted applications.
+TI-AAA is a local app for tech internship applications. It runs in the background, checks fixed GitHub lists, reads each employer's real job posting to decide what is worth applying to, prepares truthful application files, and tracks submitted applications.
 
-TI-AAA does not scrape LinkedIn, Indeed, Glassdoor, Google Jobs, or employer job catalogs. A browser worker opens a job only after a supported GitHub list provides the direct application link.
+TI-AAA does not scrape LinkedIn, Indeed, Glassdoor, Google Jobs, or employer job catalogs. It opens only the direct application link a supported GitHub list already published — one page per listing, never a catalog crawl.
 
 ## Job sources
 
@@ -35,25 +35,67 @@ TI-AAA reads these repositories:
 - [vanshb03/Summer2027-Internships](https://github.com/vanshb03/Summer2027-Internships)
 - [SimplifyJobs/Summer2026-Internships](https://github.com/SimplifyJobs/Summer2026-Internships)
 
+## Deciding what to apply to
+
+Every active listing gets one answer in the **Apply?** column: **Yes** or **No**. Select it to read
+why.
+
+Only listings posted within the last **2 days** are reviewed automatically, so a first sync does not
+spend a model call on a repository's whole backlog — postings that old are usually past applying to.
+Older rows stay in the table and say why they were skipped; **Re-check this listing** decides any one
+of them on demand. Change the window, or set it to 0 to review everything, in **Settings**.
+
+If a review run fails because Claude was unavailable, use **Retry today's reviews** in **Latest
+jobs**. It selects only reviewable internships first discovered during your browser's current day
+that still have no **Yes/No** answer. Existing decisions are preserved and are not sent through the
+reviewer again; existing **Yes** answers still count toward the per-company application budget.
+
+The decision is made from the employer's own job posting, not from the one-line summary in a GitHub
+list. TI-AAA opens the direct application link, extracts the description, and asks Claude to decide.
+It weighs:
+
+- **The posting's real requirements** — required degree, graduation-date window, class year,
+  citizenship, clearance, sponsorship, prior-intern-only restrictions, minimum experience. An unmet
+  hard requirement is a **No** with the requirement quoted back to you.
+- **Whether the role is still open.** A posting that says it is closed or filled is retired.
+- **Genuine qualification match** against every resume you have uploaded, not against a keyword count.
+- **A per-company application limit.** Large employers post many near-identical listings, and extra
+  applications to the same company rarely add a real chance. TI-AAA reviews all of a company's open
+  roles in one pass, ranks them against each other, and spends the limit (2 by default) on the best
+  ones. Everything else is **No — limit already allocated**, said plainly rather than dressed up as a
+  qualification problem. Applications you already submitted count against the limit, and so does a
+  form the agent has filled but you have not yet confirmed — though the reasoning keeps those two
+  apart and never claims you applied to something you have not. A role handed back for you to apply
+  to yourself holds no slot. This limit is your own setting; the agent is told never to present it as
+  an employer policy.
+- **Timing.** A listing that has been open for weeks at a high-volume employer is deeper in the
+  applicant pile than one posted yesterday.
+- **Term, graduation date, and location** against your profile and preferences.
+- **Duplicate listings** — the same role posted in several locations, or by several source lists.
+- **Application cost** — long essays, assessments, and portfolio requirements are only worth it for a
+  strong match.
+- **Which resume to send**, chosen by name with a one-line reason.
+
+Each decision records its confidence. **High** means the real posting was read and the deciding facts
+were explicit in it; **low** means the employer blocked the read and only list metadata was available.
+
 ## Main rules
 
 - The first sync imports the current jobs as a baseline.
 - Automatic apply is off by default.
 - Automatic apply considers only jobs that arrive after the baseline.
-- The default automatic fit limit is 7 out of 10.
-- The fit score measures candidate qualifications. It does not use role or location preferences.
-- The **Qualified** decision is a separate hard gate for degree, prior-intern, authorization, and
-  configured requirements. Auto mode never claims a job marked **Not qualified**.
-- The degree gate reads both the job title and the source list's advanced-degree marker, so a
-  master's-, PhD-, or MBA-only role is **Not qualified** for a bachelor's profile even when its
-  title says nothing about a degree.
-- A hard qualification mismatch—degree, prior-intern, citizenship, or sponsorship—caps the fit score
-  at 2 out of 10, so the ledger never shows a mid-range fit beside **Not qualified**.
-- Strict role and location filters can stop an application. They do not change the fit score.
+- Auto mode applies only to listings the review answered **Apply**. It never applies to an unreviewed
+  listing.
+- A manual **Apply** action ignores the decision, so you can always overrule a **No**.
+- Cheap hard gates run before the review, so an obviously ineligible listing never costs a model call.
+  The degree gate reads both the job title and the source list's advanced-degree marker, so a
+  master's-, PhD-, or MBA-only role is filtered out for a bachelor's profile even when its title says
+  nothing about a degree.
+- Strict role and location filters drop listings before the review reads them.
 - You can use preferences as an extra automatic application rule. This rule is off by default.
-- Auto mode applies to one best-fit role for each company.
+- A decision is re-made when its inputs change: a new listing at that company, an edited profile, a
+  changed resume, or a decision older than the refresh window.
 - New job batches stay in a visible queue. One browser applies to them in order.
-- A manual **Apply** action ignores the automatic fit limit.
 - Some employers block the browser agent. Apply to those roles yourself, then record the submission with **I applied manually** in **Agent**. TI-AAA then counts the application and stops queueing that role.
 - **Stop session** ends a running attempt at any point. The listing is recorded as stopped, leaves the queue, and is never claimed again automatically.
 - By default, a manual application stops on the completed form for confirmation in **Agent**. You can opt into auto-submit for jobs you explicitly select.
@@ -68,12 +110,15 @@ TI-AAA reads these repositories:
 
 - A local web app with guided setup
 - An always-on Docker service
-- A latest-jobs table with search, qualification status and reasons, and job details
+- A latest-jobs table whose **Apply?** column answers Yes or No for every listing, with the full
+  reasoning one click away
+- Employer job postings read directly from Greenhouse, Lever, Ashby, Workday, SmartRecruiters, and
+  ordinary careers pages
+- A per-company application budget so large employers do not absorb your applications
+- Resume selection made by comparing every resume against the posting
 - Degree, prior-intern, and work-authorization gates that read the source list's own markers
 - Manual and automatic application modes
-- A separate fit limit for automatic applications
 - An optional preference gate for automatic applications
-- One best-fit automatic application per company
 - A visible serial application queue in the Agent tab
 - Built-in browser alerts for new Auto-mode queue entries
 - Multiple resumes with job-specific selection
@@ -85,6 +130,7 @@ TI-AAA reads these repositories:
 - Final submission confirmation on the live completed form
 - A **Stop session** control that ends the running browser attempt from the Agent tab
 - A manual-application list in **Agent** for employers that block the browser agent and for sessions you stopped, with a one-click **I applied manually** record
+- A **Mark applied** action on any Latest jobs row for roles you applied to yourself, with no browser agent run
 - An application tracker that opens on submitted applications and can filter to **Confirm in Agent** checkpoints
 - A clean Retry action for application checkpoints
 - Resume records for each submitted application
@@ -139,31 +185,35 @@ Open **Settings**. Use these controls:
 
 - **Auto mode** turns unattended applications on or off. It is off by default.
 - **Auto-submit manually selected applications** submits after an explicit **Apply** selection without requiring a second final-confirmation click. It is off by default.
-- **Minimum qualification fit** controls automatic applications. Its default is 7.
+- **Review new listings automatically** reads employer postings and fills the **Apply?** column. It is on by default.
+- **Applications to spend per company** is the review's limit. Its default is 2.
+- **Only review listings posted within** skips the older backlog. Its default is 2 days; 0 reviews everything.
+- **Re-check a decision after** sets how long a decision stays current. Its default is 21 days.
 - **Use my preferences as an application gate** can also require your role, location, and term preferences. It is off by default.
 - **Notify this browser when new jobs enter the queue** appears only when Auto mode is on. Select it once, allow the browser prompt, then select **Save all settings**. It does not use email or SMS.
 - **Daily application cap** limits submissions for one day.
 - **Per-cycle cap** limits one poll cycle.
 
-Auto mode submits one best-fit qualified role for each company. It does not ask for user input. Jobs
-whose titles explicitly require a higher degree or prior internship at that company are marked **Not
-qualified** before application. If the employer page later reveals another unmet hard requirement,
-the agent records that reason and the job remains excluded from Auto mode. If a required personal fact
-is not available, it stops the application and adds the reason to the next welcome-back summary.
-Manual **Apply** actions ignore the automatic fit limit.
+Auto mode submits only the roles the review answered **Apply** for, up to the per-company budget. It
+does not ask for user input. If the employer page later reveals an unmet hard requirement, the agent
+records that reason and the job is excluded from Auto mode. If a required personal fact is not
+available, it stops the application and adds the reason to the next welcome-back summary. Manual
+**Apply** actions ignore the decision.
 
 Browser alerts work on `localhost` and use the browser's Web Push service. TI-AAA creates and stores the required keys in its private data volume. It does not ask you to configure a notification account or key.
 
 ### 5. Apply to a job now
 
-Open **Latest jobs**. Select a job, then select **Apply**. Open **Agent** to watch the browser and answer factual questions or paste a one-time verification code if an employer sends one. By default, review the completed form and select **Submit application**. If **Auto-submit manually selected applications** is enabled, the agent submits after completing the form without this second confirmation.
+Open **Latest jobs**. Select any **Apply?** answer to read the reasoning behind it, including which
+resume the agent chose and why; **Re-check this listing** re-reads the posting and decides again.
+Select a job, then select **Apply**. Open **Agent** to watch the browser and answer factual questions or paste a one-time verification code if an employer sends one. By default, review the completed form and select **Submit application**. If **Auto-submit manually selected applications** is enabled, the agent submits after completing the form without this second confirmation.
 
 If an employer requires an ordinary email/password careers account, the agent creates it with the
 profile email and a stable password unique to that careers portal. TI-AAA derives that password from a
 private installation key; it does not reuse one shared password or store the generated plaintext.
 Email/SMS codes and other 2FA still pause the account flow. Social sign-in is not automated.
 
-The manual action does not require automatic apply. It also does not use the automatic fit limit.
+The manual action does not require automatic apply, and it applies even to a listing the review answered **No**.
 
 If the employer presents a CAPTCHA—or Submit stays disabled on **Submitting…** without producing a receipt—the manual application pauses with the exact Chromium tab still open. In **Agent**, use the live canvas to click the challenge, focus and type or paste into fields, and scroll. Select **Continue agent** when the challenge is clear or a receipt is visible. TI-AAA then inspects and continues that same page; it does not send you to a fresh job link or browser where the form state could be lost. Auto mode remains unattended and records CAPTCHA checkpoints as stopped attempts.
 
@@ -173,6 +223,8 @@ closes the Claude turn and its browser, releases the listing, and records it as 
 queueing it again. A running turn stops within about a second; nothing waits for the agent timeout.
 
 If an employer blocks the automated browser, or you stopped a session, that role moves to **Roles you apply to yourself** in **Agent**. Open the listing, complete the application in your own browser, then select **I applied manually**. TI-AAA records the submission with today's date, counts it in **Applications** and **Analytics**, and never queues that role for the browser agent again. The same action appears on the live-browser and employer-access-block checkpoint cards.
+
+You can also record an application you submitted yourself before the agent ever touches the role. Every row in **Latest jobs** carries a **Mark applied** action, and the listing dossier repeats it as **I applied manually**. Selecting it records the same candidate-submitted application with today's date—no browser agent run, no Claude Code connection, and no onboarding requirement. The row stays in the repository inbox stamped **applied** and is never queued again. The action is hidden once a role is already applied, and it is unavailable while the browser agent is mid-application; stop that session first.
 
 If a **Confirm in Agent** checkpoint needs to start over, open **Applications**, switch the filter to **Confirm in Agent**, and select **Retry**. TI-AAA closes any retained live form, clears pending checkpoint inputs, and queues a fresh browser attempt.
 
@@ -277,11 +329,16 @@ Run common tasks:
 ```bash
 tiaaa jobs
 tiaaa status
+tiaaa review
+tiaaa review --job-id 42
 tiaaa prepare
 tiaaa apply --job-id 42
 tiaaa mark 42 --pipeline applied
 tiaaa mark 42 --outcome oa
 ```
+
+`tiaaa review` reads the employer postings for every company whose decisions are out of date.
+`tiaaa review --job-id 42` re-decides that listing and the rest of its company.
 
 `tiaaa mark <id> --pipeline applied` is the terminal equivalent of **I applied manually**: it records the
 submission with the current time and marks it as candidate-submitted.
@@ -320,8 +377,11 @@ agent = TIAAA("./private-tiaaa-data")
 agent.add_resume("./resume.pdf", name="Backend", tags=["backend", "python"])
 agent.sync()
 
+agent.review()
+
 jobs = agent.jobs(limit=100)
 job_id = jobs[0]["id"]
+print(jobs[0]["apply_decision"], jobs[0]["apply_headline"])
 agent.request(job_id)
 agent.apply(job_id=job_id, submit=False)
 
@@ -340,10 +400,18 @@ service:
   enabled: true
   auto_prepare: true
 
+review:
+  enabled: true
+  model: claude-opus-5
+  max_applications_per_company: 2
+  max_listing_age_days: 2
+  fetch_postings: true
+  refresh_after_days: 21
+  max_companies_per_cycle: 12
+
 automation:
   auto_apply_new: false
   manual_auto_submit: false
-  auto_apply_minimum_fit_score: 7
   auto_apply_use_preferences: false
   allow_submission: false
   max_applications_per_cycle: 5
@@ -369,9 +437,10 @@ For a native install, add the same values to `~/.tiaaa/.env` and restart `tiaaa 
 
 These secrets are optional:
 
-- `ANTHROPIC_API_KEY` for API-based Claude access
+- `ANTHROPIC_API_KEY` for API-based Claude access. The posting review uses it when it is set and
+  otherwise uses your connected Claude account, so a Claude Pro or Max subscription is enough.
 - `GITHUB_TOKEN` for a higher GitHub request limit
-- `OPENAI_API_KEY` or `GEMINI_API_KEY` for optional scoring and cover letters
+- `OPENAI_API_KEY` or `GEMINI_API_KEY` for optional cover letters
 
 ## Data and safety
 
@@ -379,6 +448,11 @@ These secrets are optional:
 - Native mode stores data in `~/.tiaaa`.
 - TI-AAA has no developer-operated server and sends no product telemetry.
 - Repository sync sends requests to GitHub. A configured `GITHUB_TOKEN` is sent only to GitHub.
+- The posting review requests the direct application link for each listing and sends the resulting
+  description, your resumes, and your profile facts to Claude. It does not enumerate employer job
+  catalogs and it rejects links that resolve to local or private-network addresses. Turn it off with
+  **Review new listings automatically**, or keep decisions metadata-only by turning off the posting
+  read.
 - Claude browser automation receives the selected resume text, candidate profile, prepared answers, job metadata, and the generated per-portal account password. It interacts with the employer site, which receives the fields, files, and account credential entered for that application.
 - During a manual CAPTCHA checkpoint, dashboard mouse and keyboard actions travel only through the local same-origin WebSocket to the retained Chromium tab. TI-AAA does not expose a remote navigation command or send the application URL to another browser.
 - A one-time code entered in **Agent** passes through the active Claude browser session to the employer's code field. TI-AAA clears the stored local answer after that browser turn.

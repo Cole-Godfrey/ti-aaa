@@ -1,4 +1,10 @@
-"""Internship-specific eligibility gates and transparent heuristic scoring."""
+"""Cheap hard-requirement gates that decide what is worth a full posting review.
+
+This module answers one question: is the candidate categorically ineligible on
+facts already visible in the listing metadata? It deliberately does not rate how
+good a match a role is — that judgment needs the employer's real posting and
+lives in `tiaaa.review`.
+"""
 
 from __future__ import annotations
 
@@ -14,8 +20,6 @@ from tiaaa.models import InternshipListing
 class Eligibility:
     eligible: bool
     reason: str
-    score: int
-    score_reasoning: str
 
 
 def _strings(value: Any) -> list[str]:
@@ -48,20 +52,6 @@ def _is_unrestricted(value: str) -> bool:
 def _restrictions(value: Any) -> list[str]:
     values = _strings(value)
     return [] if any(_is_unrestricted(item) for item in values) else values
-
-
-def _profile_skill_terms(profile: dict[str, Any]) -> set[str]:
-    skills = profile.get("skills", {})
-    if not isinstance(skills, dict):
-        return set()
-    return {
-        token
-        for values in skills.values()
-        if isinstance(values, list)
-        for item in values
-        for token in str(item).strip().casefold().replace("/", " ").split()
-        if token
-    }
 
 
 def _degree_markers(value: str) -> tuple[bool, bool, bool]:
@@ -171,7 +161,7 @@ def evaluate_listing(
     profile: dict[str, Any],
     settings: dict[str, Any],
 ) -> Eligibility:
-    """Score qualifications independently, then apply hard eligibility rules."""
+    """Apply the hard gates that make a full posting review pointless."""
 
     role_text = f"{listing.role} {listing.category}".casefold()
     education = profile.get("education", {})
@@ -179,81 +169,6 @@ def evaluate_listing(
         f"{education.get('degree', '')} {education.get('major', '')} "
         f"{education.get('current_year', '')}"
     ).casefold()
-    skills = _profile_skill_terms(profile)
-    score = 4
-    reasons = ["community-curated tech internship"]
-
-    relevant_study = any(
-        marker in degree_text
-        for marker in (
-            "computer",
-            "software",
-            "data",
-            "information",
-            "electrical",
-            "mathematics",
-            "statistics",
-            "engineering",
-        )
-    )
-    if relevant_study:
-        score += 2
-        reasons.append("relevant field of study")
-    elif degree_text.strip():
-        reasons.append("field of study is not clearly technical")
-
-    if skills:
-        score += 1
-        reasons.append("documented technical skills")
-
-    role_skill_groups = (
-        (
-            ("machine learning", "artificial intelligence", " ai ", "data science"),
-            {"python", "r", "sql", "pytorch", "tensorflow", "pandas", "numpy"},
-            "machine-learning/data skills",
-        ),
-        (
-            ("frontend", "front end", "web", "ui engineer"),
-            {"javascript", "typescript", "react", "html", "css", "vue", "angular"},
-            "frontend skills",
-        ),
-        (
-            ("embedded", "firmware", "hardware", "fpga", "silicon"),
-            {"c", "c++", "cpp", "rust", "verilog", "vhdl", "embedded"},
-            "embedded/hardware skills",
-        ),
-        (
-            ("security", "cyber", "privacy"),
-            {"security", "cybersecurity", "network", "linux", "cryptography"},
-            "security skills",
-        ),
-        (
-            ("quant", "trading", "research"),
-            {"python", "c++", "cpp", "r", "matlab", "statistics", "math"},
-            "quantitative skills",
-        ),
-    )
-    specialized = False
-    for markers, expected, label in role_skill_groups:
-        if any(marker in role_text for marker in markers):
-            specialized = True
-            if skills & expected:
-                score += 2
-                reasons.append(label)
-            else:
-                score -= 1
-                reasons.append(f"no documented {label}")
-            break
-    if (
-        not specialized
-        and skills
-        and any(
-            marker in role_text
-            for marker in ("software", "developer", "backend", "full stack", "platform")
-        )
-    ):
-        score += 1
-        reasons.append("programming background for a general software role")
 
     title_degree_level = _required_advanced_degree(role_text)
     # The source lists carry a curated "advanced degree required (Master's, PhD,
@@ -265,15 +180,12 @@ def evaluate_listing(
         else 0
     )
     required_degree_level = max(title_degree_level, flagged_degree_level)
-    profile_degree_level = _degree_level(degree_text)
     degree_mismatch = bool(
-        required_degree_level and profile_degree_level < required_degree_level
+        required_degree_level and _degree_level(degree_text) < required_degree_level
     )
-    previous_intern_required = _requires_previous_company_intern(role_text)
-    previous_intern_match = _has_previous_internship_at_company(
-        profile, listing.company
-    )
-    previous_intern_gap = previous_intern_required and not previous_intern_match
+    previous_intern_gap = _requires_previous_company_intern(
+        role_text
+    ) and not _has_previous_internship_at_company(profile, listing.company)
     authorization = profile.get("work_authorization", {})
     citizenship_gap = bool(
         listing.citizenship_required and not bool(authorization.get("us_citizen"))
@@ -282,76 +194,45 @@ def evaluate_listing(
         listing.no_sponsorship and bool(authorization.get("requires_sponsorship"))
     )
 
-    if degree_mismatch:
-        reasons.append(
-            "advanced-degree requirement does not match the profile"
-            if title_degree_level
-            else "source list marks the role advanced-degree only"
-        )
-    if previous_intern_required:
-        reasons.append(
-            "role is restricted to previous company interns"
-            if previous_intern_gap
-            else "previous internship at this company is recorded"
-        )
-    if citizenship_gap:
-        reasons.append("role requires U.S. citizenship")
-    if sponsorship_gap:
-        reasons.append("employer does not sponsor the required work authorization")
-
-    score = max(1, min(10, score))
-    if degree_mismatch or previous_intern_gap or citizenship_gap or sponsorship_gap:
-        # A hard qualification gate is not a partial deduction. The candidate
-        # cannot hold the role at all, so the fit column must read that way
-        # instead of showing a mid-range score next to "Not qualified".
-        score = min(score, 2)
-    score_reasoning = "; ".join(reasons)
-
     if listing.closed:
-        return Eligibility(False, "listing marked closed", score, score_reasoning)
+        return Eligibility(False, "listing marked closed")
     if degree_mismatch:
         if not title_degree_level:
             return Eligibility(
                 False,
                 "source list marks this role advanced-degree only "
                 "(master's, PhD, or MBA)",
-                score,
-                score_reasoning,
             )
         required = "doctoral" if required_degree_level == 3 else "master's or doctoral"
         return Eligibility(
-            False,
-            f"requires a {required} degree not present in the profile",
-            score,
-            score_reasoning,
+            False, f"requires a {required} degree not present in the profile"
         )
     if previous_intern_gap:
         return Eligibility(
-            False,
-            "restricted to previous or returning interns at this company",
-            score,
-            score_reasoning,
+            False, "restricted to previous or returning interns at this company"
         )
     if citizenship_gap:
-        return Eligibility(False, "requires U.S. citizenship", score, score_reasoning)
+        return Eligibility(False, "requires U.S. citizenship")
     if sponsorship_gap:
-        return Eligibility(False, "does not offer sponsorship", score, score_reasoning)
+        return Eligibility(False, "does not offer sponsorship")
 
     filters = settings.get("filters", {})
-    haystack = f"{listing.company} {listing.role} {listing.location} {listing.category}".casefold()
+    haystack = (
+        f"{listing.company} {listing.role} {listing.location} {listing.category}"
+    ).casefold()
     excluded = _strings(filters.get("exclude_keywords"))
     if match := next((keyword for keyword in excluded if keyword in haystack), None):
-        return Eligibility(False, f"excluded keyword: {match}", score, score_reasoning)
+        return Eligibility(False, f"excluded keyword: {match}")
 
     included = _restrictions(filters.get("include_role_keywords"))
     if included and not any(keyword in haystack for keyword in included):
-        return Eligibility(False, "role is outside configured keywords", score, score_reasoning)
+        return Eligibility(False, "role is outside configured keywords")
 
     location = listing.location.casefold()
     if filters.get("remote_only") and "remote" not in location:
-        return Eligibility(False, "remote-only filter", score, score_reasoning)
+        return Eligibility(False, "remote-only filter")
     allowed_locations = _restrictions(filters.get("allowed_locations"))
     if allowed_locations and not any(item in location for item in allowed_locations):
-        return Eligibility(False, "location is outside configured list", score, score_reasoning)
+        return Eligibility(False, "location is outside configured list")
 
-    return Eligibility(True, "eligible", score, score_reasoning)
+    return Eligibility(True, "eligible")

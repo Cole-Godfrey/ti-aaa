@@ -27,18 +27,16 @@ def test_sponsorship_and_citizenship_are_hard_gates(profile, settings) -> None:
     profile["work_authorization"]["requires_sponsorship"] = True
     sponsorship = evaluate_listing(listing(no_sponsorship=True), profile, settings)
     assert not sponsorship.eligible
-    assert sponsorship.score <= 2
+    assert sponsorship.reason == "does not offer sponsorship"
 
     profile["work_authorization"]["requires_sponsorship"] = False
     profile["work_authorization"]["us_citizen"] = False
     citizenship = evaluate_listing(listing(citizenship_required=True), profile, settings)
     assert not citizenship.eligible
-    assert citizenship.score <= 2
+    assert citizenship.reason == "requires U.S. citizenship"
 
 
-def test_qualification_score_does_not_use_role_or_location_preferences(
-    profile, settings
-) -> None:
+def test_the_gate_does_not_use_role_or_location_preferences(profile, settings) -> None:
     result = evaluate_listing(listing(), profile, settings)
     profile["preferences"] = {
         "roles": ["hardware"],
@@ -48,10 +46,8 @@ def test_qualification_score_does_not_use_role_or_location_preferences(
     changed_preferences = evaluate_listing(listing(), profile, settings)
 
     assert result.eligible
-    assert result.score == 8
-    assert changed_preferences.score == result.score
-    assert "relevant field of study" in result.score_reasoning
-    assert "preferred" not in result.score_reasoning
+    assert changed_preferences.eligible
+    assert changed_preferences.reason == result.reason
 
 
 def test_preferences_are_an_optional_application_gate(profile) -> None:
@@ -75,12 +71,11 @@ def test_open_ended_preferences_do_not_restrict_auto_apply(profile) -> None:
 
 
 def test_explicit_filters_are_enforced(profile, settings) -> None:
-    qualification_score = evaluate_listing(listing(), profile, settings).score
+    assert evaluate_listing(listing(), profile, settings).eligible
     settings["filters"]["remote_only"] = True
     result = evaluate_listing(listing(location="Austin, TX"), profile, settings)
     assert not result.eligible
     assert result.reason == "remote-only filter"
-    assert result.score == qualification_score
 
 
 def test_any_keyword_means_no_strict_filter(profile, settings) -> None:
@@ -136,8 +131,6 @@ def test_source_advanced_degree_flag_is_a_hard_gate_without_a_title_hint(
     assert result.reason == (
         "source list marks this role advanced-degree only (master's, PhD, or MBA)"
     )
-    assert result.score <= 2
-    assert "advanced-degree only" in result.score_reasoning
 
 
 def test_advanced_degree_flag_clears_for_matching_and_bachelor_friendly_roles(
@@ -183,12 +176,15 @@ def test_new_grad_and_general_titles_stay_qualified(profile, settings, role) -> 
     assert evaluate_listing(listing(role=role), profile, settings).eligible is True
 
 
-def test_hard_qualification_gates_pin_the_fit_score_low(profile, settings) -> None:
+def test_the_gate_reports_only_eligibility_not_a_quality_rating(profile, settings) -> None:
     qualified = evaluate_listing(listing(), profile, settings)
     blocked = evaluate_listing(listing(role="Research Intern (PhD)"), profile, settings)
 
-    assert qualified.score >= 7
-    assert blocked.score <= 2
+    assert qualified.eligible and qualified.reason == "eligible"
+    assert not blocked.eligible
+    # Rating how good a match a role is belongs to the posting review, which
+    # reads the employer's own requirements.
+    assert not hasattr(qualified, "score")
 
 
 def test_previous_company_intern_roles_require_recorded_experience(

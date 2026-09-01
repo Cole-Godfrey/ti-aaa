@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from tiaaa.config import AppPaths, ensure_dirs, save_profile, save_settings
 from tiaaa.database import get_app_state, get_connection, init_db, set_app_state
 from tiaaa.discovery.github import SyncResult
@@ -99,6 +102,42 @@ def test_retry_application_requests_a_fresh_service_cycle(tmp_path, monkeypatch)
     state = get_app_state(get_connection(paths.database))
     assert state["service_status"] == "requested"
     assert state["service_message"] == "Retry requested for Acme · Software Intern"
+
+
+def test_retry_todays_reviews_uses_the_browser_calendar_day(
+    tmp_path, profile, settings, monkeypatch
+) -> None:
+    paths = ensure_dirs(AppPaths(tmp_path))
+    save_profile(profile, paths)
+    save_settings(settings, paths)
+    init_db(paths.database)
+    captured: dict[str, object] = {}
+
+    def fake_review_jobs(**kwargs):
+        captured.update(kwargs)
+        return {
+            "reviewed": 2,
+            "companies": 1,
+            "apply": 1,
+            "skip": 1,
+            "errors": 0,
+            "selected": 2,
+            "status": "complete",
+        }
+
+    monkeypatch.setattr("tiaaa.review.review_jobs", fake_review_jobs)
+
+    result = AutomationService(paths).review_todays_listings("America/Los_Angeles")
+
+    zone = ZoneInfo("America/Los_Angeles")
+    start = datetime.fromisoformat(str(captured["first_seen_from"])).astimezone(zone)
+    end = datetime.fromisoformat(str(captured["first_seen_before"])).astimezone(zone)
+    assert start.hour == start.minute == start.second == 0
+    assert end.hour == end.minute == end.second == 0
+    assert (end.date() - start.date()).days == 1
+    assert result["date"] == start.date().isoformat()
+    assert captured["force"] is True
+    assert result["review"]["selected"] == 2
 
 
 def test_return_browser_control_wakes_the_retained_agent(tmp_path, monkeypatch) -> None:

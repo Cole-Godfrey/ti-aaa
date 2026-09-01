@@ -206,42 +206,37 @@ def sync(
 
 
 @app.command()
-def score(
-    llm: Annotated[
+def review(
+    job_id: Annotated[
+        int | None,
+        typer.Option("--job-id", help="Re-review one listing and the rest of its company."),
+    ] = None,
+    force: Annotated[
         bool,
-        typer.Option("--llm/--heuristic", help="Refine queued fit scores with an LLM."),
+        typer.Option("--force", help="Re-decide even when the stored decision is current."),
     ] = False,
-    limit: Annotated[int, typer.Option(min=0, help="Maximum queued jobs to score; 0 means all.")] = 0,
 ) -> None:
-    """Inspect transparent heuristic scores or refine them with the configured LLM."""
+    """Read employer postings and decide which internships are worth applying to."""
 
-    paths, _, _ = _bootstrap()
-    connection = get_connection(paths.database)
-    if llm:
-        from tiaaa.preparation import score_jobs_with_llm
+    paths, profile, settings = _bootstrap()
+    from tiaaa.review import review_jobs
 
-        result = score_jobs_with_llm(paths=paths, limit=limit, db_path=paths.database)
-        console.print(
-            f"[green]Scored {result['scored']} queued internship(s).[/green] "
-            f"Errors: {result['errors']}"
-        )
-        return
-    rows = connection.execute(
-        """
-        SELECT company, role, fit_score, score_reasoning FROM jobs
-        WHERE pipeline_status = 'queued' ORDER BY fit_score DESC, first_seen_at DESC
-        """
-    ).fetchall()
-    if limit > 0:
-        rows = rows[:limit]
-    table = Table(title="Queued internship fit scores", header_style="bold cyan")
-    table.add_column("Score", justify="right")
-    table.add_column("Company")
-    table.add_column("Role")
-    table.add_column("Reason")
-    for row in rows:
-        table.add_row(str(row["fit_score"] or "—"), row["company"], row["role"], row["score_reasoning"] or "")
-    console.print(table)
+    result = review_jobs(
+        paths=paths,
+        profile=profile,
+        settings=settings,
+        db_path=paths.database,
+        target_job_id=job_id,
+        force=force or job_id is not None,
+    )
+    if result.get("status") == "unavailable":
+        console.print(f"[red]{result.get('detail', 'Claude is not reachable')}[/red]")
+        raise typer.Exit(code=1)
+    console.print(
+        f"[green]Reviewed {result['reviewed']} listing(s) across "
+        f"{result['companies']} company/companies.[/green] "
+        f"Apply: {result['apply']} · Skip: {result['skip']} · Errors: {result['errors']}"
+    )
 
 
 @app.command()
@@ -355,7 +350,10 @@ def apply(
 
 @app.command()
 def run(
-    llm_score: Annotated[bool, typer.Option(help="Refine new jobs with the configured LLM.")] = False,
+    skip_review: Annotated[
+        bool,
+        typer.Option("--skip-review", help="Do not read postings or re-decide this cycle."),
+    ] = False,
     apply_now: Annotated[
         bool,
         typer.Option("--apply", help="Start browser workers after preparation."),
@@ -375,7 +373,7 @@ def run(
         ),
     ] = 1,
 ) -> None:
-    """Run one full sync → score → prepare → optional apply cycle."""
+    """Run one full sync → review → prepare → optional apply cycle."""
 
     if submit and not apply_now:
         raise typer.BadParameter("--submit requires --apply")
@@ -387,10 +385,16 @@ def run(
         force=False,
         source=None,
     )
-    if llm_score or settings.get("preparation", {}).get("use_llm"):
-        from tiaaa.preparation import score_jobs_with_llm
+    if not skip_review and settings.get("review", {}).get("enabled", True):
+        from tiaaa.review import review_jobs
 
-        score_jobs_with_llm(paths=paths, db_path=paths.database)
+        reviewed = review_jobs(
+            paths=paths, profile=profile, settings=settings, db_path=paths.database
+        )
+        console.print(
+            f"[green]Reviewed {reviewed['reviewed']} listing(s).[/green] "
+            f"Apply: {reviewed['apply']} · Skip: {reviewed['skip']}"
+        )
     from tiaaa.preparation import prepare_jobs
 
     prepared = prepare_jobs(paths=paths, profile=profile, settings=settings, db_path=paths.database)
@@ -453,10 +457,17 @@ def watch(
                 force=False,
                 source=None,
             )
-            if settings.get("preparation", {}).get("use_llm"):
-                from tiaaa.preparation import score_jobs_with_llm
+            if settings.get("review", {}).get("enabled", True):
+                from tiaaa.review import review_jobs
 
-                score_jobs_with_llm(paths=paths, db_path=paths.database)
+                reviewed = review_jobs(
+                    paths=paths, profile=profile, settings=settings, db_path=paths.database
+                )
+                if reviewed["reviewed"]:
+                    console.print(
+                        f"[green]Reviewed {reviewed['reviewed']} listing(s); "
+                        f"{reviewed['apply']} worth applying to.[/green]"
+                    )
             from tiaaa.preparation import prepare_jobs
 
             result = prepare_jobs(paths=paths, profile=profile, settings=settings, db_path=paths.database)

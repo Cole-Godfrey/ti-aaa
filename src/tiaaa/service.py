@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from tiaaa.config import (
     SOURCE_DOCUMENTS,
@@ -27,7 +28,7 @@ from tiaaa.database import (
     manual_application_ids,
     profile_facts_changed,
     recover_stale_work,
-    refresh_qualification_scores,
+    refresh_eligibility,
     request_final_submission,
     request_human_control_return,
     request_manual_application,
@@ -205,6 +206,67 @@ class AutomationService:
         self._wake.set()
         return job
 
+    def review_listing(self, job_id: int) -> dict[str, Any]:
+        """Re-read this listing's employer posting and re-decide its whole company."""
+
+        from tiaaa.database import get_job
+        from tiaaa.review import review_jobs
+
+        connection = get_connection(self.db_path)
+        if get_job(connection, job_id) is None:
+            raise LookupError("Job not found")
+        load_environment(self.paths)
+        result = review_jobs(
+            paths=self.paths,
+            profile=load_profile(self.paths),
+            settings=load_settings(self.paths),
+            db_path=self.db_path,
+            target_job_id=job_id,
+            force=True,
+        )
+        job = get_job(connection, job_id)
+        if job is None:
+            raise LookupError("Job not found")
+        return {"review": result, "job": job}
+
+    def review_todays_listings(self, timezone_name: str = "UTC") -> dict[str, Any]:
+        """Force-review companies with listings discovered today in the user's timezone."""
+
+        from tiaaa.review import review_jobs
+
+        try:
+            user_timezone = ZoneInfo(timezone_name)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("The browser reported an unknown timezone") from exc
+
+        now = datetime.now(UTC)
+        local_today = now.astimezone(user_timezone).date()
+        local_start = datetime.combine(local_today, time.min, tzinfo=user_timezone)
+        local_end = datetime.combine(
+            local_today + timedelta(days=1), time.min, tzinfo=user_timezone
+        )
+
+        # Do not race an explicit multi-company retry against the background
+        # sync/review/apply cycle, which shares the same decisions and budgets.
+        if not self._cycle_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "The background service is busy; wait for this cycle to finish and retry"
+            )
+        try:
+            load_environment(self.paths)
+            result = review_jobs(
+                paths=self.paths,
+                profile=load_profile(self.paths),
+                settings=load_settings(self.paths),
+                db_path=self.db_path,
+                first_seen_from=local_start.astimezone(UTC).isoformat(),
+                first_seen_before=local_end.astimezone(UTC).isoformat(),
+                force=True,
+            )
+        finally:
+            self._cycle_lock.release()
+        return {"review": result, "date": local_today.isoformat()}
+
     def snapshot(self) -> dict[str, Any]:
         state = get_app_state(get_connection(self.db_path))
         state["process_running"] = self.running
@@ -281,13 +343,7 @@ class AutomationService:
                 "queued": sum(result.queued for result in sync_results),
                 "errors": sum(result.status == "error" for result in sync_results),
             }
-            use_llm_scores = bool(settings.get("preparation", {}).get("use_llm"))
-            refresh_qualification_scores(
-                connection,
-                profile=profile,
-                settings=settings,
-                preserve_scores=use_llm_scores,
-            )
+            refresh_eligibility(connection, profile=profile, settings=settings)
             # A fact the agent could not find is only terminal while it is still
             # missing. Editing the profile releases those applications.
             unblocked = (
@@ -298,6 +354,14 @@ class AutomationService:
 
             state = get_app_state(connection)
             prepared = {"prepared": 0, "errors": 0}
+            reviewed: dict[str, Any] = {
+                "reviewed": 0,
+                "companies": 0,
+                "apply": 0,
+                "skip": 0,
+                "errors": 0,
+                "status": "idle",
+            }
             applied = {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
             push_delivery = {
                 "subscriptions": 0,
@@ -323,12 +387,35 @@ class AutomationService:
                     or bool(service_settings.get("auto_prepare", True))
                 )
             ):
+                if settings.get("review", {}).get("enabled", True):
+                    set_app_state(connection, "service_status", "reviewing")
+                    set_app_state(
+                        connection,
+                        "service_message",
+                        "Reading employer postings and deciding what to apply to",
+                    )
+                    try:
+                        from tiaaa.review import review_jobs
+
+                        reviewed = review_jobs(
+                            paths=self.paths,
+                            profile=profile,
+                            settings=settings,
+                            db_path=self.db_path,
+                        )
+                    except Exception as exc:
+                        log.warning("Apply/skip review failed: %s", exc)
+                        reviewed = {
+                            "reviewed": 0,
+                            "companies": 0,
+                            "apply": 0,
+                            "skip": 0,
+                            "errors": 1,
+                            "status": "error",
+                            "detail": str(exc)[:300],
+                        }
                 set_app_state(connection, "service_status", "preparing")
                 set_app_state(connection, "service_message", "Selecting application resumes")
-                if settings.get("preparation", {}).get("use_llm"):
-                    from tiaaa.preparation import score_jobs_with_llm
-
-                    score_jobs_with_llm(paths=self.paths, db_path=self.db_path)
                 from tiaaa.preparation import prepare_jobs
 
                 prepared = prepare_jobs(
@@ -351,9 +438,6 @@ class AutomationService:
                         connection,
                         auto_enabled=True,
                         max_attempts=int(automation.get("max_attempts", 3)),
-                        minimum_fit_score=int(
-                            automation.get("auto_apply_minimum_fit_score", 7)
-                        ),
                         profile=profile,
                         use_preferences=bool(
                             automation.get("auto_apply_use_preferences", False)
@@ -415,6 +499,7 @@ class AutomationService:
                 "sync": sync_summary,
                 "baseline_complete": baseline_complete,
                 "unblocked_missing_facts": unblocked,
+                "review": reviewed,
                 "preparation": prepared,
                 "applications": applied,
                 "web_push": push_delivery,
@@ -430,6 +515,7 @@ class AutomationService:
             else:
                 message = (
                     f"Cycle complete · {sync_summary['new']} new · "
+                    f"{reviewed['apply']} to apply to · "
                     f"{prepared['prepared']} prepared · {applied['applied']} applied"
                 )
             self._set_status("waiting", message)

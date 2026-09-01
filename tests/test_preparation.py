@@ -5,7 +5,7 @@ import json
 from tiaaa.config import SOURCE_DOCUMENTS, AppPaths
 from tiaaa.database import get_connection, ingest_listings, init_db, request_manual_application
 from tiaaa.models import InternshipListing
-from tiaaa.preparation import prepare_jobs, score_jobs_with_llm
+from tiaaa.preparation import prepare_jobs
 
 
 class FakeClient:
@@ -49,10 +49,6 @@ def make_paths(tmp_path) -> AppPaths:
 def test_prepare_without_llm_attaches_base_resume(tmp_path, profile, settings) -> None:
     paths = make_paths(tmp_path)
     seed_job(paths.database, profile, settings)
-    connection = get_connection(paths.database)
-    connection.execute("UPDATE jobs SET fit_score = 0")
-    connection.commit()
-
     result = prepare_jobs(
         paths=paths,
         profile=profile,
@@ -122,19 +118,3 @@ def test_prepare_with_llm_writes_fact_packet(tmp_path, profile, settings, monkey
     assert fake.closed
     assert "Dear Acme" in cover_path.read_text()
     assert "Built a Python API" in row["preparation_notes"]
-
-
-def test_optional_llm_score_updates_queued_job(tmp_path, profile, settings, monkeypatch) -> None:
-    paths = make_paths(tmp_path)
-    seed_job(paths.database, profile, settings)
-    fake = FakeClient({"score": 8, "reasoning": "Python experience matches the role."})
-    monkeypatch.setattr("tiaaa.preparation.get_client", lambda: fake)
-
-    result = score_jobs_with_llm(paths=paths, db_path=paths.database)
-
-    row = get_connection(paths.database).execute(
-        "SELECT fit_score, score_reasoning FROM jobs"
-    ).fetchone()
-    assert result == {"scored": 1, "errors": 0}
-    assert tuple(row) == (8, "Python experience matches the role.")
-    assert fake.closed

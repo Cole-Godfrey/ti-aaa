@@ -1148,10 +1148,6 @@ def _worker(
                 worker_id=worker_name,
                 max_attempts=int(automation.get("max_attempts", 3)),
                 target_job_id=target_job_id,
-                minimum_fit_score=int(
-                    automation.get("auto_apply_minimum_fit_score", 7)
-                ),
-                eligible_only=False,
                 profile=profile,
                 use_preferences=bool(
                     automation.get("auto_apply_use_preferences", False)
@@ -1482,9 +1478,6 @@ def run_applications(
     """Run a bounded batch; continuous polling is orchestrated by `tiaaa watch`."""
 
     automation = settings.get("automation", {})
-    auto_apply_minimum_fit_score = max(
-        1, min(10, int(automation.get("auto_apply_minimum_fit_score", 7)))
-    )
     if unattended and not bool(automation.get("auto_apply_new", False)):
         raise PermissionError("Unattended submission requires Auto mode to be enabled")
     manual_setting_authorizes = bool(
@@ -1522,8 +1515,6 @@ def run_applications(
             connection,
             max_attempts=int(automation.get("max_attempts", 3)),
             target_job_id=target_job_id,
-            minimum_fit_score=auto_apply_minimum_fit_score,
-            eligible_only=False,
             profile=profile,
             use_preferences=bool(
                 automation.get("auto_apply_use_preferences", False)

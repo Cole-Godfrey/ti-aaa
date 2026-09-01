@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from tiaaa import database
 from tiaaa.config import SOURCE_DOCUMENTS
 from tiaaa.database import (
     add_resume_record,
@@ -17,6 +19,7 @@ from tiaaa.database import (
     clear_missing_fact_blocks,
     close_all_connections,
     close_connection,
+    company_application_history,
     get_analytics,
     get_job,
     get_stats,
@@ -27,6 +30,7 @@ from tiaaa.database import (
     list_application_queue,
     list_jobs,
     list_manual_handoff_jobs,
+    listing_age_cutoff,
     live_human_interaction_checkpoint,
     live_submission_checkpoint,
     manual_application_ids,
@@ -36,7 +40,7 @@ from tiaaa.database import (
     profile_facts_changed,
     reconcile_source_registry,
     recover_stale_work,
-    refresh_qualification_scores,
+    refresh_eligibility,
     request_agent_stop,
     request_final_submission,
     request_human_control_return,
@@ -45,6 +49,7 @@ from tiaaa.database import (
     resume_application_after_input,
     resume_application_for_submission,
     retry_manual_application,
+    reviewable_listings,
     store_agent_inputs,
     update_tracker,
     update_worker_state,
@@ -343,15 +348,15 @@ def test_retry_manual_application_cancels_live_checkpoint_and_requeues(
     close_connection(path)
 
 
-def test_auto_apply_fit_limit_blocks_low_fit_jobs_but_manual_apply_bypasses_it(
+def test_auto_apply_requires_an_apply_decision_but_manual_apply_bypasses_it(
     tmp_path, profile, settings
 ) -> None:
-    path = tmp_path / "auto-fit-limit.db"
+    path = tmp_path / "auto-decision-gate.db"
     connection = init_db(path)
     source = SOURCE_DOCUMENTS[0]
     jobs = [
-        make_listing(source, "Low Fit", "Software Intern", "https://jobs.test/low"),
-        make_listing(source, "High Fit", "Backend Intern", "https://jobs.test/high"),
+        make_listing(source, "Skipped Co", "Software Intern", "https://jobs.test/low"),
+        make_listing(source, "Chosen Co", "Backend Intern", "https://jobs.test/high"),
     ]
     ingest_listings(
         connection, source, jobs, profile=profile, settings=settings, include_existing=True
@@ -360,44 +365,62 @@ def test_auto_apply_fit_limit_blocks_low_fit_jobs_but_manual_apply_bypasses_it(
         """
         UPDATE jobs SET pipeline_status = 'ready', eligibility = 'eligible',
                         discovered_as_new = 1,
-                        fit_score = CASE WHEN company = 'Low Fit' THEN 6 ELSE 8 END
+                        apply_decision = CASE WHEN company = 'Chosen Co'
+                            THEN 'apply' ELSE 'skip' END,
+                        apply_confidence = 'high'
         """
     )
     connection.commit()
 
-    assert claimable_application_count(
-        connection, max_attempts=3, minimum_fit_score=7
-    ) == 1
-    automatic = claim_next_job(
-        connection,
-        worker_id="worker-0",
-        max_attempts=3,
-        minimum_fit_score=7,
-    )
+    assert claimable_application_count(connection, max_attempts=3) == 1
+    automatic = claim_next_job(connection, worker_id="worker-0", max_attempts=3)
     assert automatic is not None
-    assert automatic["company"] == "High Fit"
+    assert automatic["company"] == "Chosen Co"
 
     manual = claim_next_job(
         connection,
         worker_id="worker-1",
         max_attempts=3,
         target_job_id=1,
-        minimum_fit_score=10,
     )
     assert manual is not None
-    assert manual["company"] == "Low Fit"
+    assert manual["company"] == "Skipped Co"
     close_connection(path)
 
 
-def test_auto_apply_claims_only_the_best_fit_role_per_company(
-    tmp_path, profile, settings
-) -> None:
-    path = tmp_path / "company-best-fit.db"
+def test_auto_apply_never_claims_an_unreviewed_listing(tmp_path, profile, settings) -> None:
+    path = tmp_path / "unreviewed.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    ingest_listings(
+        connection,
+        source,
+        [make_listing(source, "Acme", "Software Intern", "https://jobs.test/new")],
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'ready', eligibility = 'eligible',
+                        discovered_as_new = 1
+        """
+    )
+    connection.commit()
+
+    assert claimable_application_count(connection, max_attempts=3) == 0
+    assert claim_next_job(connection, worker_id="worker-0", max_attempts=3) is None
+    close_connection(path)
+
+
+def test_auto_apply_honours_the_reviewed_company_budget(tmp_path, profile, settings) -> None:
+    path = tmp_path / "company-budget.db"
     connection = init_db(path)
     source = SOURCE_DOCUMENTS[0]
     listings = [
         make_listing(source, "Acme", "Backend Intern", "https://jobs.test/acme-backend"),
         make_listing(source, "Acme", "ML Intern", "https://jobs.test/acme-ml"),
+        make_listing(source, "Acme", "IT Intern", "https://jobs.test/acme-it"),
         make_listing(source, "Beta", "Software Intern", "https://jobs.test/beta-swe"),
     ]
     ingest_listings(
@@ -408,54 +431,40 @@ def test_auto_apply_claims_only_the_best_fit_role_per_company(
         settings=settings,
         include_existing=True,
     )
+    # The reviewer spent Acme's two-application budget on ML and Backend.
     connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'ready', eligibility = 'eligible',
                         discovered_as_new = 1,
-                        fit_score = CASE role
-                            WHEN 'ML Intern' THEN 9
-                            WHEN 'Backend Intern' THEN 8
-                            ELSE 7 END
+                        apply_decision = CASE role
+                            WHEN 'IT Intern' THEN 'skip' ELSE 'apply' END,
+                        apply_confidence = CASE role
+                            WHEN 'ML Intern' THEN 'high' ELSE 'medium' END
         """
     )
     connection.commit()
 
-    assert claimable_application_count(
-        connection, max_attempts=3, minimum_fit_score=7
-    ) == 2
-    acme = claim_next_job(
-        connection,
-        worker_id="worker-0",
-        max_attempts=3,
-        minimum_fit_score=7,
-    )
-    assert acme is not None
-    assert acme["company"] == "Acme"
-    assert acme["role"] == "ML Intern"
-    assert acme["apply_origin"] == "auto"
-    sibling = get_job(connection, 1)
-    assert sibling is not None
-    assert sibling["pipeline_status"] == "skipped"
-    assert sibling["apply_reason_code"] == "company_role_deduplicated"
+    assert claimable_application_count(connection, max_attempts=3) == 3
+    first = claim_next_job(connection, worker_id="worker-0", max_attempts=3)
+    assert first is not None
+    assert (first["company"], first["role"]) == ("Acme", "ML Intern")
+    assert first["apply_origin"] == "auto"
 
-    beta = claim_next_job(
-        connection,
-        worker_id="worker-1",
-        max_attempts=3,
-        minimum_fit_score=7,
-    )
-    assert beta is not None
-    assert beta["company"] == "Beta"
-    assert claim_next_job(
-        connection,
-        worker_id="worker-2",
-        max_attempts=3,
-        minimum_fit_score=7,
-    ) is None
+    # The unchosen Acme role is left alone rather than force-skipped: the
+    # decision already says No, and a manual Apply must still reach it.
+    unchosen = get_job(connection, 3)
+    assert unchosen is not None
+    assert unchosen["pipeline_status"] == "ready"
+    assert unchosen["apply_decision"] == "skip"
+
+    # Acme's second approved role waits while its first is mid-application.
+    second = claim_next_job(connection, worker_id="worker-1", max_attempts=3)
+    assert second is not None
+    assert second["company"] == "Beta"
     close_connection(path)
 
 
-def test_application_queue_keeps_batch_order_and_one_role_per_company(
+def test_application_queue_lists_every_reviewed_apply_in_order(
     tmp_path, profile, settings
 ) -> None:
     path = tmp_path / "application-queue.db"
@@ -465,7 +474,7 @@ def test_application_queue_keeps_batch_order_and_one_role_per_company(
         make_listing(source, "Acme", "Backend Intern", "https://jobs.test/acme-backend"),
         make_listing(source, "Acme", "ML Intern", "https://jobs.test/acme-ml"),
         make_listing(source, "Beta", "Software Intern", "https://jobs.test/beta"),
-        make_listing(source, "Low Fit", "IT Intern", "https://jobs.test/low"),
+        make_listing(source, "Declined Co", "IT Intern", "https://jobs.test/low"),
     ]
     ingest_listings(
         connection,
@@ -479,11 +488,10 @@ def test_application_queue_keeps_batch_order_and_one_role_per_company(
         """
         UPDATE jobs SET pipeline_status = 'queued', eligibility = 'eligible',
                         discovered_as_new = 1,
-                        fit_score = CASE role
-                            WHEN 'ML Intern' THEN 9
-                            WHEN 'Backend Intern' THEN 8
-                            WHEN 'Software Intern' THEN 7
-                            ELSE 6 END
+                        apply_decision = CASE company
+                            WHEN 'Declined Co' THEN 'skip' ELSE 'apply' END,
+                        apply_confidence = CASE role
+                            WHEN 'ML Intern' THEN 'high' ELSE 'medium' END
         """
     )
     connection.commit()
@@ -492,31 +500,27 @@ def test_application_queue_keeps_batch_order_and_one_role_per_company(
         connection,
         auto_enabled=True,
         max_attempts=3,
-        minimum_fit_score=7,
         profile=profile,
     )
 
     assert [(item["company"], item["role"]) for item in waiting] == [
         ("Acme", "ML Intern"),
+        ("Acme", "Backend Intern"),
         ("Beta", "Software Intern"),
     ]
-    assert [item["position"] for item in waiting] == [1, 2]
+    assert [item["position"] for item in waiting] == [1, 2, 3]
     assert all(item["queue_state"] == "preparing" for item in waiting)
 
-    connection.execute("UPDATE jobs SET pipeline_status = 'ready' WHERE fit_score >= 7")
-    connection.commit()
-    claimed = claim_next_job(
-        connection,
-        worker_id="worker-0",
-        max_attempts=3,
-        minimum_fit_score=7,
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'ready' WHERE apply_decision = 'apply'"
     )
+    connection.commit()
+    claimed = claim_next_job(connection, worker_id="worker-0", max_attempts=3)
     assert claimed is not None
     active_queue = list_application_queue(
         connection,
         auto_enabled=True,
         max_attempts=3,
-        minimum_fit_score=7,
         profile=profile,
     )
     assert active_queue[0]["id"] == claimed["id"]
@@ -544,7 +548,8 @@ def test_auto_apply_preferences_are_an_optional_gate(tmp_path, profile, settings
     connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'ready', eligibility = 'eligible',
-                        discovered_as_new = 1, fit_score = 8
+                        discovered_as_new = 1, apply_decision = 'apply',
+                        apply_confidence = 'high'
         """
     )
     connection.commit()
@@ -552,14 +557,12 @@ def test_auto_apply_preferences_are_an_optional_gate(tmp_path, profile, settings
     assert claimable_application_count(
         connection,
         max_attempts=3,
-        minimum_fit_score=7,
         profile=profile,
         use_preferences=False,
     ) == 2
     assert claimable_application_count(
         connection,
         max_attempts=3,
-        minimum_fit_score=7,
         profile=profile,
         use_preferences=True,
     ) == 1
@@ -567,7 +570,6 @@ def test_auto_apply_preferences_are_an_optional_gate(tmp_path, profile, settings
         connection,
         worker_id="worker-0",
         max_attempts=3,
-        minimum_fit_score=7,
         profile=profile,
         use_preferences=True,
     )
@@ -592,7 +594,7 @@ def test_auto_apply_does_not_retry_a_terminal_missing_fact(tmp_path, profile, se
     connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'failed', eligibility = 'eligible',
-                        discovered_as_new = 1, fit_score = 9,
+                        discovered_as_new = 1, apply_decision = 'apply',
                         apply_origin = 'auto', apply_attempts = 1,
                         apply_reason_code = 'missing_input',
                         apply_error = 'Required address is unavailable'
@@ -600,11 +602,7 @@ def test_auto_apply_does_not_retry_a_terminal_missing_fact(tmp_path, profile, se
     )
     connection.commit()
 
-    assert claimable_application_count(
-        connection,
-        max_attempts=3,
-        minimum_fit_score=7,
-    ) == 0
+    assert claimable_application_count(connection, max_attempts=3) == 0
     close_connection(path)
 
 
@@ -903,7 +901,12 @@ def test_failed_application_is_retryable_until_attempt_cap(tmp_path, profile, se
     ingest_listings(
         connection, source, [job], profile=profile, settings=settings, include_existing=True
     )
-    connection.execute("UPDATE jobs SET pipeline_status = 'ready' WHERE id = 1")
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'ready', apply_decision = 'apply'
+        WHERE id = 1
+        """
+    )
     connection.commit()
 
     first = claim_next_job(connection, worker_id="worker-0", max_attempts=2)
@@ -970,7 +973,7 @@ def test_agent_discovered_qualification_conflict_persists_and_blocks_auto_apply(
         reason_code="eligibility_conflict",
     )
     ingest_listings(connection, source, [job], profile=profile, settings=settings)
-    refresh_qualification_scores(connection, profile=profile, settings=settings)
+    refresh_eligibility(connection, profile=profile, settings=settings)
 
     row = get_job(connection, 1)
     assert row is not None
@@ -982,10 +985,10 @@ def test_agent_discovered_qualification_conflict_persists_and_blocks_auto_apply(
     close_connection(path)
 
 
-def test_qualification_refresh_preserves_llm_fit_while_updating_hard_gate(
+def test_eligibility_refresh_updates_the_hard_gate_from_the_profile(
     tmp_path, profile, settings
 ) -> None:
-    path = tmp_path / "qualification-refresh.db"
+    path = tmp_path / "eligibility-refresh.db"
     connection = init_db(path)
     source = SOURCE_DOCUMENTS[0]
     job = make_listing(
@@ -996,21 +999,11 @@ def test_qualification_refresh_preserves_llm_fit_while_updating_hard_gate(
     )
     ingest_listings(connection, source, [job], profile=profile, settings=settings)
     connection.execute(
-        """
-        UPDATE jobs SET eligibility = 'eligible', eligibility_reason = 'old',
-                        fit_score = 9, score_reasoning = 'LLM score',
-                        scored_at = '2026-08-10T00:00:00+00:00'
-        WHERE id = 1
-        """
+        "UPDATE jobs SET eligibility = 'eligible', eligibility_reason = 'old' WHERE id = 1"
     )
     connection.commit()
 
-    refresh_qualification_scores(
-        connection,
-        profile=profile,
-        settings=settings,
-        preserve_scores=True,
-    )
+    refresh_eligibility(connection, profile=profile, settings=settings)
 
     row = get_job(connection, 1)
     assert row is not None
@@ -1018,9 +1011,6 @@ def test_qualification_refresh_preserves_llm_fit_while_updating_hard_gate(
     assert row["eligibility_reason"] == (
         "requires a doctoral degree not present in the profile"
     )
-    assert row["fit_score"] == 9
-    assert row["score_reasoning"] == "LLM score"
-    assert row["scored_at"] == "2026-08-10T00:00:00+00:00"
     close_connection(path)
 
 
@@ -1159,7 +1149,8 @@ def test_supplying_a_missing_fact_releases_blocked_applications(
     connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'applying', apply_origin = 'auto',
-                        apply_attempts = 1, resume_path = 'resume.pdf'
+                        apply_attempts = 1, resume_path = 'resume.pdf',
+                        apply_decision = 'apply'
         WHERE id = 1
         """
     )
@@ -1175,7 +1166,7 @@ def test_supplying_a_missing_fact_releases_blocked_applications(
         reason_code="missing_input",
         manual_handoff=False,
     )
-    assert claimable_application_count(connection, max_attempts=3, minimum_fit_score=1) == 0
+    assert claimable_application_count(connection, max_attempts=3) == 0
 
     assert profile_facts_changed(connection, profile) is True
     assert profile_facts_changed(connection, profile) is False
@@ -1189,7 +1180,7 @@ def test_supplying_a_missing_fact_releases_blocked_applications(
     assert released["apply_reason_code"] is None
     assert released["apply_error"] is None
     assert released["apply_attempts"] == 0
-    assert claimable_application_count(connection, max_attempts=3, minimum_fit_score=1) == 1
+    assert claimable_application_count(connection, max_attempts=3) == 1
     # A listing that left the source stays expired.
     assert get_job(connection, 2)["pipeline_status"] == "expired"
     assert clear_missing_fact_blocks(connection) == 0
@@ -1229,7 +1220,7 @@ def test_stopping_a_live_checkpoint_releases_it_for_a_manual_record(
     assert live_human_interaction_checkpoint(connection, 1, "worker-0") is False
     assert live_submission_checkpoint(connection, 1, "worker-0") is False
     assert list_application_queue(
-        connection, auto_enabled=True, max_attempts=3, minimum_fit_score=1
+        connection, auto_enabled=True, max_attempts=3
     ) == []
     assert [item["id"] for item in list_manual_handoff_jobs(connection)] == [1]
     assert list_manual_handoff_jobs(connection)[0]["handoff"] == "stopped"
@@ -1389,20 +1380,20 @@ def test_source_advanced_degree_flag_survives_sync_and_blocks_auto_apply(
     assert get_job(connection, 1)["eligibility"] == "ineligible"
 
     profile["education"]["degree"] = "Master of Science"
-    refresh_qualification_scores(connection, profile=profile, settings=settings)
+    refresh_eligibility(connection, profile=profile, settings=settings)
     assert get_job(connection, 1)["eligibility"] == "eligible"
     close_connection(path)
 
 
-def test_agent_discovered_conflict_lowers_the_heuristic_fit_score(
+def test_agent_discovered_conflict_keeps_the_listing_ineligible(
     tmp_path, profile, settings
 ) -> None:
-    path = tmp_path / "conflict-fit.db"
+    path = tmp_path / "conflict-eligibility.db"
     connection = init_db(path)
     source = SOURCE_DOCUMENTS[0]
     listing = make_listing(source, "Acme", "Software Intern", "https://jobs.test/conflict")
     ingest_listings(connection, source, [listing], profile=profile, settings=settings)
-    assert get_job(connection, 1)["fit_score"] >= 7
+    assert get_job(connection, 1)["eligibility"] == "eligible"
     connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'applying', apply_origin = 'auto',
@@ -1420,11 +1411,11 @@ def test_agent_discovered_conflict_lowers_the_heuristic_fit_score(
         manual_handoff=False,
     )
 
-    refresh_qualification_scores(connection, profile=profile, settings=settings)
+    refresh_eligibility(connection, profile=profile, settings=settings)
 
     row = get_job(connection, 1)
     assert row["eligibility"] == "ineligible"
-    assert row["fit_score"] <= 2
+    assert "master" in str(row["eligibility_reason"])
     close_connection(path)
 
 
@@ -1613,3 +1604,202 @@ def test_pre_feature_missing_fact_pause_gets_a_legacy_answer_channel(
     assert questions[0]["input_key"] == "legacy_follow_up"
     assert questions[0]["input_type"] == "textarea"
     close_connection(path)
+
+
+def test_upgrading_drops_the_retired_fit_score_columns(tmp_path, profile, settings) -> None:
+    path = tmp_path / "retired-columns.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    ingest_listings(
+        connection,
+        source,
+        [make_listing(source, "Acme", "Software Intern", "https://jobs.test/1")],
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    # Recreate the pre-review shape: the three score columns plus the index that
+    # covered one of them, which has to be dropped before the columns can be.
+    connection.executescript(
+        """
+        ALTER TABLE jobs ADD COLUMN fit_score INTEGER;
+        ALTER TABLE jobs ADD COLUMN score_reasoning TEXT;
+        ALTER TABLE jobs ADD COLUMN scored_at TEXT;
+        UPDATE jobs SET fit_score = 6, score_reasoning = 'stale heuristic';
+        CREATE INDEX idx_jobs_pipeline ON jobs(pipeline_status, fit_score);
+        """
+    )
+    connection.commit()
+    close_connection(path)
+
+    connection = init_db(path)
+
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
+    assert not columns & {"fit_score", "score_reasoning", "scored_at"}
+    assert {"apply_decision", "apply_headline", "review_signature"} <= columns
+    assert connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_jobs_pipeline'"
+    ).fetchone() is None
+    # The listing itself survives the column drop.
+    job = get_job(connection, 1)
+    assert job["company"] == "Acme"
+    assert job["apply_decision"] is None
+    close_connection(path)
+
+
+def test_an_old_sqlite_leaves_retired_columns_in_place_instead_of_failing(
+    tmp_path, profile, settings, monkeypatch
+) -> None:
+    path = tmp_path / "old-sqlite.db"
+    connection = init_db(path)
+    connection.execute("ALTER TABLE jobs ADD COLUMN fit_score INTEGER")
+    connection.commit()
+    close_connection(path)
+    monkeypatch.setattr(database.sqlite3, "sqlite_version_info", (3, 34, 0))
+
+    connection = init_db(path)
+
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
+    assert "fit_score" in columns, "an old SQLite keeps the column rather than erroring"
+    assert "apply_decision" in columns, "the upgrade still completes"
+    close_connection(path)
+
+
+def test_company_history_separates_submitted_from_unsubmitted_attempts(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "company-history.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    ingest_listings(
+        connection,
+        source,
+        [
+            make_listing(source, "ByteDance", "Backend Intern", "https://jobs.test/bd-1"),
+            make_listing(source, "ByteDance", "ML Intern", "https://jobs.test/bd-2"),
+            make_listing(source, "ByteDance", "Infra Intern", "https://jobs.test/bd-3"),
+            make_listing(source, "ByteDance", "Data Intern", "https://jobs.test/bd-4"),
+            make_listing(source, "Other Co", "Software Intern", "https://jobs.test/other"),
+        ],
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applied',
+                        applied_at = '2026-08-10T00:00:00+00:00'
+        WHERE id = 1
+        """
+    )
+    connection.execute("UPDATE jobs SET pipeline_status = 'manual_review' WHERE id = 2")
+    connection.execute("UPDATE jobs SET pipeline_status = 'applying' WHERE id = 3")
+    # Handed back to the candidate; the agent will never file it.
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'manual_review',
+                        availability_status = 'manual_only'
+        WHERE id = 4
+        """
+    )
+    connection.execute(
+        """
+        UPDATE jobs SET pipeline_status = 'applied',
+                        applied_at = '2026-08-11T00:00:00+00:00'
+        WHERE id = 5
+        """
+    )
+    connection.commit()
+
+    history = company_application_history(connection, "ByteDance")
+
+    assert history["submitted"] == 1, "only one ByteDance application was actually sent"
+    assert history["in_progress"] == 2
+    assert history["used"] == 3, "in-flight attempts still reserve a slot"
+    assert len(history["submitted_entries"]) == 1
+    assert "submitted on 2026-08-10" in history["submitted_entries"][0]
+    assert any("Submit confirmation" in line for line in history["in_progress_entries"])
+    assert any("filling this in now" in line for line in history["in_progress_entries"])
+    assert not any("Data Intern" in line for line in history["in_progress_entries"])
+    # Another company's application never counts against this one.
+    assert not any("Software Intern" in line for line in history["submitted_entries"])
+    close_connection(path)
+
+
+def test_reviewable_listings_skip_the_backlog_outside_the_age_window(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "age-window.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    ingest_listings(
+        connection,
+        source,
+        [
+            make_listing(source, "Fresh Co", "Backend Intern", "https://jobs.test/fresh"),
+            make_listing(source, "Backlog Co", "Old Intern", "https://jobs.test/old"),
+        ],
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    connection.execute("UPDATE jobs SET posting_date = '2026-01-05' WHERE id = 2")
+    connection.commit()
+
+    assert len(reviewable_listings(connection)) == 2, "0 means no age limit"
+    within = reviewable_listings(connection, max_age_days=2)
+    assert [row["company"] for row in within] == ["Fresh Co"]
+    # An explicit request still reaches the old listing.
+    assert len(reviewable_listings(connection, target_job_id=2)) == 1
+    close_connection(path)
+
+
+def test_reviewable_listings_can_select_one_first_seen_day(tmp_path, profile, settings) -> None:
+    path = tmp_path / "first-seen-window.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    ingest_listings(
+        connection,
+        source,
+        [
+            make_listing(source, "Start Co", "Backend Intern", "https://jobs.test/start"),
+            make_listing(source, "Inside Co", "ML Intern", "https://jobs.test/inside"),
+            make_listing(source, "End Co", "Data Intern", "https://jobs.test/end"),
+        ],
+        profile=profile,
+        settings=settings,
+        include_existing=True,
+    )
+    start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    connection.executemany(
+        "UPDATE jobs SET first_seen_at = ? WHERE id = ?",
+        [
+            (start.isoformat(), 1),
+            ((end - timedelta(seconds=1)).isoformat(), 2),
+            (end.isoformat(), 3),
+        ],
+    )
+    connection.execute("UPDATE jobs SET apply_decision = 'apply' WHERE id = 2")
+    connection.commit()
+
+    rows = reviewable_listings(
+        connection,
+        first_seen_from=start.isoformat(),
+        first_seen_before=end.isoformat(),
+    )
+
+    assert {row["company"] for row in rows} == {"Start Co", "Inside Co"}
+    undecided = reviewable_listings(
+        connection,
+        first_seen_from=start.isoformat(),
+        first_seen_before=end.isoformat(),
+        undecided_only=True,
+    )
+    assert [row["company"] for row in undecided] == ["Start Co"]
+    close_connection(path)
+
+
+def test_listing_age_cutoff_counts_back_from_the_reference_day() -> None:
+    assert listing_age_cutoff(2, today="2026-08-16") == "2026-08-14"
+    assert listing_age_cutoff(0, today="2026-08-16") == "2026-08-16"

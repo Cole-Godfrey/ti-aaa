@@ -12,6 +12,22 @@ filters:
   allowed_locations: []
   remote_only: false
 
+review:
+  # Reads each employer posting and decides Apply / Don't apply for every listing.
+  enabled: true
+  model: claude-opus-5
+  # Applications the agent will spend at one company. Extra roles there are declined.
+  max_applications_per_company: 2
+  # Only review listings posted within this many days. 0 reviews the whole backlog.
+  max_listing_age_days: 2
+  # If false, decisions are made from list metadata alone and marked low confidence.
+  fetch_postings: true
+  # Re-read the posting and re-decide after this many days.
+  refresh_after_days: 21
+  # Upper bound on companies reviewed in one poll cycle.
+  max_companies_per_cycle: 12
+  posting_timeout_seconds: 25
+
 preparation:
   use_llm: false
   generate_cover_letters: true
@@ -22,8 +38,6 @@ automation:
   # If true, an explicit manual Apply action may submit after completing the form.
   # Missing facts and one-time verification codes still pause in the Agent view.
   manual_auto_submit: false
-  # Auto mode uses candidate qualifications for this score. Preferences do not change it.
-  auto_apply_minimum_fit_score: 7
   # If true, Auto mode also requires the role, location, and term preferences in profile.json.
   auto_apply_use_preferences: false
   # Browser permission is requested only after Auto mode is on and this is enabled in the web app.

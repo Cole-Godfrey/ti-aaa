@@ -1,4 +1,4 @@
-"""Fit scoring and factual application-packet preparation."""
+"""Factual application-packet preparation for reviewed listings."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from tiaaa.config import AppPaths
-from tiaaa.database import add_event, get_connection, mark_prepared, pending_preparation, utc_now
+from tiaaa.database import get_connection, mark_prepared, pending_preparation
 from tiaaa.llm import get_client
-from tiaaa.resumes import choose_resume, import_legacy_resume, prepare_resume_copy
+from tiaaa.resumes import import_legacy_resume, prepare_resume_copy
 
 log = logging.getLogger(__name__)
 
@@ -38,73 +38,6 @@ def _metadata(job: dict[str, Any]) -> str:
         f"Category: {job.get('category') or 'Tech'}\n"
         f"Season/posting date: {job.get('posting_date') or 'Not listed'}"
     )
-
-
-def score_jobs_with_llm(
-    *,
-    paths: AppPaths,
-    limit: int = 0,
-    db_path: str | Path | None = None,
-) -> dict[str, int]:
-    """Optionally refine heuristic scores using repository metadata only."""
-
-    import_legacy_resume(paths=paths, db_path=db_path)
-    connection = get_connection(db_path)
-    query = """
-        SELECT * FROM jobs WHERE eligibility = 'eligible' AND is_active = 1
-          AND pipeline_status = 'queued'
-        ORDER BY discovered_as_new DESC, first_seen_at DESC
-    """
-    parameters: list[Any] = []
-    if limit > 0:
-        query += " LIMIT ?"
-        parameters.append(limit)
-    jobs = [dict(row) for row in connection.execute(query, parameters).fetchall()]
-    completed = errors = 0
-    if not jobs:
-        return {"scored": 0, "errors": 0}
-    client = get_client()
-    try:
-        for job in jobs:
-            _, _, _, resume = choose_resume(
-                job=job,
-                paths=paths,
-                profile={},
-                db_path=db_path,
-            )
-            prompt = f"""Evaluate this student's fit for a technology internship using ONLY the facts below.
-The listing came from a curated GitHub repository; no full job description is available.
-Score only how qualified the student is. Do not use role, location, term, or work-style preferences.
-Do not infer credentials that are absent. Return JSON only:
-{{"score": 1-10, "reasoning": "one concise sentence"}}
-
-STUDENT RESUME
-{resume[:10000]}
-
-INTERNSHIP METADATA
-{_metadata(job)}
-"""
-            try:
-                result = _json_object(client.ask(prompt, max_tokens=300))
-                score = max(1, min(10, int(result["score"])))
-                reasoning = str(result.get("reasoning", "LLM metadata score"))
-                now = utc_now()
-                connection.execute(
-                    """
-                    UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (score, reasoning, now, now, job["id"]),
-                )
-                add_event(connection, int(job["id"]), "scored", f"{score}/10: {reasoning}")
-                connection.commit()
-                completed += 1
-            except Exception as exc:
-                errors += 1
-                log.warning("Could not score %s at %s: %s", job["role"], job["company"], exc)
-    finally:
-        client.close()
-    return {"scored": completed, "errors": errors}
 
 
 def _safe_slug(value: str) -> str:
