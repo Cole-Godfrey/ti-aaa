@@ -63,7 +63,7 @@ from tiaaa.database import (
     live_human_interaction_checkpoint,
     mark_applied_manually,
     record_dashboard_visit,
-    refresh_qualification_scores,
+    refresh_eligibility,
     request_agent_stop,
     set_app_state,
     source_baseline_complete,
@@ -197,6 +197,12 @@ class AgentInputAnswers(BaseModel):
     answers: dict[str, Any] = Field(default_factory=dict)
 
 
+class TodayReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    timezone: str = Field(default="UTC", min_length=1, max_length=100)
+
+
 class WebPushKeys(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -234,6 +240,17 @@ def _public_job(row: dict[str, Any]) -> dict[str, Any]:
         "cover_letter_path",
     ):
         result.pop(key, None)
+    # The stored rationale is JSON so the dashboard can render it structurally.
+    raw = result.pop("apply_rationale", None)
+    rationale: dict[str, Any] = {}
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            rationale = parsed
+    result["apply_rationale"] = rationale
     return result
 
 
@@ -458,14 +475,10 @@ def create_app(
                         raise ValueError("Upload at least one resume before finishing onboarding")
                 set_app_state(connection(), "onboarding_complete", update.onboarding_complete)
             if update.profile is not None or update.settings is not None:
-                current_settings = load_settings(paths)
-                refresh_qualification_scores(
+                refresh_eligibility(
                     connection(),
                     profile=load_profile(paths),
-                    settings=current_settings,
-                    preserve_scores=bool(
-                        current_settings.get("preparation", {}).get("use_llm")
-                    ),
+                    settings=load_settings(paths),
                 )
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -530,6 +543,49 @@ def create_app(
             if result.get("apply_origin") == "auto"
             else "manual_auto_submit" if manual_auto_submit else "manual_confirm"
         )
+        return result
+
+    @app.post("/api/jobs/{job_id}/review")
+    def review_job(job_id: int) -> dict[str, Any]:
+        """Re-read this employer posting and re-decide the whole company."""
+
+        service = require_service()
+        try:
+            result = service.review_listing(job_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        review = result["review"]
+        if review.get("status") == "unavailable":
+            raise HTTPException(
+                status_code=409,
+                detail=str(review.get("detail") or "Claude is not reachable for reviewing"),
+            )
+        return {"review": review, "job": _public_job(result["job"])}
+
+    @app.post("/api/reviews/today/retry")
+    def retry_todays_reviews(payload: TodayReviewRequest) -> dict[str, Any]:
+        """Re-run review for every reviewable listing first discovered today."""
+
+        service = require_service()
+        try:
+            result = service.review_todays_listings(payload.timezone)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        review = result["review"]
+        if review.get("status") == "unavailable":
+            raise HTTPException(
+                status_code=409,
+                detail=str(review.get("detail") or "Claude is not reachable for reviewing"),
+            )
+        if review.get("status") == "no_resumes":
+            raise HTTPException(
+                status_code=409,
+                detail="Upload a resume before retrying posting reviews",
+            )
         return result
 
     @app.post("/api/jobs/{job_id}/apply", status_code=202)
@@ -809,9 +865,6 @@ def create_app(
             database,
             auto_enabled=bool(automation.get("auto_apply_new", False)),
             max_attempts=int(automation.get("max_attempts", 3)),
-            minimum_fit_score=int(
-                automation.get("auto_apply_minimum_fit_score", 7)
-            ),
             profile=load_profile(paths),
             use_preferences=bool(
                 automation.get("auto_apply_use_preferences", False)

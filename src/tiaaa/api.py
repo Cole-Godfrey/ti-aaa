@@ -73,6 +73,25 @@ class TIAAA:
         )
         return [result.as_dict() for result in results]
 
+    def review(
+        self,
+        *,
+        job_id: int | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Read employer postings and decide which listings are worth applying to."""
+
+        from tiaaa.review import review_jobs
+
+        return review_jobs(
+            paths=self.paths,
+            profile=self.profile,
+            settings=self.settings,
+            db_path=self.paths.database,
+            target_job_id=job_id,
+            force=force or job_id is not None,
+        )
+
     def prepare(self, *, limit: int = 0) -> dict[str, int]:
         from tiaaa.preparation import prepare_jobs
 

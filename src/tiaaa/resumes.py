@@ -180,11 +180,29 @@ def choose_resume(
     profile: dict[str, Any],
     db_path: str | Path | None = None,
 ) -> tuple[dict[str, Any], Path, str, str]:
-    """Choose the best existing resume without changing its PDF."""
+    """Choose the best existing resume without changing its PDF.
+
+    The apply/skip reviewer reads every resume against the employer's own posting,
+    so its choice wins when it made one. Keyword ranking is the fallback for
+    listings that were never reviewed.
+    """
 
     connection = get_connection(db_path)
     import_legacy_resume(paths=paths, db_path=db_path)
-    ranked = rank_resumes(job, list_resumes(connection), profile)
+    active = list_resumes(connection)
+    if not active:
+        raise FileNotFoundError("No active resumes. Upload at least one resume in the web app.")
+    reviewed_id = job.get("apply_resume_id")
+    if reviewed_id is not None:
+        chosen = next((item for item in active if int(item["id"]) == int(reviewed_id)), None)
+        if chosen is not None:
+            return (
+                chosen,
+                Path(str(chosen["pdf_path"])),
+                "chosen by the posting review",
+                Path(str(chosen["text_path"])).read_text(encoding="utf-8"),
+            )
+    ranked = rank_resumes(job, active, profile)
     if not ranked:
         raise FileNotFoundError("No active resumes. Upload at least one resume in the web app.")
     _, selected, reason = ranked[0]

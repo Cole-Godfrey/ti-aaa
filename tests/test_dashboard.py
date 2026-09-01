@@ -453,6 +453,39 @@ def test_latest_jobs_detail_and_manual_apply_action(tmp_path, profile, settings)
     assert service.requested == [rows[0]["id"], rows[1]["id"]]
 
 
+def test_latest_jobs_can_retry_reviews_for_the_browser_day(tmp_path) -> None:
+    paths = AppPaths(tmp_path)
+    seen: list[str] = []
+
+    class FakeService:
+        def review_todays_listings(self, timezone_name):
+            seen.append(timezone_name)
+            return {
+                "date": "2026-09-01",
+                "review": {
+                    "reviewed": 4,
+                    "companies": 2,
+                    "apply": 2,
+                    "skip": 2,
+                    "errors": 0,
+                    "selected": 4,
+                    "status": "complete",
+                },
+            }
+
+    app = create_app(paths.database, paths=paths)
+    app.state.service = FakeService()
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/reviews/today/retry", json={"timezone": "America/Los_Angeles"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["review"]["reviewed"] == 4
+    assert seen == ["America/Los_Angeles"]
+
+
 def test_agent_page_accepts_requested_input_and_requeues_job(
     tmp_path, profile, settings
 ) -> None:
@@ -703,6 +736,46 @@ def test_agent_page_records_a_bot_blocked_application_as_applied_manually(
     assert client.post("/api/jobs/404/applied-manually").status_code == 404
 
 
+def test_latest_jobs_records_an_application_without_starting_the_agent(
+    tmp_path, profile, settings
+) -> None:
+    paths = AppPaths(tmp_path)
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    listing = InternshipListing(
+        company="Ledger Co",
+        role="Software Engineer Intern",
+        location="Remote",
+        application_url="https://jobs.test/ledger",
+        source_key=source.key,
+        source_label=source.label,
+        source_repo_url=source.repo_url,
+        source_path=source.path,
+    )
+    ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    client = TestClient(create_app(paths.database, paths=paths))
+    assert [item["id"] for item in client.get("/api/jobs?view=latest").json()["items"]] == [1]
+
+    response = client.post("/api/jobs/1/applied-manually")
+
+    assert response.status_code == 200
+    assert response.json()["job"]["pipeline_status"] == "applied"
+    assert response.json()["job"]["apply_origin"] == "self"
+    assert client.get("/api/jobs?view=applications&status=applied").json()["items"][0][
+        "company"
+    ] == "Ledger Co"
+    assert client.get("/api/stats").json()["applications"] == 1
+    # The listing stays in the repository inbox, now stamped as applied.
+    latest = client.get("/api/jobs?view=latest").json()["items"]
+    assert [item["pipeline_status"] for item in latest] == ["applied"]
+
+    index = client.get("/").text
+    javascript = client.get("/static/app.js").text
+    assert 'id="markAppliedButton"' in index
+    assert "function jobCanBeMarkedApplied(job)" in javascript
+    assert 'class="text-button mark-applied"' in javascript
+
+
 def test_agent_page_stops_a_looping_captcha_session_and_records_it(
     tmp_path, profile, settings
 ) -> None:
@@ -770,11 +843,19 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'id="agentQueueList"' in index
     assert 'id="agentQueueCount"' in index
     assert 'id="autoMode"' in index
-    assert 'id="autoModeMinimumFit"' in index
+    assert 'id="autoModeMinimumFit"' not in index
+    assert 'id="reviewBudget"' in index
+    assert 'id="reviewMaxAge"' in index
+    assert 'id="reviewEnabled"' in index
+    assert 'id="retryTodayReviews"' in index
+    assert '<th>Apply?</th>' in index
+    assert '<th>Fit</th>' not in index
+    assert '<th>Qualified</th>' not in index
+    assert 'id="decisionModal"' in index
     assert 'id="autoModeUsePreferences"' in index
     assert 'id="manualAutoSubmit"' in index
-    assert '<th>Qualified</th>' in index
-    assert 'colspan="7"' in index
+    assert '<option value="apply">Apply</option>' in index
+    assert 'colspan="6"' in index
     assert 'id="addressLine2"' in index
     assert 'id="county"' in index
     assert 'id="previousInternshipCompanies"' in index
@@ -816,7 +897,18 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert "function listingDate(postingDate, firstSeenAt)" in javascript
     assert "job.posting_date || shortDate(job.first_seen_at)" not in javascript
     assert javascript.count("listingDate(job.posting_date, job.first_seen_at)") == 2
-    assert "automation.auto_apply_minimum_fit_score ?? 7" in javascript
+    assert "review.max_applications_per_company ?? 2" in javascript
+    assert 'api("/api/reviews/today/retry"' in javascript
+    assert "function firstSeenToday(job)" in javascript
+    assert "&& !job.apply_decision" in javascript
+    assert "Existing YES/NO decisions will not be reviewed again or changed" in javascript
+    assert "timezone: browserTimeZone()" in javascript
+    # The review controls are populated from saved settings, not from the
+    # auto-mode toggle handler, which has no `review` in scope.
+    populate = javascript.split("function populateConfiguration(")[1]
+    assert 'setValue("reviewBudget"' in populate.split("function ")[0]
+    toggle = javascript.split("function handleAutoModeToggle(")[1].split("function ")[0]
+    assert "review." not in toggle
     assert 'api(`/api/jobs/${card.dataset.submitJob}/submit`' in javascript
     assert "Submit application" in javascript
     assert "function renderApplicationQueue" in javascript
@@ -837,7 +929,8 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'web_push_notifications: checked("autoMode") && checked("webPushNotifications")' in javascript
     assert 'api("/api/dashboard/visit", { method: "POST" })' in javascript
     assert "stopped with a recorded reason" in javascript
-    assert "qualification-mark" in javascript
+    assert "decision-mark" in javascript
+    assert "fit-mark" not in javascript
 
     service_worker = client.get("/sw.js")
     assert service_worker.status_code == 200
@@ -845,7 +938,7 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert service_worker.headers["service-worker-allowed"] == "/"
 
 
-def test_web_settings_clamp_the_auto_apply_fit_limit(tmp_path) -> None:
+def test_web_settings_retire_the_fit_limit_and_clamp_the_review_budget(tmp_path) -> None:
     paths = AppPaths(tmp_path)
     client = TestClient(create_app(paths.database, paths=paths))
 
@@ -855,6 +948,12 @@ def test_web_settings_clamp_the_auto_apply_fit_limit(tmp_path) -> None:
             "settings": {
                 "minimum_fit_score": 5,
                 "notifications": {"email_enabled": True},
+                "review": {
+                    "max_applications_per_company": 99,
+                    "max_listing_age_days": -5,
+                    "refresh_after_days": 0,
+                    "max_companies_per_cycle": 500,
+                },
                 "automation": {
                     "auto_apply_eligible_only": True,
                     "auto_apply_minimum_fit_score": 99,
@@ -867,9 +966,15 @@ def test_web_settings_clamp_the_auto_apply_fit_limit(tmp_path) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json()["settings"]["automation"][
+    review = response.json()["settings"]["review"]
+    assert review["max_applications_per_company"] == 10
+    assert review["max_listing_age_days"] == 0
+    assert review["refresh_after_days"] == 1
+    assert review["max_companies_per_cycle"] == 100
+    assert (
         "auto_apply_minimum_fit_score"
-    ] == 10
+        not in response.json()["settings"]["automation"]
+    )
     assert "auto_apply_eligible_only" not in response.json()["settings"]["automation"]
     assert response.json()["settings"]["automation"]["auto_apply_use_preferences"] is True
     assert response.json()["settings"]["automation"]["manual_auto_submit"] is True

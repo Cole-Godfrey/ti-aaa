@@ -5,9 +5,11 @@ const state = {
   jobs: [],
   latestJobs: [],
   selectedJob: null,
+  decisionJob: null,
   activeView: "overview",
   searchTimer: null,
   latestSearchTimer: null,
+  retryingTodayReviews: false,
   onboardingStep: 0,
   claudeAuth: null,
   agentInputSignature: null,
@@ -398,36 +400,132 @@ function jobActionDisabled(job) {
   return !job.is_active || Boolean(job.manual_requested) || ["applying", "manual_review", "applied", "expired", "withdrawn"].includes(job.pipeline_status);
 }
 
+function jobCanBeMarkedApplied(job) {
+  return Boolean(job) && !job.applied_at && !["applied", "applying", "expired", "withdrawn"].includes(job.pipeline_status);
+}
+
+const DECISION_PENDING_LABEL = "Not reviewed yet";
+
+function decisionState(job) {
+  if (job.apply_decision === "apply") return "apply";
+  if (job.apply_decision === "skip") return "skip";
+  return "pending";
+}
+
+function decisionLabel(job) {
+  return { apply: "Yes", skip: "No" }[decisionState(job)] || "—";
+}
+
+function listingAgeDays(job) {
+  const raw = job.posting_date || job.first_seen_at;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(raw || ""));
+  if (!match) return null;
+  const posted = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const now = new Date();
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((today - posted) / 86400000);
+}
+
+function outsideReviewWindow(job) {
+  const window = state.config?.settings?.review?.max_listing_age_days ?? 2;
+  if (!window) return false;
+  const age = listingAgeDays(job);
+  return age !== null && age > window;
+}
+
+function firstSeenToday(job) {
+  const seen = new Date(job.first_seen_at);
+  if (Number.isNaN(seen.getTime())) return false;
+  const now = new Date();
+  return seen.getFullYear() === now.getFullYear()
+    && seen.getMonth() === now.getMonth()
+    && seen.getDate() === now.getDate();
+}
+
+function todaysReviewableJobs() {
+  const unavailableStates = new Set(["applied", "applying", "manual_review", "withdrawn", "expired"]);
+  return state.latestJobs.filter(job => firstSeenToday(job)
+    && job.eligibility === "eligible"
+    && !job.apply_decision
+    && !job.applied_at
+    && job.availability_status !== "closed"
+    && !unavailableStates.has(job.pipeline_status));
+}
+
+function browserTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch (_) {
+    return "UTC";
+  }
+}
+
+function decisionSummary(job) {
+  // A role already in the application pipeline is past the point of deciding.
+  if (job.applied_at) return "Already applied";
+  if (job.pipeline_status === "applying") return "The agent is applying now";
+  if (job.pipeline_status === "manual_review") return "Waiting for you in Agent";
+  if (job.apply_headline) return job.apply_headline;
+  if (job.review_error) return "Review failed — open to retry";
+  if (job.eligibility === "ineligible") return job.eligibility_reason || "Ruled out before review";
+  if (outsideReviewWindow(job)) {
+    const window = state.config?.settings?.review?.max_listing_age_days ?? 2;
+    return `Posted more than ${window} day${window === 1 ? "" : "s"} ago — open to review it anyway`;
+  }
+  return DECISION_PENDING_LABEL;
+}
+
 function renderLatestJobs() {
-  const eligibility = element("latestEligibility").value;
-  const jobs = state.latestJobs.filter(job => eligibility === "all" || job.eligibility === eligibility);
+  const decision = element("latestDecision").value;
+  const jobs = state.latestJobs.filter(job => decision === "all" || decisionState(job) === decision);
   const body = element("latestJobsBody");
+  const todayCount = todaysReviewableJobs().length;
+  const retryButton = element("retryTodayReviews");
+  retryButton.disabled = state.retryingTodayReviews;
+  retryButton.title = todayCount
+    ? `Review ${todayCount} listing${todayCount === 1 ? "" : "s"} from today that still have no YES/NO`
+    : "Review today's listings that still have no YES/NO";
   element("latestCount").textContent = jobs.length.toLocaleString();
   if (!jobs.length) {
-    body.innerHTML = '<tr><td colspan="7" class="loading">No active listings match this filter.</td></tr>';
-    element("latestSummary").textContent = "Try another phrase or matching-rule filter.";
+    body.innerHTML = '<tr><td colspan="6" class="loading">No active listings match this filter.</td></tr>';
+    element("latestSummary").textContent = "Try another phrase or decision filter.";
     return;
   }
   body.innerHTML = jobs.map(job => {
-    const qualified = job.eligibility === "eligible";
-    const qualificationReason = qualified && job.eligibility_reason === "eligible"
-      ? "Known requirements match"
-      : job.eligibility_reason || "Qualification not evaluated";
+    const verdict = decisionState(job);
+    const confidence = job.apply_confidence ? `${job.apply_confidence} confidence` : "";
     return `<tr data-job-id="${job.id}">
     <td class="date-cell">${escapeHtml(listingDate(job.posting_date, job.first_seen_at))}</td>
     <td class="role-cell"><button class="row-detail" type="button"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)}</span></button></td>
     <td>${escapeHtml(job.location || "Not listed")}</td>
-    <td><span class="fit-mark ${Number(job.fit_score) >= 7 ? "good" : "warn"}">${escapeHtml(job.fit_score ?? "—")}/10</span></td>
-    <td class="qualification-cell"><span class="qualification-mark ${qualified ? "qualified" : "unqualified"}">${qualified ? "Yes" : "No"}</span><small>${escapeHtml(qualificationReason)}</small></td>
+    <td class="decision-cell"><button class="decision-mark decision-${verdict}" type="button" title="Why?"><b>${escapeHtml(decisionLabel(job))}</b>${confidence ? `<i>${escapeHtml(confidence)}</i>` : ""}</button><small>${escapeHtml(decisionSummary(job))}</small></td>
     <td><span class="state-stamp state-${escapeHtml(job.pipeline_status)}">${escapeHtml(job.pipeline_status.replaceAll("_", " "))}</span></td>
-    <td class="row-actions"><button class="text-button detail-job" type="button">Details</button>${job.availability_status === "manual_only"
+    <td class="row-actions"><button class="text-button detail-job" type="button">Details</button>${jobCanBeMarkedApplied(job)
+      ? `<button class="text-button mark-applied" type="button">Mark applied</button>`
+      : ""}${job.availability_status === "manual_only"
       ? `<a class="mini-apply manual-link" href="${safeExternalUrl(job.application_url)}" target="_blank" rel="noopener noreferrer">Open manually</a>`
       : `<button class="mini-apply" type="button"${jobActionDisabled(job) ? " disabled" : ""}>${escapeHtml(jobActionLabel(job))}</button>`}</td>
   </tr>`;
   }).join("");
-  element("latestSummary").textContent = `${jobs.length} active listing${jobs.length === 1 ? "" : "s"} · ordered by repository posting date`;
+  const applyCount = state.latestJobs.filter(job => decisionState(job) === "apply").length;
+  // Only listings the next cycle will actually decide count as awaiting review.
+  const pendingCount = state.latestJobs.filter(job => decisionState(job) === "pending"
+    && !job.applied_at
+    && !["applying", "manual_review"].includes(job.pipeline_status)
+    && !outsideReviewWindow(job)).length;
+  const skippedByAge = state.latestJobs.filter(job => decisionState(job) === "pending"
+    && outsideReviewWindow(job)).length;
+  element("latestSummary").textContent =
+    `${jobs.length} listing${jobs.length === 1 ? "" : "s"} shown · ${applyCount} worth applying to`
+    + (pendingCount ? ` · ${pendingCount} still to review` : "")
+    + (skippedByAge ? ` · ${skippedByAge} older than the review window` : "");
   body.querySelectorAll(".row-detail, .detail-job").forEach(button => button.addEventListener("click", event => openJobDetail(event.target.closest("tr").dataset.jobId)));
+  body.querySelectorAll(".decision-mark").forEach(button => button.addEventListener("click", event => openDecision(event.currentTarget.closest("tr").dataset.jobId)));
   body.querySelectorAll(".mini-apply").forEach(button => button.addEventListener("click", event => requestJobApplication(event.target.closest("tr").dataset.jobId, button)));
+  body.querySelectorAll(".mark-applied").forEach(button => button.addEventListener("click", event => {
+    const control = event.currentTarget;
+    markAppliedManually(control.closest("tr").dataset.jobId, control);
+  }));
 }
 
 async function loadLatestJobs() {
@@ -437,6 +535,148 @@ async function loadLatestJobs() {
   const response = await api(`/api/jobs?${parameters}`);
   state.latestJobs = response.items;
   renderLatestJobs();
+}
+
+async function retryTodaysReviews(button) {
+  if (!state.claudeAuth?.logged_in) {
+    setView("settings");
+    showToast("Connect Claude Code in Settings before retrying reviews", true);
+    return;
+  }
+  if (!window.confirm(
+    "Review every internship first found today that still has no YES/NO?\n\n"
+    + "Existing YES/NO decisions will not be reviewed again or changed."
+  )) return;
+
+  state.retryingTodayReviews = true;
+  const original = button.textContent;
+  button.textContent = "Reviewing today's jobs…";
+  renderLatestJobs();
+  try {
+    const response = await api("/api/reviews/today/retry", {
+      method: "POST",
+      body: JSON.stringify({ timezone: browserTimeZone() }),
+    });
+    const reviewed = Number(response.review?.reviewed) || 0;
+    const companies = Number(response.review?.companies) || 0;
+    const errors = Number(response.review?.errors) || 0;
+    const selected = Number(response.review?.selected) || 0;
+    if (errors) {
+      showToast(
+        `${reviewed} listing${reviewed === 1 ? "" : "s"} updated; ${errors} compan${errors === 1 ? "y" : "ies"} could not be reviewed`,
+        true
+      );
+    } else if (reviewed) {
+      showToast(
+        `${reviewed} listing${reviewed === 1 ? "" : "s"} reviewed across ${companies} compan${companies === 1 ? "y" : "ies"}`
+      );
+    } else {
+      showToast(selected
+        ? "Today's selected listings no longer need review"
+        : "No reviewable internships were first found today");
+    }
+    await loadLatestJobs();
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    state.retryingTodayReviews = false;
+    button.textContent = original;
+    renderLatestJobs();
+  }
+}
+
+const POSTING_STATUS_NOTES = {
+  ok: "Decision made from the employer's own posting text.",
+  closed: "The employer's posting says this role is closed.",
+  blocked: "The employer blocked an automated read, so this used list metadata only.",
+  not_found: "The application link returned not-found.",
+  error: "The posting page could not be read, so this used list metadata only.",
+  skipped: "Posting reads are turned off, so this used list metadata only.",
+  unknown: "The posting has not been read yet.",
+};
+
+function closeDecision() {
+  element("decisionScrim").classList.add("hidden");
+  state.decisionJob = null;
+}
+
+function renderDecision(job) {
+  const verdict = decisionState(job);
+  const rationale = job.apply_rationale || {};
+  const factors = Array.isArray(rationale.factors) ? rationale.factors : [];
+  const blockers = Array.isArray(rationale.blockers) ? rationale.blockers : [];
+  element("decisionTitle").textContent = job.company;
+  element("decisionRole").textContent = `${job.role}${job.location ? ` · ${job.location}` : ""}`;
+  const resumeName = job.apply_resume_name || rationale.resume_name || "";
+  const resumeLine = resumeName
+    ? `<div class="decision-resume"><span>SEND THIS RESUME</span><strong>${escapeHtml(resumeName)}</strong>${rationale.resume_reason ? `<p>${escapeHtml(rationale.resume_reason)}</p>` : ""}${job.apply_resume_name ? "" : '<p class="decision-resume-warning">This resume is no longer on file — upload it or re-check the listing.</p>'}</div>`
+    : "";
+  const postingNote = POSTING_STATUS_NOTES[job.posting_status] || POSTING_STATUS_NOTES.unknown;
+  let intro;
+  if (verdict === "pending") {
+    const window = state.config?.settings?.review?.max_listing_age_days ?? 2;
+    if (job.review_error) {
+      intro = `<p class="decision-empty">The last review attempt failed: ${escapeHtml(job.review_error)}</p>`;
+    } else if (outsideReviewWindow(job)) {
+      intro = `<p class="decision-empty">This listing was posted more than ${escapeHtml(window)} day${window === 1 ? "" : "s"} ago, so the automatic review skipped it — old postings are usually deep in the applicant pile. Select <b>Re-check this listing</b> to read the posting and decide anyway.</p>`;
+    } else {
+      intro = `<p class="decision-empty">This listing has not been reviewed yet. Select <b>Re-check this listing</b> to read the posting and decide now.</p>`;
+    }
+  } else {
+    intro = `<p class="decision-headline">${escapeHtml(job.apply_headline || "")}</p>`;
+  }
+  element("decisionBody").innerHTML = `
+    <div class="decision-verdict decision-${verdict}">
+      <b>${escapeHtml(decisionLabel(job))}</b>
+      <span>${verdict === "apply" ? "Worth an application" : verdict === "skip" ? "Not worth an application" : DECISION_PENDING_LABEL}</span>
+      ${job.apply_confidence ? `<i>${escapeHtml(job.apply_confidence)} confidence</i>` : ""}
+    </div>
+    ${intro}
+    ${blockers.length ? `<section class="decision-section blockers"><span>BLOCKERS</span><ul>${blockers.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>` : ""}
+    ${factors.length ? `<section class="decision-section"><span>WHAT DECIDED IT</span>${factors.map(factor => `
+      <div class="decision-factor factor-${escapeHtml(factor.verdict || "neutral")}">
+        <strong>${escapeHtml(factor.label || "Consideration")}</strong>
+        <p>${escapeHtml(factor.detail || "")}</p>
+      </div>`).join("")}</section>` : ""}
+    ${resumeLine}
+    ${rationale.company_summary ? `<section class="decision-section"><span>ACROSS ${escapeHtml(job.company.toUpperCase())}</span><p>${escapeHtml(rationale.company_summary)}</p></section>` : ""}
+    <p class="decision-provenance">${escapeHtml(postingNote)}${job.reviewed_at ? ` Reviewed ${escapeHtml(relativeTime(job.reviewed_at))}.` : ""}${job.review_model ? ` Model: ${escapeHtml(job.review_model)}.` : ""}</p>`;
+  element("decisionExternalLink").href = safeExternalUrl(job.application_url);
+  const applyButton = element("decisionApplyButton");
+  applyButton.textContent = jobActionLabel(job);
+  applyButton.disabled = jobActionDisabled(job);
+  applyButton.dataset.jobId = job.id;
+  element("reviewAgainButton").dataset.jobId = job.id;
+  element("decisionScrim").classList.remove("hidden");
+}
+
+async function openDecision(jobId) {
+  try {
+    const job = await api(`/api/jobs/${jobId}`);
+    state.decisionJob = job;
+    renderDecision(job);
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function reviewJobAgain(jobId, button) {
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "Reading the posting…";
+  try {
+    const response = await api(`/api/jobs/${jobId}/review`, { method: "POST" });
+    state.decisionJob = response.job;
+    renderDecision(response.job);
+    const reviewed = Number(response.review?.reviewed) || 0;
+    showToast(reviewed
+      ? "Decision updated from the employer posting"
+      : "Nothing to re-decide; this listing is closed or already applied to", !reviewed);
+    await loadLatestJobs();
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
 }
 
 function closeJobDetail() {
@@ -461,7 +701,7 @@ async function openJobDetail(jobId) {
       <h2 id="jobDetailTitle">${escapeHtml(job.role)}</h2><h3>${escapeHtml(job.company)}</h3>
       <dl class="job-facts">
         <div><dt>Location</dt><dd>${escapeHtml(job.location || "Not listed")}</dd></div>
-        <div><dt>Fit</dt><dd>${escapeHtml(job.fit_score ?? "—")}/10 · ${escapeHtml(job.score_reasoning || "Not scored")}</dd></div>
+        <div><dt>Apply?</dt><dd><b class="decision-inline decision-${decisionState(job)}">${escapeHtml(decisionLabel(job))}</b> · ${escapeHtml(decisionSummary(job))}</dd></div>
         <div><dt>Eligibility</dt><dd>${escapeHtml(job.eligibility)} · ${escapeHtml(job.eligibility_reason || "No rule note")}</dd></div>
         <div><dt>Agent boundary</dt><dd>${applicationBoundary}</dd></div>
         <div><dt>Resume</dt><dd>${escapeHtml(job.submitted_resume_name || job.base_resume_name || "Selected during preparation")}</dd></div>
@@ -474,6 +714,11 @@ async function openJobDetail(jobId) {
     applyButton.textContent = jobActionLabel(job);
     applyButton.disabled = jobActionDisabled(job);
     applyButton.dataset.jobId = job.id;
+    const markButton = element("markAppliedButton");
+    const markable = jobCanBeMarkedApplied(job);
+    markButton.classList.toggle("hidden", !markable);
+    markButton.disabled = !markable;
+    markButton.dataset.jobId = job.id;
     element("jobDetailScrim").classList.remove("hidden");
   } catch (error) { showToast(error.message, true); }
 }
@@ -486,6 +731,7 @@ async function requestJobApplication(jobId, button) {
   }
   if (!state.claudeAuth?.logged_in) {
     closeJobDetail();
+    closeDecision();
     setView("settings");
     showToast("Connect Claude Code in Settings before starting the agent", true);
     return;
@@ -501,6 +747,7 @@ async function requestJobApplication(jobId, button) {
     showToast("Application queued; follow progress in Agent");
     await Promise.all([loadLatestJobs(), loadJobs()]);
     if (!element("jobDetailScrim").classList.contains("hidden")) await openJobDetail(jobId);
+    if (!element("decisionScrim").classList.contains("hidden")) await openDecision(jobId);
   } catch (error) {
     showToast(error.message, true);
     button.disabled = false;
@@ -802,7 +1049,7 @@ function renderApplicationQueue(items, summary = {}) {
       <span class="queue-position">${String(item.position).padStart(2, "0")}</span>
       <span class="queue-role"><strong>${escapeHtml(item.company)}</strong><span>${escapeHtml(item.role)}${item.location ? ` · ${escapeHtml(item.location)}` : ""}</span>${item.detail ? `<em>${escapeHtml(item.detail)}</em>` : ""}</span>
       <span class="queue-origin">${item.origin === "auto" ? "Auto mode" : "Manual"}</span>
-      <span class="queue-fit">${escapeHtml(item.fit_score ?? "—")}<small>/10 fit</small></span>
+      <span class="queue-fit ${item.apply_decision === "apply" ? "good" : ""}">${escapeHtml(item.apply_decision === "apply" ? "Yes" : item.apply_decision === "skip" ? "No" : "—")}<small>apply?</small></span>
       <span class="queue-state">${escapeHtml(statusLabel)}</span>
     </button>`;
   }).join("");
@@ -867,6 +1114,8 @@ function bindManualApplyButtons(root) {
 async function markAppliedManually(jobId, button) {
   if (!window.confirm("Record this application as submitted by you?\n\nTI-AAA counts it in your application statistics and stops queueing this role for the browser agent.")) return;
   button.disabled = true;
+  const drawerOpen = !element("jobDetailScrim").classList.contains("hidden")
+    && String(state.selectedJob?.id) === String(jobId);
   try {
     await api(`/api/jobs/${jobId}/applied-manually`, { method: "POST" });
     state.manualApplySignature = null;
@@ -874,6 +1123,7 @@ async function markAppliedManually(jobId, button) {
     state.queueSignature = null;
     showToast("Recorded as applied; the role now appears in Applications");
     await refreshAll();
+    if (drawerOpen) await openJobDetail(jobId);
   } catch (error) {
     showToast(error.message, true);
     button.disabled = false;
@@ -1157,13 +1407,22 @@ async function handleWebPushToggle(event) {
 
 function renderAutoMode() {
   const enabled = checked("autoMode");
-  const threshold = Number(element("autoModeMinimumFit").value) || 7;
   element("autoModePanel").classList.toggle("enabled", enabled);
   element("autoModeState").textContent = enabled
-    ? `On · unattended at ${threshold}/10 or better`
+    ? "On · unattended for roles the review answered Yes"
     : "Off · manual applications only";
-  element("autoModeFitValue").textContent = `${threshold} / 10`;
   renderWebPushStatus();
+}
+
+function renderReviewSettings() {
+  const budget = Number(element("reviewBudget").value) || 2;
+  const days = Number(element("reviewRefresh").value) || 21;
+  const age = Number(element("reviewMaxAge").value);
+  element("reviewBudgetValue").textContent = `${budget} per company`;
+  element("reviewRefreshValue").textContent = `${days} day${days === 1 ? "" : "s"}`;
+  element("reviewMaxAgeValue").textContent = age
+    ? `${age} day${age === 1 ? "" : "s"}`
+    : "any age — reviews the whole backlog";
 }
 
 function handleAutoModeToggle() {
@@ -1187,6 +1446,7 @@ function populateConfiguration(config) {
   const settings = config.settings;
   const automation = settings.automation || {};
   const preparation = settings.preparation || {};
+  const review = settings.review || {};
   const service = settings.service || {};
   const filters = settings.filters || {};
   setValue("fullName", personal.full_name); setValue("preferredName", personal.preferred_name);
@@ -1209,7 +1469,6 @@ function populateConfiguration(config) {
   setValue("pollInterval", settings.poll_interval_seconds);
   setChecked("autoMode", automation.auto_apply_new);
   setChecked("manualAutoSubmit", automation.manual_auto_submit);
-  setValue("autoModeMinimumFit", automation.auto_apply_minimum_fit_score ?? 7);
   setChecked("autoModeUsePreferences", automation.auto_apply_use_preferences);
   setChecked("webPushNotifications", automation.web_push_notifications);
   setValue("dayCap", automation.max_applications_per_day);
@@ -1219,6 +1478,14 @@ function populateConfiguration(config) {
   setChecked("useLlm", preparation.use_llm);
   setChecked("generateCoverLetters", preparation.generate_cover_letters);
   setChecked("headless", automation.headless);
+  setChecked("reviewEnabled", review.enabled ?? true);
+  setChecked("reviewFetchPostings", review.fetch_postings ?? true);
+  setValue("reviewBudget", review.max_applications_per_company ?? 2);
+  setValue("reviewMaxAge", review.max_listing_age_days ?? 2);
+  setValue("reviewRefresh", review.refresh_after_days ?? 21);
+  setValue("reviewMaxCompanies", review.max_companies_per_cycle ?? 12);
+  setValue("reviewModel", review.model || "claude-opus-5");
+  renderReviewSettings();
   renderAutoMode();
   setValue("availableStartDate", answers.available_start_date); setValue("howHeard", answers.how_heard);
   setChecked("age18", answers.age_18_or_older); setChecked("previouslyWorked", answers.previously_worked_here);
@@ -1283,14 +1550,24 @@ function configurationPayload() {
   delete settings.preparation.tailor_resumes;
   settings.preparation.use_llm = checked("useLlm");
   settings.preparation.generate_cover_letters = checked("generateCoverLetters");
+  settings.review = settings.review || {};
+  Object.assign(settings.review, {
+    enabled: checked("reviewEnabled"),
+    fetch_postings: checked("reviewFetchPostings"),
+    max_applications_per_company: Number(element("reviewBudget").value) || 2,
+    max_listing_age_days: Number(element("reviewMaxAge").value) || 0,
+    refresh_after_days: Number(element("reviewRefresh").value) || 21,
+    max_companies_per_cycle: Number(value("reviewMaxCompanies")) || 12,
+    model: value("reviewModel") || "claude-opus-5",
+  });
   settings.automation = settings.automation || {};
   delete settings.automation.auto_apply_eligible_only;
+  delete settings.automation.auto_apply_minimum_fit_score;
   Object.assign(settings.automation, {
     auto_apply_new: checked("autoMode"), headless: checked("headless"),
     manual_auto_submit: checked("manualAutoSubmit"),
     auto_apply_use_preferences: checked("autoModeUsePreferences"),
     web_push_notifications: checked("autoMode") && checked("webPushNotifications"),
-    auto_apply_minimum_fit_score: Number(element("autoModeMinimumFit").value) || 7,
     max_applications_per_day: Number(value("dayCap")) || 25,
     max_applications_per_cycle: Number(value("cycleCap")) || 5, max_attempts: Number(value("maxAttempts")) || 3,
     timeout_seconds: Number(value("workerTimeout")) || 600, claude_model: value("claudeModel") || "sonnet",
@@ -1490,7 +1767,9 @@ element("disconnectClaude").addEventListener("click", async event => {
   finally { event.currentTarget.disabled = false; }
 });
 element("autoMode").addEventListener("change", handleAutoModeToggle);
-element("autoModeMinimumFit").addEventListener("input", renderAutoMode);
+element("reviewBudget").addEventListener("input", renderReviewSettings);
+element("reviewRefresh").addEventListener("input", renderReviewSettings);
+element("reviewMaxAge").addEventListener("input", renderReviewSettings);
 element("webPushNotifications").addEventListener("change", handleWebPushToggle);
 element("closeWelcomeBack").addEventListener("click", closeWelcomeBack);
 element("welcomeBackDone").addEventListener("click", closeWelcomeBack);
@@ -1501,7 +1780,8 @@ element("searchInput").addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.searchTimer = setTimeout(() => loadJobs().catch(error => showToast(error.message, true)), 250);
 });
-element("latestEligibility").addEventListener("change", renderLatestJobs);
+element("latestDecision").addEventListener("change", renderLatestJobs);
+element("retryTodayReviews").addEventListener("click", event => retryTodaysReviews(event.currentTarget));
 element("latestSearch").addEventListener("input", () => {
   clearTimeout(state.latestSearchTimer);
   state.latestSearchTimer = setTimeout(() => loadLatestJobs().catch(error => showToast(error.message, true)), 250);
@@ -1511,6 +1791,13 @@ element("jobDetailScrim").addEventListener("click", event => {
   if (event.target === event.currentTarget) closeJobDetail();
 });
 element("applyJobButton").addEventListener("click", event => requestJobApplication(event.currentTarget.dataset.jobId, event.currentTarget));
+element("markAppliedButton").addEventListener("click", event => markAppliedManually(event.currentTarget.dataset.jobId, event.currentTarget));
+element("closeDecision").addEventListener("click", closeDecision);
+element("decisionScrim").addEventListener("click", event => {
+  if (event.target === event.currentTarget) closeDecision();
+});
+element("reviewAgainButton").addEventListener("click", event => reviewJobAgain(event.currentTarget.dataset.jobId, event.currentTarget));
+element("decisionApplyButton").addEventListener("click", event => requestJobApplication(event.currentTarget.dataset.jobId, event.currentTarget));
 const workerGrid = element("workerGrid");
 const remoteBrowserKeys = new Set([
   "Backspace", "Tab", "Enter", "Escape", "PageUp", "PageDown", "End", "Home",
@@ -1573,7 +1860,7 @@ workerGrid.addEventListener("wheel", event => {
     delta_y: Math.max(-1200, Math.min(1200, event.deltaY)),
   });
 }, { passive: false });
-document.addEventListener("keydown", event => { if (event.key === "Escape") { closeJobDetail(); closeWelcomeBack(); } });
+document.addEventListener("keydown", event => { if (event.key === "Escape") { closeJobDetail(); closeDecision(); closeWelcomeBack(); } });
 element("runButton").addEventListener("click", async () => {
   try { await api("/api/service/run", { method: "POST" }); showToast("Repository check scheduled"); }
   catch (error) { showToast(error.message, true); }

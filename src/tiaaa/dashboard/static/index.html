@@ -87,11 +87,12 @@
 
       <section class="view" data-view="latest">
         <div class="ledger-intro">
-          <div><p class="kicker">REPOSITORY INBOX</p><h2>Latest internship listings</h2><p>Everything currently active in the watched repositories, with an explicit qualification decision based on your profile and any requirements the agent discovers.</p></div>
+          <div><p class="kicker">REPOSITORY INBOX</p><h2>Latest internship listings</h2><p>Everything currently active in the watched repositories. TI-AAA reads each employer's own posting and answers one question — should you apply? Select a decision to see why.</p></div>
           <div class="latest-controls">
+            <button id="retryTodayReviews" class="button ink retry-today-reviews" type="button">Retry today's reviews</button>
             <input id="latestSearch" type="search" placeholder="Filter company, role, place" autocomplete="off">
-            <select id="latestEligibility" aria-label="Filter latest jobs">
-              <option value="all">All active</option><option value="eligible">Qualified</option><option value="ineligible">Not qualified</option>
+            <select id="latestDecision" aria-label="Filter latest jobs by decision">
+              <option value="all">All active</option><option value="apply">Apply</option><option value="skip">Don't apply</option><option value="pending">Not reviewed yet</option>
             </select>
           </div>
         </div>
@@ -99,8 +100,8 @@
           <div class="sheet-index"><span>ACTIVE FEED</span><strong id="latestCount">—</strong></div>
           <div class="table-wrap">
             <table class="latest-table">
-              <thead><tr><th>Posted</th><th>Company / role</th><th>Location</th><th>Fit</th><th>Qualified</th><th>State</th><th></th></tr></thead>
-              <tbody id="latestJobsBody"><tr><td colspan="7" class="loading">Reading the repository ledger…</td></tr></tbody>
+              <thead><tr><th>Posted</th><th>Company / role</th><th>Location</th><th>Apply?</th><th>State</th><th></th></tr></thead>
+              <tbody id="latestJobsBody"><tr><td colspan="6" class="loading">Reading the repository ledger…</td></tr></tbody>
             </table>
           </div>
           <p id="latestSummary" class="table-summary"></p>
@@ -210,18 +211,36 @@
             <div class="auto-mode-copy">
               <p class="kicker">AUTO MODE</p>
               <h2>Apply while you are away</h2>
-              <p>When new qualified roles reach the fit threshold, TI-AAA queues one best-fit role per company. One browser applies to them in order and never pauses for your input.</p>
+              <p>Auto mode queues only the roles the posting review answered <b>Apply</b> for. One browser applies to them in order and never pauses for your input.</p>
             </div>
             <label class="auto-mode-switch"><input id="autoMode" type="checkbox"><span><i></i><b>Auto mode</b><small id="autoModeState">Off · manual applications only</small></span></label>
             <div class="auto-mode-controls">
-              <label>Minimum qualification fit <span id="autoModeFitValue">7 / 10</span><input id="autoModeMinimumFit" type="range" min="1" max="10" step="1"></label>
-              <label class="preference-gate"><input id="autoModeUsePreferences" type="checkbox"><span><b>Use my preferences as an application gate</b><small>Off by default. Preferences never change the qualification score.</small></span></label>
+              <label class="preference-gate"><input id="autoModeUsePreferences" type="checkbox"><span><b>Use my preferences as an application gate</b><small>Off by default. Preferences are already weighed by the review; this makes them a hard rule.</small></span></label>
               <div id="webPushOption" class="web-push-option hidden">
                 <label class="preference-gate"><input id="webPushNotifications" type="checkbox"><span><b>Notify this browser when new jobs enter the queue</b><small>No email, SMS, account, or manually entered key.</small></span></label>
                 <p id="webPushStatus">Turn this on to request browser permission.</p>
               </div>
             </div>
             <p class="auto-mode-warning">Required personal fact missing? Auto mode stops that application and records the reason in your next Welcome back brief.</p>
+          </article>
+          <article class="panel settings-card">
+            <p class="kicker">POSTING REVIEW</p><h2>Deciding what to apply to</h2>
+            <p class="fine-print">TI-AAA opens each employer posting, compares every resume against its real requirements, and answers <b>Apply?</b> for each listing. Auto mode acts only on <b>Yes</b>.</p>
+            <div class="toggle-list">
+              <label><input id="reviewEnabled" type="checkbox"><span>Review new listings automatically</span></label>
+              <label><input id="reviewFetchPostings" type="checkbox"><span>Read the employer's posting page (off means metadata only, low confidence)</span></label>
+            </div>
+            <div class="form-stack compact-form">
+              <label>Applications to spend per company <span id="reviewBudgetValue">2</span><input id="reviewBudget" type="range" min="1" max="10" step="1"></label>
+              <label>Only review listings posted within <span id="reviewMaxAgeValue">2 days</span><input id="reviewMaxAge" type="range" min="0" max="30" step="1"></label>
+              <label>Re-check a decision after <span id="reviewRefreshValue">21 days</span><input id="reviewRefresh" type="range" min="1" max="90" step="1"></label>
+              <label>Companies reviewed per cycle<input id="reviewMaxCompanies" type="number" min="1" max="100" step="1"></label>
+              <label>Model<select id="reviewModel">
+                <option value="claude-opus-5">Claude Opus 5 — most accurate</option>
+                <option value="claude-sonnet-5">Claude Sonnet 5 — faster and cheaper</option>
+              </select></label>
+            </div>
+            <p class="fine-print">Reviewing uses your connected Claude account, or <code>ANTHROPIC_API_KEY</code> when one is set.</p>
           </article>
           <article class="panel settings-card">
             <p class="kicker">PROFILE</p><h2>About you</h2>
@@ -254,7 +273,7 @@
           </article>
           <article class="panel settings-card">
             <p class="kicker">TARGETING</p><h2>Auto mode preferences</h2>
-            <p class="fine-print">Role, location, and term preferences do not affect the numeric fit score. Auto mode checks them only when you enable its preference gate above. “Any” means no restriction.</p>
+            <p class="fine-print">The posting review already weighs these when it decides. The preference gate above additionally makes them a hard rule for Auto mode. “Any” means no restriction.</p>
             <div class="form-stack compact-form">
               <label>Preferred roles<input id="roles" placeholder="software, backend, machine learning"></label>
               <label>Locations<input id="locations" placeholder="Remote, Seattle, New York"></label>
@@ -263,7 +282,7 @@
               <label>Skills / keywords<input id="skills" placeholder="Python, React, Docker, Java"></label>
               <label>Previous internship employers<input id="previousInternshipCompanies" placeholder="Amazon, Microsoft"></label>
               <p class="settings-subhead">Strict filters</p>
-              <p class="fine-print">These rules always control eligibility, but they never change the qualification score. Leave them blank to accept the curated repository scope.</p>
+              <p class="fine-print">These rules drop listings before the review ever reads them. Leave them blank to accept the curated repository scope.</p>
               <label>Required role words<input id="includeKeywords" placeholder="software, data, machine learning"></label>
               <label>Exclude keywords<input id="excludeKeywords" placeholder="senior, principal"></label>
               <label>Allowed locations<input id="allowedLocations" placeholder="Remote, Seattle"></label>
@@ -410,8 +429,23 @@
     <aside id="jobDetailDrawer" class="job-drawer" role="dialog" aria-modal="true" aria-labelledby="jobDetailTitle">
       <header><span>DOSSIER <b id="jobDetailNumber">—</b></span><button id="closeJobDetail" type="button" aria-label="Close job details">×</button></header>
       <div id="jobDetailContent" class="job-detail-content"></div>
-      <footer class="drawer-actions"><a id="jobExternalLink" class="button ghost" target="_blank" rel="noopener noreferrer">Open listing ↗</a><button id="applyJobButton" class="button signal" type="button">Apply with agent</button></footer>
+      <footer class="drawer-actions"><a id="jobExternalLink" class="button ghost" target="_blank" rel="noopener noreferrer">Open listing ↗</a><button id="markAppliedButton" class="button ghost hidden" type="button">I applied manually</button><button id="applyJobButton" class="button signal" type="button">Apply with agent</button></footer>
     </aside>
+  </div>
+
+  <div id="decisionScrim" class="modal-scrim hidden">
+    <div id="decisionModal" class="decision-modal" role="dialog" aria-modal="true" aria-labelledby="decisionTitle">
+      <header>
+        <div><p class="kicker">SHOULD YOU APPLY?</p><h2 id="decisionTitle">—</h2><p id="decisionRole"></p></div>
+        <button id="closeDecision" type="button" aria-label="Close decision">×</button>
+      </header>
+      <div id="decisionBody" class="decision-body"></div>
+      <footer class="decision-actions">
+        <button id="reviewAgainButton" class="button ghost" type="button">Re-check this listing</button>
+        <a id="decisionExternalLink" class="button ghost" target="_blank" rel="noopener noreferrer">Open posting ↗</a>
+        <button id="decisionApplyButton" class="button signal" type="button">Apply with agent</button>
+      </footer>
+    </div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

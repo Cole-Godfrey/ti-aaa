@@ -4,33 +4,78 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-01
+
 ### Added
 
+- an **Apply?** decision on every listing, answering Yes or No from the employer's own job posting;
+  selecting the answer opens the reasoning, the blockers, the resume the agent chose, and how the
+  company's applications were allocated
+- employer postings are read directly from Greenhouse, Lever, Ashby, Workday, SmartRecruiters,
+  schema.org `JobPosting` markup, and ordinary careers pages
+- a per-company application limit (2 by default) so a large employer's near-identical listings
+  cannot absorb the whole application allowance; submitted applications and forms still awaiting your
+  Submit confirmation both hold a slot, and roles handed back for you to apply to yourself do not
+- an age window (2 days by default, 0 to disable) so the first sync reviews new listings instead of a
+  repository's entire backlog; older rows say why they were skipped and can still be reviewed on
+  demand
+- one review call per company, so its open roles are ranked against each other rather than judged in
+  isolation
+- resume selection made by comparing every uploaded resume against the posting, replacing the keyword
+  overlap score
+- a **Re-check this listing** action, a `POST /api/jobs/{id}/review` endpoint, `tiaaa review`, and
+  `TIAAA.review()`
+- a **Retry today's reviews** action in Latest jobs that reviews only internships first discovered
+  during the browser's current calendar day that still have no Yes/No answer; existing decisions are
+  preserved
+- a `review` settings section covering the model, the per-company budget, the refresh window, the
+  per-cycle company cap, and whether postings are read at all
 - an opt-in setting to auto-submit applications that the user explicitly selects
 - a local Agent input for employer one-time verification codes that continues the live form
 - a Retry action for **Confirm in Agent** checkpoints in the Applications tab
 - same-session human browser control for CAPTCHA and blocked-interaction checkpoints, including clicking, typing, pasting, scrolling, and returning the retained tab to the agent
 - complete address settings for address line 1/2, ZIP/postal code, city, state/region, county, and country
-- a **Qualified** column and filter in Latest jobs, including visible hard-gate reasons
 - previous-internship employer facts for returning-intern qualification checks
 - required ordinary employer account creation with a stable per-portal credential
 - a **Stop session** control in the Agent tab that ends a running application attempt, including a looping CAPTCHA checkpoint, and releases the listing instead of queueing it again
 - an **I applied manually** record in the Agent tab, including a list of the roles whose employers block the browser agent or whose session you stopped
-- the source lists' advanced-degree marker is now imported and enforced, so master's-, PhD-, and MBA-only roles are **Not qualified** for a bachelor's profile even when the title omits the requirement
+- a **Mark applied** action on every Latest jobs row and in the listing dossier, so a role you applied to yourself is recorded without starting the browser agent
+- the source lists' advanced-degree marker is now imported and enforced, so master's-, PhD-, and MBA-only roles are filtered out for a bachelor's profile even when the title omits the requirement
 
 ### Changed
 
+- **the 1-10 fit score and the Qualified column are gone.** Both are replaced by the Apply?
+  decision, which is made from the real posting instead of the listing title. Auto mode now applies
+  only to listings answered **Apply**, so `automation.auto_apply_minimum_fit_score` is retired and
+  removed from saved settings
+- Auto mode no longer forces one application per company. The review already spends a company's
+  budget, so a second approved role there is queued instead of being skipped as a duplicate
+- reviewing uses Claude Opus 5 through `ANTHROPIC_API_KEY` when one is set, and otherwise through the
+  Claude account already connected in Settings
+- `tiaaa score` is replaced by `tiaaa review`; the old metadata-only LLM scorer is removed
+- `eligibility.evaluate_listing` is now a hard-gate check only and no longer returns a score; it runs
+  before the review so an ineligible listing never costs a model call
 - the Applications tab opens on submitted applications instead of every ledger row
-- a hard qualification mismatch (degree, prior-intern, citizenship, sponsorship, or an agent-discovered conflict) now caps the fit score at 2 instead of leaving a mid-range score beside **Not qualified**
 - graduate-only titles are recognized beyond the PhD keyword, including MBA, MFE, DPhil, postdoctoral, "graduate students", and "advanced degree" phrasing
+- a posting that says it is closed or filled now retires the listing during the review
 - a stop requested before a restart is honored on the next start instead of resuming the attempt
 - applications recorded outside the browser agent are marked as candidate-submitted and are excluded from the application queue
 - submission-authorized runs now complete and audit the full form before a separate final-action browser turn
-- advanced-degree and previous-company-intern requirements now make a listing ineligible instead of only lowering its fit score
+- advanced-degree and previous-company-intern requirements now make a listing ineligible outright
 - hard qualification conflicts discovered on an employer page remain ineligible during later sync cycles and are excluded from Auto mode
 
 ### Fixed
 
+- listings are no longer rated by a keyword heuristic that returned 5/10 or 6/10 for almost
+  everything and called clearly unqualified roles qualified; the decision now cites the requirement it
+  read on the employer's page
+- the per-company count no longer reports half-finished applications as filed, so a company with one
+  submitted application and one form awaiting confirmation is described that way instead of as two
+  applications already sent
+- attempts that can never become an application — an employer that blocked the agent, a session you
+  stopped — no longer consume a company's application slot
+- the review is told the per-company limit is the candidate's own setting, so it can no longer present
+  it as a maximum the employer's posting imposes
 - an application Auto mode stopped for a missing candidate fact is queued again after the profile supplies that fact, instead of staying permanently benched
 - package validation now accepts Core Metadata 2.5 emitted by current Hatchling releases
 - the browser agent no longer uses the final Submit control to trigger validation or discover unfinished fields
@@ -39,6 +84,9 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Security
 
+- posting reads resolve each host and refuse local, private, and unroutable addresses, including
+  after a redirect
+- the reviewer runs Claude with no tools and no browser bridge; it only reads text already fetched
 - one-time verification-code answers are cleared after the browser turn consumes them; user-supplied password and other sensitive-input requests remain blocked
 - browser-control messages are accepted only for the currently retained CAPTCHA checkpoint and expose no URL-navigation command
 - employer account passwords are derived from a private local key, remain stable per careers portal and candidate email, and are never stored as shared plaintext credentials

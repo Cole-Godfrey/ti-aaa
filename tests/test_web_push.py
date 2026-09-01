@@ -61,7 +61,6 @@ def test_auto_queue_push_is_batched_and_delivered_once_per_browser(
         user_agent="Test browser",
     )
     settings["automation"]["auto_apply_new"] = True
-    settings["automation"]["auto_apply_minimum_fit_score"] = 1
     source = SOURCE_DOCUMENTS[0]
     listings = [
         InternshipListing(
@@ -93,11 +92,12 @@ def test_auto_queue_push_is_batched_and_delivered_once_per_browser(
         settings=settings,
         include_existing=True,
     )
+    connection.execute("UPDATE jobs SET apply_decision = 'apply'")
+    connection.commit()
     queue = list_application_queue(
         connection,
         auto_enabled=True,
         max_attempts=3,
-        minimum_fit_score=1,
         profile=profile,
     )
     deliveries: list[dict] = []

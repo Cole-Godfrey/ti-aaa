@@ -11,7 +11,7 @@ import threading
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -164,6 +164,33 @@ def _ensure_column(
     return True
 
 
+_RETIRED_JOB_COLUMNS = ("fit_score", "score_reasoning", "scored_at")
+
+
+def _drop_retired_columns(connection: sqlite3.Connection) -> list[str]:
+    """Remove the heuristic fit-score columns the apply/skip review replaced.
+
+    The old 1-10 score is gone rather than merely unused, so nothing can quietly
+    keep reading it. Older SQLite builds cannot drop a column; there the columns
+    are left in place, unread, instead of failing the upgrade.
+    """
+
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
+    retired = [name for name in _RETIRED_JOB_COLUMNS if name in columns]
+    if not retired or sqlite3.sqlite_version_info < (3, 35, 0):
+        return []
+    # The legacy index covers fit_score and would block the drop.
+    connection.execute("DROP INDEX IF EXISTS idx_jobs_pipeline")
+    dropped: list[str] = []
+    for name in retired:
+        try:
+            connection.execute(f"ALTER TABLE jobs DROP COLUMN {name}")
+        except sqlite3.OperationalError:
+            continue
+        dropped.append(name)
+    return dropped
+
+
 def invalidate_source_cache(connection: sqlite3.Connection) -> int:
     """Force the next poll to re-read every source document.
 
@@ -234,9 +261,18 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             advanced_degree_required INTEGER NOT NULL DEFAULT 0,
             eligibility           TEXT NOT NULL DEFAULT 'eligible',
             eligibility_reason    TEXT,
-            fit_score             INTEGER,
-            score_reasoning       TEXT,
-            scored_at             TEXT,
+            apply_decision        TEXT,
+            apply_confidence      TEXT,
+            apply_headline        TEXT,
+            apply_rationale       TEXT,
+            apply_resume_id       INTEGER REFERENCES resumes(id),
+            reviewed_at           TEXT,
+            review_model          TEXT,
+            review_signature      TEXT,
+            review_error          TEXT,
+            posting_status        TEXT NOT NULL DEFAULT 'unknown',
+            posting_detail        TEXT,
+            posting_fetched_at    TEXT,
             pipeline_status       TEXT NOT NULL DEFAULT 'discovered',
             discovered_as_new     INTEGER NOT NULL DEFAULT 0,
             manual_requested      INTEGER NOT NULL DEFAULT 0,
@@ -270,10 +306,20 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             updated_at            TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_jobs_pipeline ON jobs(pipeline_status, fit_score);
         CREATE INDEX IF NOT EXISTS idx_jobs_fingerprint ON jobs(fingerprint);
         CREATE INDEX IF NOT EXISTS idx_jobs_applied ON jobs(applied_at);
         CREATE INDEX IF NOT EXISTS idx_jobs_last_seen ON jobs(last_seen_at);
+
+        -- Employer posting text is large and is only read while reviewing, so it
+        -- stays out of the row the dashboard lists.
+        CREATE TABLE IF NOT EXISTS job_postings (
+            job_id      INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+            title       TEXT NOT NULL DEFAULT '',
+            body        TEXT NOT NULL DEFAULT '',
+            source      TEXT NOT NULL DEFAULT 'unknown',
+            final_url   TEXT NOT NULL DEFAULT '',
+            fetched_at  TEXT NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS job_sources (
             job_id              INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -386,6 +432,31 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     )
     _ensure_column(connection, "jobs", "availability_detail", "TEXT")
     _ensure_column(connection, "jobs", "availability_checked_at", "TEXT")
+    for column, declaration in (
+        ("apply_decision", "TEXT"),
+        ("apply_confidence", "TEXT"),
+        ("apply_headline", "TEXT"),
+        ("apply_rationale", "TEXT"),
+        ("apply_resume_id", "INTEGER REFERENCES resumes(id)"),
+        ("reviewed_at", "TEXT"),
+        ("review_model", "TEXT"),
+        ("review_signature", "TEXT"),
+        ("review_error", "TEXT"),
+        ("posting_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("posting_detail", "TEXT"),
+        ("posting_fetched_at", "TEXT"),
+    ):
+        _ensure_column(connection, "jobs", column, declaration)
+    _drop_retired_columns(connection)
+    # Indexed after the migration above, so an upgrade from a pre-review
+    # database has the columns before anything indexes them.
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jobs_decision
+            ON jobs(pipeline_status, apply_decision);
+        CREATE INDEX IF NOT EXISTS idx_jobs_review_company ON jobs(company, reviewed_at);
+        """
+    )
     connection.execute(
         """
         UPDATE jobs
@@ -1314,10 +1385,10 @@ def ingest_listings(
                         availability_status, availability_detail, availability_checked_at,
                         no_sponsorship, citizenship_required, advanced_degree_required,
                         eligibility, eligibility_reason,
-                        fit_score, score_reasoning, scored_at, pipeline_status, discovered_as_new,
+                        pipeline_status, discovered_as_new,
                         created_at, updated_at
                     ) VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -1339,9 +1410,6 @@ def ingest_listings(
                         int(listing.advanced_degree_required),
                         "eligible" if eligibility.eligible else "ineligible",
                         eligibility.reason,
-                        eligibility.score,
-                        eligibility.score_reasoning,
-                        now,
                         status,
                         int(is_new),
                         now,
@@ -1418,8 +1486,6 @@ def ingest_listings(
                         citizenship_required = citizenship_required OR ?,
                         advanced_degree_required = advanced_degree_required OR ?,
                         eligibility = ?, eligibility_reason = ?,
-                        fit_score = COALESCE(fit_score, ?),
-                        score_reasoning = COALESCE(score_reasoning, ?),
                         pipeline_status = ?, updated_at = ?
                     WHERE id = ?
                     """,
@@ -1440,13 +1506,15 @@ def ingest_listings(
                         int(listing.advanced_degree_required),
                         "eligible" if eligibility.eligible else "ineligible",
                         eligibility.reason,
-                        eligibility.score,
-                        eligibility.score_reasoning,
                         next_status,
                         now,
                         job_id,
                     ),
                 )
+                if url_changed:
+                    # The employer moved the posting, so any decision made from the
+                    # old page is no longer about the page that will be applied to.
+                    invalidate_review(connection, job_id, reason="application link changed")
 
             connection.execute(
                 """
@@ -1525,11 +1593,13 @@ def get_job(connection: sqlite3.Connection, job_id: int) -> dict[str, Any] | Non
             SELECT j.*, br.name AS base_resume_name,
                    br.text_path AS base_resume_text_path,
                    sr.name AS submitted_resume_name,
+                   ar.name AS apply_resume_name,
                    GROUP_CONCAT(DISTINCT js.source_label) AS source_labels,
                    GROUP_CONCAT(DISTINCT js.source_repo_url) AS source_repo_urls
             FROM jobs j
             LEFT JOIN resumes br ON br.id = j.base_resume_id
             LEFT JOIN resumes sr ON sr.id = j.submitted_resume_id
+            LEFT JOIN resumes ar ON ar.id = j.apply_resume_id
             LEFT JOIN job_sources js ON js.job_id = j.id AND js.active = 1
             WHERE j.id = ?
             GROUP BY j.id
@@ -1539,14 +1609,17 @@ def get_job(connection: sqlite3.Connection, job_id: int) -> dict[str, Any] | Non
     )
 
 
-def refresh_qualification_scores(
+def refresh_eligibility(
     connection: sqlite3.Connection,
     *,
     profile: dict[str, Any],
     settings: dict[str, Any],
-    preserve_scores: bool = False,
 ) -> int:
-    """Recompute active qualification gates and, unless requested, heuristic scores."""
+    """Recompute the cheap hard gates that decide what is worth reviewing at all.
+
+    This is a pre-filter, not a verdict. The apply/skip decision comes from
+    `tiaaa.review`, which reads the employer's own posting.
+    """
 
     rows = connection.execute(
         """
@@ -1608,28 +1681,12 @@ def refresh_qualification_scores(
             if agent_conflict
             else evaluation.reason
         )
-        keep_existing_score = preserve_scores and row["fit_score"] is not None
-        score = int(row["fit_score"]) if keep_existing_score else evaluation.score
-        if agent_conflict and not keep_existing_score:
-            # The agent read the employer page and found an unmet hard
-            # requirement. A heuristic fit computed from the title alone must
-            # not keep advertising this listing as a good match.
-            score = min(score, 2)
-        score_reasoning = (
-            str(row["score_reasoning"] or evaluation.score_reasoning)
-            if keep_existing_score
-            else evaluation.score_reasoning
-        )
-        scored_at = row["scored_at"] if keep_existing_score else now
         connection.execute(
             """
             UPDATE jobs SET eligibility = ?, eligibility_reason = ?,
-                            fit_score = ?, score_reasoning = ?, scored_at = ?,
                             updated_at = CASE
                                 WHEN eligibility != ?
                                   OR COALESCE(eligibility_reason, '') != ?
-                                  OR COALESCE(fit_score, -1) != ?
-                                  OR COALESCE(score_reasoning, '') != ?
                                 THEN ?
                                 ELSE updated_at END
             WHERE id = ?
@@ -1637,19 +1694,293 @@ def refresh_qualification_scores(
             (
                 eligibility,
                 eligibility_reason,
-                score,
-                score_reasoning,
-                scored_at,
                 eligibility,
                 eligibility_reason,
-                score,
-                score_reasoning,
                 now,
                 row["id"],
             ),
         )
     connection.commit()
     return len(rows)
+
+
+REVIEW_DECISIONS = {"apply", "skip"}
+REVIEW_CONFIDENCE = {"high", "medium", "low"}
+POSTING_STATUSES = {
+    "unknown",
+    "ok",
+    "closed",
+    "blocked",
+    "not_found",
+    "error",
+    "skipped",
+}
+
+
+def invalidate_review(
+    connection: sqlite3.Connection, job_id: int, *, reason: str = ""
+) -> None:
+    """Drop a stored decision so the next cycle re-reviews this listing."""
+
+    connection.execute(
+        """
+        UPDATE jobs SET apply_decision = NULL, apply_confidence = NULL,
+                        apply_headline = NULL, apply_rationale = NULL,
+                        apply_resume_id = NULL, reviewed_at = NULL,
+                        review_signature = NULL, review_error = NULL,
+                        updated_at = ?
+        WHERE id = ?
+        """,
+        (utc_now(), job_id),
+    )
+    if reason:
+        add_event(connection, job_id, "review_reset", reason[:300])
+
+
+def record_posting(
+    connection: sqlite3.Connection,
+    job_id: int,
+    *,
+    status: str,
+    title: str = "",
+    body: str = "",
+    source: str = "unknown",
+    detail: str = "",
+    final_url: str = "",
+) -> None:
+    """Store one employer posting read and what it told us about availability."""
+
+    now = utc_now()
+    clean_status = status if status in POSTING_STATUSES else "error"
+    connection.execute(
+        """
+        UPDATE jobs SET posting_status = ?, posting_detail = ?, posting_fetched_at = ?,
+                        updated_at = ?
+        WHERE id = ?
+        """,
+        (clean_status, detail[:500] or None, now, now, job_id),
+    )
+    if body.strip():
+        connection.execute(
+            """
+            INSERT INTO job_postings (job_id, title, body, source, final_url, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                title = excluded.title, body = excluded.body, source = excluded.source,
+                final_url = excluded.final_url, fetched_at = excluded.fetched_at
+            """,
+            (job_id, title[:200], body, source[:40], final_url[:1000], now),
+        )
+    if clean_status == "closed":
+        connection.execute(
+            """
+            UPDATE jobs SET availability_status = 'closed',
+                            availability_detail = 'Employer posting says it is closed',
+                            availability_checked_at = ?,
+                            pipeline_status = CASE
+                                WHEN pipeline_status IN ('discovered', 'queued', 'ready')
+                                THEN 'expired' ELSE pipeline_status END,
+                            updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, job_id),
+        )
+    connection.commit()
+
+
+def record_review(
+    connection: sqlite3.Connection,
+    job_id: int,
+    *,
+    decision: str,
+    confidence: str,
+    headline: str,
+    rationale: str,
+    signature: str,
+    model: str,
+    resume_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Persist one apply/skip decision and stamp it with the inputs it was made from."""
+
+    if decision not in REVIEW_DECISIONS:
+        raise ValueError(f"Unknown apply decision: {decision}")
+    if confidence not in REVIEW_CONFIDENCE:
+        confidence = "low"
+    now = utc_now()
+    connection.execute(
+        """
+        UPDATE jobs SET apply_decision = ?, apply_confidence = ?, apply_headline = ?,
+                        apply_rationale = ?, apply_resume_id = ?, reviewed_at = ?,
+                        review_model = ?, review_signature = ?, review_error = NULL,
+                        updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            decision,
+            confidence,
+            headline[:300],
+            rationale,
+            resume_id,
+            now,
+            model[:80],
+            signature[:64],
+            now,
+            job_id,
+        ),
+    )
+    add_event(
+        connection,
+        job_id,
+        "reviewed",
+        f"{'Apply' if decision == 'apply' else 'Skip'} ({confidence}): {headline}"[:400],
+    )
+    connection.commit()
+    return get_job(connection, job_id)
+
+
+def record_review_error(
+    connection: sqlite3.Connection,
+    job_id: int,
+    *,
+    message: str,
+) -> None:
+    """Record that a review attempt failed without claiming a decision was made."""
+
+    now = utc_now()
+    connection.execute(
+        "UPDATE jobs SET review_error = ?, updated_at = ? WHERE id = ?",
+        (message[:400], now, job_id),
+    )
+    connection.commit()
+
+
+def listing_age_cutoff(max_age_days: int, *, today: str | None = None) -> str:
+    """Return the earliest posting date still inside the review window."""
+
+    reference = date.fromisoformat(today) if today else datetime.now(UTC).date()
+    return (reference - timedelta(days=max(0, int(max_age_days)))).isoformat()
+
+
+def reviewable_listings(
+    connection: sqlite3.Connection,
+    *,
+    target_job_id: int | None = None,
+    include_ineligible: bool = False,
+    max_age_days: int = 0,
+    first_seen_from: str | None = None,
+    first_seen_before: str | None = None,
+    undecided_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Return the open listings the reviewer may consider, newest first.
+
+    `max_age_days` keeps a first sync from spending a model call on every listing
+    in a repository's backlog; 0 means no age limit. Both date columns are stored
+    as `YYYY-MM-DD` (or an ISO timestamp), so the comparison is a plain string
+    compare against the cutoff. `first_seen_from` is inclusive and
+    `first_seen_before` is exclusive so callers can select one calendar day
+    without accidentally including midnight from the next day.
+    """
+
+    clauses = [
+        "j.is_active = 1",
+        "j.availability_status NOT IN ('closed')",
+        "j.applied_at IS NULL",
+        "j.pipeline_status NOT IN ('applied', 'applying', 'manual_review', 'withdrawn', 'expired')",
+    ]
+    parameters: list[Any] = []
+    if not include_ineligible:
+        clauses.append("j.eligibility = 'eligible'")
+    if undecided_only:
+        clauses.append("j.apply_decision IS NULL")
+    if max_age_days > 0:
+        clauses.append(
+            "COALESCE(NULLIF(j.posting_date, ''), substr(j.first_seen_at, 1, 10)) >= ?"
+        )
+        parameters.append(listing_age_cutoff(max_age_days))
+    if first_seen_from is not None:
+        clauses.append("julianday(j.first_seen_at) >= julianday(?)")
+        parameters.append(first_seen_from)
+    if first_seen_before is not None:
+        clauses.append("julianday(j.first_seen_at) < julianday(?)")
+        parameters.append(first_seen_before)
+    if target_job_id is not None:
+        clauses.append("j.id = ?")
+        parameters.append(target_job_id)
+    return [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT j.id, j.company, j.role, j.location, j.category, j.application_url,
+                   j.posting_date, j.first_seen_at, j.no_sponsorship, j.citizenship_required,
+                   j.advanced_degree_required, j.eligibility, j.eligibility_reason,
+                   j.apply_decision, j.apply_confidence, j.reviewed_at, j.review_signature,
+                   j.posting_status, j.posting_fetched_at, j.pipeline_status,
+                   p.title AS posting_title, p.body AS posting_body
+            FROM jobs j
+            LEFT JOIN job_postings p ON p.job_id = j.id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY COALESCE(j.posting_date, substr(j.first_seen_at, 1, 10)) DESC, j.id DESC
+            """,
+            parameters,
+        ).fetchall()
+    ]
+
+
+def company_application_history(
+    connection: sqlite3.Connection, company: str
+) -> dict[str, Any]:
+    """Report this company's spent and reserved application slots, kept distinct.
+
+    A submitted application and a half-finished one are both reasons not to spend
+    another slot, but only the first is an application that exists. Conflating
+    them makes the reviewer tell the candidate they applied to roles they did not.
+    Attempts that can no longer become an application — an employer that blocked
+    the agent, a session the candidate stopped — hold no slot at all.
+    """
+
+    company_key = _company_key(company)
+    rows = connection.execute(
+        """
+        SELECT id, company, role, location, pipeline_status, applied_at,
+               availability_status, apply_reason_code
+        FROM jobs
+        WHERE applied_at IS NOT NULL
+           OR pipeline_status IN ('applying', 'manual_review')
+        ORDER BY COALESCE(applied_at, updated_at) DESC
+        """
+    ).fetchall()
+    submitted_entries: list[str] = []
+    in_progress_entries: list[str] = []
+    for row in rows:
+        if _company_key(row["company"]) != company_key:
+            continue
+        role = f"{row['role']} ({row['location'] or 'location not listed'})"
+        if row["applied_at"]:
+            submitted_entries.append(f"{role} — submitted on {str(row['applied_at'])[:10]}")
+            continue
+        handed_back = (
+            row["availability_status"] == "manual_only"
+            or row["apply_reason_code"] == "cancelled"
+        )
+        if handed_back:
+            # Waiting on the candidate to apply in their own browser. Nothing was
+            # sent and the browser agent will not send it, so no slot is held.
+            continue
+        in_progress_entries.append(
+            f"{role} — "
+            + (
+                "the agent is filling this in now"
+                if row["pipeline_status"] == "applying"
+                else "form complete, waiting for your Submit confirmation"
+            )
+        )
+    return {
+        "submitted": len(submitted_entries),
+        "in_progress": len(in_progress_entries),
+        "used": len(submitted_entries) + len(in_progress_entries),
+        "submitted_entries": submitted_entries[:12],
+        "in_progress_entries": in_progress_entries[:12],
+    }
 
 
 def list_jobs(
@@ -2325,7 +2656,8 @@ def list_manual_handoff_jobs(
     rows = connection.execute(
         """
         SELECT j.id, j.company, j.role, j.location, j.application_url,
-               j.fit_score, j.pipeline_status, j.availability_status,
+               j.apply_decision, j.apply_headline, j.pipeline_status,
+               j.availability_status,
                j.availability_detail, j.apply_error, j.apply_reason_code,
                j.availability_checked_at, j.updated_at
         FROM jobs j
@@ -2348,7 +2680,8 @@ def list_manual_handoff_jobs(
             "role": row["role"],
             "location": row["location"] or "",
             "application_url": row["application_url"],
-            "fit_score": row["fit_score"],
+            "apply_decision": row["apply_decision"],
+            "apply_headline": row["apply_headline"],
             "pipeline_status": row["pipeline_status"],
             "handoff": (
                 "stopped"
@@ -2447,10 +2780,9 @@ def _claim_candidates(
     *,
     max_attempts: int,
     target_job_id: int | None,
-    minimum_fit_score: int,
-    eligible_only: bool,
     profile: dict[str, Any] | None,
     use_preferences: bool,
+    require_decision: bool = True,
     include_queued: bool = False,
 ) -> list[dict[str, Any]]:
     candidate_statuses = ("queued", "ready", "failed") if include_queued else ("ready", "failed")
@@ -2471,9 +2803,10 @@ def _claim_candidates(
             "NOT (j.apply_origin = 'auto' AND j.pipeline_status = 'failed' "
             f"AND COALESCE(j.apply_reason_code, '') IN ({terminal_reasons}))"
         )
-        if not eligible_only:
-            clauses.append("COALESCE(j.fit_score, 0) >= ?")
-            parameters.append(max(1, min(10, int(minimum_fit_score))))
+        if require_decision:
+            # Auto mode acts only on a decision made from the employer's own
+            # posting. An unreviewed listing is never claimed unattended.
+            clauses.append("j.apply_decision = 'apply'")
     else:
         clauses.extend(
             [
@@ -2493,7 +2826,9 @@ def _claim_candidates(
             LEFT JOIN job_sources js ON js.job_id = j.id AND js.active = 1
             WHERE {' AND '.join(clauses)}
             GROUP BY j.id
-            ORDER BY j.fit_score DESC, (j.pipeline_status = 'ready') DESC,
+            ORDER BY CASE COALESCE(j.apply_confidence, '')
+                         WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                     (j.pipeline_status = 'ready') DESC,
                      j.posting_date DESC,
                      j.first_seen_at ASC, j.id ASC
             """,
@@ -2503,89 +2838,27 @@ def _claim_candidates(
     if target_job_id is not None:
         return rows[:1]
 
-    history = [
-        dict(row)
+    # The reviewer already spent this company's application budget when it chose
+    # which roles to mark `apply`, so the claim step no longer imposes a
+    # one-role-per-company rule of its own. It only avoids starting a second
+    # application at a company while one is still mid-flight.
+    in_flight = {
+        _company_key(row["company"])
         for row in connection.execute(
             """
-            SELECT id, company, pipeline_status, applied_at, apply_origin,
-                   apply_attempts
-            FROM jobs
-            WHERE applied_at IS NOT NULL
-               OR pipeline_status IN ('applying', 'manual_review')
-               OR (apply_origin = 'auto' AND apply_attempts > 0)
+            SELECT company FROM jobs
+            WHERE pipeline_status IN ('applying', 'manual_review')
             """
         ).fetchall()
-    ]
-    history_by_company: dict[str, list[dict[str, Any]]] = {}
-    for item in history:
-        history_by_company.setdefault(_company_key(item["company"]), []).append(item)
-
-    selected_companies: set[str] = set()
+    }
     result: list[dict[str, Any]] = []
     for row in rows:
-        company = _company_key(row["company"])
-        if company in selected_companies:
-            continue
-        prior = history_by_company.get(company, [])
-        auto_selected_ids = {
-            int(item["id"])
-            for item in prior
-            if item.get("apply_origin") == "auto" and int(item.get("apply_attempts") or 0) > 0
-        }
-        blocked_by_other = any(
-            int(item["id"]) != int(row["id"])
-            and (
-                bool(item.get("applied_at"))
-                or item.get("pipeline_status") in {"applying", "manual_review"}
-            )
-            for item in prior
-        )
-        if blocked_by_other or (auto_selected_ids and int(row["id"]) not in auto_selected_ids):
+        if _company_key(row["company"]) in in_flight:
             continue
         if use_preferences and not matches_preferences(row, profile or {})[0]:
             continue
-        selected_companies.add(company)
         result.append(row)
     return result
-
-
-def _skip_auto_company_siblings(
-    connection: sqlite3.Connection,
-    selected: dict[str, Any],
-) -> None:
-    """Keep one best-fit auto application for a company while retaining manual access."""
-
-    company = _company_key(selected["company"])
-    detail = (
-        f"Auto mode selected {selected['role']} as this company's best-fit role"
-    )
-    siblings = connection.execute(
-        """
-        SELECT id, company FROM jobs
-        WHERE id != ? AND discovered_as_new = 1 AND manual_requested = 0
-          AND pipeline_status IN ('queued', 'ready', 'failed')
-        """,
-        (selected["id"],),
-    ).fetchall()
-    now = utc_now()
-    for sibling in siblings:
-        if _company_key(sibling["company"]) != company:
-            continue
-        connection.execute(
-            """
-            UPDATE jobs SET pipeline_status = 'skipped', apply_error = ?,
-                            apply_reason_code = 'company_role_deduplicated',
-                            updated_at = ?
-            WHERE id = ?
-            """,
-            (detail, now, sibling["id"]),
-        )
-        add_event(
-            connection,
-            int(sibling["id"]),
-            "auto_role_skipped",
-            detail,
-        )
 
 
 def claim_next_job(
@@ -2594,8 +2867,7 @@ def claim_next_job(
     worker_id: str,
     max_attempts: int,
     target_job_id: int | None = None,
-    minimum_fit_score: int = 1,
-    eligible_only: bool = False,
+    require_decision: bool = True,
     profile: dict[str, Any] | None = None,
     use_preferences: bool = False,
 ) -> dict[str, Any] | None:
@@ -2605,8 +2877,7 @@ def claim_next_job(
             connection,
             max_attempts=max_attempts,
             target_job_id=target_job_id,
-            minimum_fit_score=minimum_fit_score,
-            eligible_only=eligible_only,
+            require_decision=require_decision,
             profile=profile,
             use_preferences=use_preferences,
         )
@@ -2614,8 +2885,6 @@ def claim_next_job(
             connection.rollback()
             return None
         row = candidates[0]
-        if target_job_id is None:
-            _skip_auto_company_siblings(connection, row)
         now = utc_now()
         origin = "manual" if target_job_id is not None else "auto"
         connection.execute(
@@ -2641,8 +2910,7 @@ def claimable_application_count(
     *,
     max_attempts: int,
     target_job_id: int | None = None,
-    minimum_fit_score: int = 1,
-    eligible_only: bool = False,
+    require_decision: bool = True,
     profile: dict[str, Any] | None = None,
     use_preferences: bool = False,
 ) -> int:
@@ -2653,8 +2921,7 @@ def claimable_application_count(
             connection,
             max_attempts=max_attempts,
             target_job_id=target_job_id,
-            minimum_fit_score=minimum_fit_score,
-            eligible_only=eligible_only,
+            require_decision=require_decision,
             profile=profile,
             use_preferences=use_preferences,
         )
@@ -2666,7 +2933,6 @@ def list_application_queue(
     *,
     auto_enabled: bool,
     max_attempts: int,
-    minimum_fit_score: int,
     profile: dict[str, Any] | None = None,
     use_preferences: bool = False,
 ) -> list[dict[str, Any]]:
@@ -2706,8 +2972,6 @@ def list_application_queue(
             connection,
             max_attempts=max_attempts,
             target_job_id=None,
-            minimum_fit_score=minimum_fit_score,
-            eligible_only=False,
             profile=profile,
             use_preferences=use_preferences,
             include_queued=True,
@@ -2751,7 +3015,9 @@ def list_application_queue(
                 "company": row["company"],
                 "role": row["role"],
                 "location": row.get("location") or "",
-                "fit_score": row.get("fit_score"),
+                "apply_decision": row.get("apply_decision"),
+                "apply_confidence": row.get("apply_confidence"),
+                "apply_headline": row.get("apply_headline"),
                 "pipeline_status": pipeline_status,
                 "queue_state": queue_state,
                 "worker_status": row.get("worker_status"),

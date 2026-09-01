@@ -60,6 +60,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "allowed_locations": [],
         "remote_only": False,
     },
+    "review": {
+        "enabled": True,
+        "model": "claude-opus-5",
+        "max_applications_per_company": 2,
+        "max_listing_age_days": 2,
+        "fetch_postings": True,
+        "refresh_after_days": 21,
+        "max_companies_per_cycle": 12,
+        "posting_timeout_seconds": 25,
+    },
     "preparation": {
         "use_llm": False,
         "generate_cover_letters": True,
@@ -67,7 +77,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "automation": {
         "auto_apply_new": False,
         "manual_auto_submit": False,
-        "auto_apply_minimum_fit_score": 7,
         "auto_apply_use_preferences": False,
         "web_push_notifications": False,
         "allow_submission": False,
@@ -209,6 +218,9 @@ def _normalize_settings(settings: dict[str, Any]) -> dict[str, Any]:
         preparation.pop("tailor_resumes", None)
     automation = settings.get("automation")
     if isinstance(automation, dict):
+        # The heuristic 1-10 fit score no longer exists; the apply/skip review
+        # made from the employer's own posting is the Auto mode gate.
+        automation.pop("auto_apply_minimum_fit_score", None)
         legacy_submission_split = (
             "auto_apply_eligible_only" in automation or "enabled" in automation
         )
@@ -257,10 +269,23 @@ def save_settings(settings: dict[str, Any], paths: AppPaths | None = None) -> Pa
     paths = ensure_dirs(paths)
     merged = _normalize_settings(_deep_merge(DEFAULT_SETTINGS, settings))
     merged["poll_interval_seconds"] = max(30, int(merged.get("poll_interval_seconds", 300)))
-    automation = merged["automation"]
-    automation["auto_apply_minimum_fit_score"] = max(
-        1, min(10, int(automation.get("auto_apply_minimum_fit_score", 7)))
+    review = merged["review"]
+    review["enabled"] = bool(review.get("enabled", True))
+    review["fetch_postings"] = bool(review.get("fetch_postings", True))
+    review["max_applications_per_company"] = max(
+        1, min(10, int(review.get("max_applications_per_company", 2)))
     )
+    review["max_listing_age_days"] = max(
+        0, min(365, int(review.get("max_listing_age_days", 2)))
+    )
+    review["refresh_after_days"] = max(1, min(365, int(review.get("refresh_after_days", 21))))
+    review["max_companies_per_cycle"] = max(
+        1, min(100, int(review.get("max_companies_per_cycle", 12)))
+    )
+    review["posting_timeout_seconds"] = max(
+        5, min(120, int(review.get("posting_timeout_seconds", 25)))
+    )
+    automation = merged["automation"]
     automation["web_push_notifications"] = bool(
         automation.get("web_push_notifications", False)
     )
