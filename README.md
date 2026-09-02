@@ -88,7 +88,8 @@ It weighs:
 - **Duplicate listings** — the same role posted in several locations, or by several source lists.
 - **Application cost** — long essays, assessments, and portfolio requirements are only worth it for a
   strong match.
-- **Which resume to send**, chosen by name with a one-line reason.
+- **Which exact uploaded resume to send**, chosen by name with a one-line reason. Every **Yes** row
+  repeats that recommendation in **Latest jobs**, so it is visible before you start the application.
 
 Each decision records its confidence. **High** means the real posting was read and the deciding facts
 were explicit in it; **low** means the employer blocked the read and only list metadata was available.
@@ -236,9 +237,9 @@ agent. **Stop session** on the worker card and on every Agent checkpoint ends th
 closes the Claude turn and its browser, releases the listing, and records it as stopped instead of
 queueing it again. A running turn stops within about a second; nothing waits for the agent timeout.
 
-If an employer blocks the automated browser, or you stopped a session, that role moves to **Roles you apply to yourself** in **Agent**. Open the listing, complete the application in your own browser, then select **I applied manually**. TI-AAA records the submission with today's date, counts it in **Applications** and **Analytics**, and never queues that role for the browser agent again. The same action appears on the live-browser and employer-access-block checkpoint cards.
+If an employer blocks the automated browser, or you stopped a session, that role moves to **Roles you apply to yourself** in **Agent**. Open the listing, complete the application in your own browser, then select **I applied manually**. TI-AAA asks which uploaded resume you actually submitted, with the review recommendation shown for reference; it does not preselect or infer one from the prepared application. TI-AAA records the submission with today's date, counts it in **Applications** and **Analytics**, and never queues that role for the browser agent again. The same action appears on the live-browser and employer-access-block checkpoint cards.
 
-You can also record an application you submitted yourself before the agent ever touches the role. Every row in **Latest jobs** carries a **Mark applied** action, and the listing dossier repeats it as **I applied manually**. Selecting it records the same candidate-submitted application with today's date—no browser agent run, no Claude Code connection, and no onboarding requirement. The row stays in the repository inbox stamped **applied** and is never queued again. The action is hidden once a role is already applied, and it is unavailable while the browser agent is mid-application; stop that session first.
+You can also record an application you submitted yourself before the agent ever touches the role. Every row in **Latest jobs** carries a **Mark applied** action, and the listing dossier repeats it as **I applied manually**. Selecting it opens the same resume chooser and records the candidate-submitted application with today's date—no browser agent run, no Claude Code connection, and no onboarding requirement. If you used a resume that is not uploaded, choose **Different resume / do not record it** rather than attaching the wrong one. The row stays in the repository inbox stamped **applied** and is never queued again. The action is hidden once a role is already applied, and it is unavailable while the browser agent is mid-application; stop that session first.
 
 If a **Confirm in Agent** checkpoint needs to start over, open **Applications**, switch the filter to **Confirm in Agent**, and select **Retry**. TI-AAA closes any retained live form, clears pending checkpoint inputs, and queues a fresh browser attempt.
 
@@ -354,8 +355,9 @@ tiaaa mark 42 --outcome oa
 `tiaaa review` reads the employer postings for every company whose decisions are out of date.
 `tiaaa review --job-id 42` re-decides that listing and the rest of its company.
 
-`tiaaa mark <id> --pipeline applied` is the terminal equivalent of **I applied manually**: it records the
-submission with the current time and marks it as candidate-submitted.
+`tiaaa mark <id> --pipeline applied` records the submission with the current time and marks it as
+candidate-submitted without inferring a resume. Use **I applied manually** in the dashboard when you
+also want to choose and record the exact resume you submitted.
 
 Run a continuous foreground worker:
 

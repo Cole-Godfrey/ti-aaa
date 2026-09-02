@@ -753,17 +753,47 @@ def test_latest_jobs_records_an_application_without_starting_the_agent(
         source_path=source.path,
     )
     ingest_listings(connection, source, [listing], profile=profile, settings=settings)
+    buffer = io.BytesIO()
+    document = canvas.Canvas(buffer)
+    document.drawString(72, 760, "Avery Student - backend and data engineering experience")
+    document.save()
+    wrong = store_resume(
+        paths=paths,
+        name="General resume",
+        original_filename="general.pdf",
+        content=buffer.getvalue(),
+        text_override="Avery Student with general software engineering project experience.",
+        db_path=paths.database,
+    )
+    chosen = store_resume(
+        paths=paths,
+        name="Backend resume",
+        original_filename="backend.pdf",
+        content=buffer.getvalue(),
+        text_override="Avery Student built Python APIs, SQL services, and backend systems.",
+        db_path=paths.database,
+    )
+    connection.execute("UPDATE jobs SET base_resume_id = ? WHERE id = 1", (wrong["id"],))
+    connection.commit()
     client = TestClient(create_app(paths.database, paths=paths))
     assert [item["id"] for item in client.get("/api/jobs?view=latest").json()["items"]] == [1]
 
-    response = client.post("/api/jobs/1/applied-manually")
+    invalid = client.post("/api/jobs/1/applied-manually", json={"resume_id": 9999})
+    assert invalid.status_code == 409
+    response = client.post(
+        "/api/jobs/1/applied-manually", json={"resume_id": chosen["id"]}
+    )
 
     assert response.status_code == 200
     assert response.json()["job"]["pipeline_status"] == "applied"
     assert response.json()["job"]["apply_origin"] == "self"
-    assert client.get("/api/jobs?view=applications&status=applied").json()["items"][0][
-        "company"
-    ] == "Ledger Co"
+    assert response.json()["job"]["submitted_resume_id"] == chosen["id"]
+    assert response.json()["job"]["submitted_resume_name"] == "Backend resume"
+    application = client.get("/api/jobs?view=applications&status=applied").json()[
+        "items"
+    ][0]
+    assert application["company"] == "Ledger Co"
+    assert application["submitted_resume_name"] == "Backend resume"
     assert client.get("/api/stats").json()["applications"] == 1
     # The listing stays in the repository inbox, now stamped as applied.
     latest = client.get("/api/jobs?view=latest").json()["items"]
@@ -772,8 +802,12 @@ def test_latest_jobs_records_an_application_without_starting_the_agent(
     index = client.get("/").text
     javascript = client.get("/static/app.js").text
     assert 'id="markAppliedButton"' in index
+    assert 'id="manualAppliedResume"' in index
+    assert 'id="confirmManualApplied"' in index
     assert "function jobCanBeMarkedApplied(job)" in javascript
     assert 'class="text-button mark-applied"' in javascript
+    assert "Choose the resume you submitted" in javascript
+    assert "body: JSON.stringify({ resume_id: resumeId })" in javascript
 
 
 def test_latest_jobs_can_filter_to_reviews_that_said_yes(
@@ -964,7 +998,7 @@ def test_agent_ui_uses_a_persistent_stream_and_input_channel(tmp_path) -> None:
     assert 'api(`/api/jobs/${jobId}/retry`' in javascript
     assert 'renderApplicationQueue(workers.queue || [], workers.queue_summary || {})' in javascript
     assert 'renderManualApplications(workers.manual_applications || [])' in javascript
-    assert 'api(`/api/jobs/${jobId}/applied-manually`' in javascript
+    assert 'api(`/api/jobs/${job.id}/applied-manually`' in javascript
     assert 'api(`/api/jobs/${jobId}/stop`' in javascript
     assert "I applied manually" in javascript
     assert "Stop session" in javascript

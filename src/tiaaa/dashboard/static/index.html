@@ -433,6 +433,25 @@
     </aside>
   </div>
 
+  <div id="manualAppliedScrim" class="modal-scrim hidden">
+    <div class="decision-modal manual-applied-modal" role="dialog" aria-modal="true" aria-labelledby="manualAppliedTitle">
+      <header>
+        <div><p class="kicker">RECORD YOUR APPLICATION</p><h2 id="manualAppliedTitle">Choose the resume submitted</h2><p id="manualAppliedRole"></p></div>
+        <button id="closeManualApplied" type="button" aria-label="Close manual application dialog">×</button>
+      </header>
+      <div class="decision-body manual-applied-body">
+        <p>Pick the exact resume you used so the application tracker and resume analytics stay accurate.</p>
+        <label for="manualAppliedResume">Resume submitted</label>
+        <select id="manualAppliedResume"></select>
+        <p id="manualAppliedRecommendation" class="manual-applied-recommendation"></p>
+      </div>
+      <footer class="decision-actions">
+        <button id="cancelManualApplied" class="button ghost" type="button">Cancel</button>
+        <button id="confirmManualApplied" class="button ink" type="button">Record application</button>
+      </footer>
+    </div>
+  </div>
+
   <div id="decisionScrim" class="modal-scrim hidden">
     <div id="decisionModal" class="decision-modal" role="dialog" aria-modal="true" aria-labelledby="decisionTitle">
       <header>

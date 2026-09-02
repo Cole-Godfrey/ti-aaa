@@ -10,6 +10,8 @@ const state = {
   searchTimer: null,
   latestSearchTimer: null,
   retryingTodayReviews: false,
+  manualApplicationJob: null,
+  manualApplicationControl: null,
   onboardingStep: 0,
   claudeAuth: null,
   agentInputSignature: null,
@@ -311,7 +313,7 @@ function renderJobs(jobs) {
   }
   body.innerHTML = jobs.map(job => {
     const submitted = Boolean(job.applied_at);
-    const resumeName = job.submitted_resume_name || job.base_resume_name;
+    const resumeName = job.submitted_resume_name || (!submitted ? job.base_resume_name : "");
     const resumeState = job.submitted_resume_name ? "submitted" : "prepared";
     const retryAction = job.pipeline_status === "manual_review" && job.availability_status !== "manual_only"
       ? `<button class="mini-apply retry-application" type="button" aria-label="Retry application for ${escapeHtml(job.company)}">Retry</button>`
@@ -328,7 +330,14 @@ function renderJobs(jobs) {
   }).join("");
   element("tableSummary").textContent = `${jobs.length} application record${jobs.length === 1 ? "" : "s"} shown · tracker changes save immediately`;
   body.querySelectorAll(".pipeline-select").forEach(select => select.addEventListener("change", event => {
-    updateJob(event.target.closest("tr").dataset.jobId, { pipeline_status: event.target.value });
+    const jobId = event.target.closest("tr").dataset.jobId;
+    const job = state.jobs.find(item => String(item.id) === String(jobId));
+    if (event.target.value === "applied" && !job?.applied_at) {
+      event.target.value = job?.pipeline_status || "manual_review";
+      markAppliedManually(jobId, event.target);
+      return;
+    }
+    updateJob(jobId, { pipeline_status: event.target.value });
   }));
   body.querySelectorAll(".outcome-select").forEach(select => select.addEventListener("change", event => {
     updateJob(event.target.closest("tr").dataset.jobId, { outcome_status: event.target.value });
@@ -416,6 +425,10 @@ function decisionLabel(job) {
   return { apply: "Yes", skip: "No" }[decisionState(job)] || "—";
 }
 
+function recommendedResumeName(job) {
+  return job?.apply_resume_name || job?.apply_rationale?.resume_name || "";
+}
+
 function listingAgeDays(job) {
   const raw = job.posting_date || job.first_seen_at;
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(raw || ""));
@@ -494,11 +507,12 @@ function renderLatestJobs() {
   body.innerHTML = jobs.map(job => {
     const verdict = decisionState(job);
     const confidence = job.apply_confidence ? `${job.apply_confidence} confidence` : "";
+    const resumeRecommendation = verdict === "apply" ? recommendedResumeName(job) : "";
     return `<tr data-job-id="${job.id}">
     <td class="date-cell">${escapeHtml(listingDate(job.posting_date, job.first_seen_at))}</td>
     <td class="role-cell"><button class="row-detail" type="button"><strong>${escapeHtml(job.company)}</strong><span>${escapeHtml(job.role)}</span></button></td>
     <td>${escapeHtml(job.location || "Not listed")}</td>
-    <td class="decision-cell"><button class="decision-mark decision-${verdict}" type="button" title="Why?"><b>${escapeHtml(decisionLabel(job))}</b>${confidence ? `<i>${escapeHtml(confidence)}</i>` : ""}</button><small>${escapeHtml(decisionSummary(job))}</small></td>
+    <td class="decision-cell"><button class="decision-mark decision-${verdict}" type="button" title="Why?"><b>${escapeHtml(decisionLabel(job))}</b>${confidence ? `<i>${escapeHtml(confidence)}</i>` : ""}</button><small>${escapeHtml(decisionSummary(job))}</small>${resumeRecommendation ? `<small class="resume-recommendation">Use ${escapeHtml(resumeRecommendation)}</small>` : ""}</td>
     <td><span class="state-stamp state-${escapeHtml(job.pipeline_status)}">${escapeHtml(job.pipeline_status.replaceAll("_", " "))}</span></td>
     <td class="row-actions"><button class="text-button detail-job" type="button">Details</button>${jobCanBeMarkedApplied(job)
       ? `<button class="text-button mark-applied" type="button">Mark applied</button>`
@@ -609,9 +623,9 @@ function renderDecision(job) {
   const blockers = Array.isArray(rationale.blockers) ? rationale.blockers : [];
   element("decisionTitle").textContent = job.company;
   element("decisionRole").textContent = `${job.role}${job.location ? ` · ${job.location}` : ""}`;
-  const resumeName = job.apply_resume_name || rationale.resume_name || "";
+  const resumeName = recommendedResumeName(job);
   const resumeLine = resumeName
-    ? `<div class="decision-resume"><span>SEND THIS RESUME</span><strong>${escapeHtml(resumeName)}</strong>${rationale.resume_reason ? `<p>${escapeHtml(rationale.resume_reason)}</p>` : ""}${job.apply_resume_name ? "" : '<p class="decision-resume-warning">This resume is no longer on file — upload it or re-check the listing.</p>'}</div>`
+    ? `<div class="decision-resume"><span>RECOMMENDED RESUME TO SUBMIT</span><strong>${escapeHtml(resumeName)}</strong>${rationale.resume_reason ? `<p>${escapeHtml(rationale.resume_reason)}</p>` : ""}${job.apply_resume_name ? "" : '<p class="decision-resume-warning">This resume is no longer on file — upload it or re-check the listing.</p>'}</div>`
     : "";
   const postingNote = POSTING_STATUS_NOTES[job.posting_status] || POSTING_STATUS_NOTES.unknown;
   let intro;
@@ -698,6 +712,14 @@ async function openJobDetail(jobId) {
       : job.application_mode === "manual_auto_submit"
         ? "Submits after your manual Apply selection"
         : "Final Submit requires confirmation in Agent";
+    const recommendedResume = recommendedResumeName(job);
+    const [resumeLabel, resumeValue] = job.applied_at
+      ? ["Resume submitted", job.submitted_resume_name || "Not recorded"]
+      : job.base_resume_name
+        ? ["Resume prepared", job.base_resume_name]
+        : recommendedResume
+          ? ["Resume to use", recommendedResume]
+          : ["Resume", "Not selected"];
     element("jobDetailContent").innerHTML = `
       <p class="drawer-kicker">${escapeHtml(listingDate(job.posting_date, job.first_seen_at))}</p>
       <h2 id="jobDetailTitle">${escapeHtml(job.role)}</h2><h3>${escapeHtml(job.company)}</h3>
@@ -706,7 +728,7 @@ async function openJobDetail(jobId) {
         <div><dt>Apply?</dt><dd><b class="decision-inline decision-${decisionState(job)}">${escapeHtml(decisionLabel(job))}</b> · ${escapeHtml(decisionSummary(job))}</dd></div>
         <div><dt>Eligibility</dt><dd>${escapeHtml(job.eligibility)} · ${escapeHtml(job.eligibility_reason || "No rule note")}</dd></div>
         <div><dt>Agent boundary</dt><dd>${applicationBoundary}</dd></div>
-        <div><dt>Resume</dt><dd>${escapeHtml(job.submitted_resume_name || job.base_resume_name || "Selected during preparation")}</dd></div>
+        <div><dt>${escapeHtml(resumeLabel)}</dt><dd>${escapeHtml(resumeValue)}</dd></div>
       </dl>
       <section class="drawer-section"><span>FOUND IN</span>${sources.map(source => `<p>${escapeHtml(source)}</p>`).join("")}</section>
       <section class="drawer-section"><span>RECENT ACTIVITY</span>${events.length ? events.map(event => `<p><b>${escapeHtml(event.event_type.replaceAll("_", " "))}</b> ${escapeHtml(relativeTime(event.created_at))}${event.detail ? ` · ${escapeHtml(event.detail)}` : ""}</p>`).join("") : "<p>No application activity yet.</p>"}</section>`;
@@ -1113,22 +1135,78 @@ function bindManualApplyButtons(root) {
   }));
 }
 
-async function markAppliedManually(jobId, button) {
-  if (!window.confirm("Record this application as submitted by you?\n\nTI-AAA counts it in your application statistics and stops queueing this role for the browser agent.")) return;
-  button.disabled = true;
-  const drawerOpen = !element("jobDetailScrim").classList.contains("hidden")
-    && String(state.selectedJob?.id) === String(jobId);
+function closeManualApplied() {
+  element("manualAppliedScrim").classList.add("hidden");
+  element("manualAppliedResume").innerHTML = "";
+  state.manualApplicationJob = null;
+  state.manualApplicationControl = null;
+}
+
+async function markAppliedManually(jobId, control) {
   try {
-    await api(`/api/jobs/${jobId}/applied-manually`, { method: "POST" });
+    const [job, resumeResponse] = await Promise.all([
+      api(`/api/jobs/${jobId}`),
+      api("/api/resumes"),
+    ]);
+    const resumes = Array.isArray(resumeResponse.items) ? resumeResponse.items : [];
+    state.resumes = resumes;
+    state.manualApplicationJob = job;
+    state.manualApplicationControl = control;
+    element("manualAppliedTitle").textContent = `Record ${job.company} application`;
+    element("manualAppliedRole").textContent = `${job.role}${job.location ? ` · ${job.location}` : ""}`;
+    const recommendation = recommendedResumeName(job);
+    const select = element("manualAppliedResume");
+    select.innerHTML = resumes.length
+      ? `<option value="" selected disabled>Choose the resume you submitted</option>${resumes.map(resume => `<option value="${resume.id}">${escapeHtml(resume.name)}${resume.original_filename ? ` · ${escapeHtml(resume.original_filename)}` : ""}${resume.name === recommendation ? " — review recommendation" : ""}</option>`).join("")}<option value="none">Different resume / do not record it</option>`
+      : '<option value="none" selected>No uploaded resume to record</option>';
+    const reason = job.apply_rationale?.resume_reason || "";
+    element("manualAppliedRecommendation").textContent = recommendation
+      ? `Review recommendation: ${recommendation}${reason ? ` — ${reason}` : ""}`
+      : "No resume recommendation was recorded for this listing.";
+    element("manualAppliedScrim").classList.remove("hidden");
+    select.focus();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function confirmManualApplied() {
+  const job = state.manualApplicationJob;
+  const control = state.manualApplicationControl;
+  if (!job) return;
+  const selected = element("manualAppliedResume").value;
+  if (!selected) {
+    showToast("Choose the resume you submitted", true);
+    return;
+  }
+  const resumeId = selected === "none" ? null : Number(selected);
+  const resume = resumeId === null
+    ? null
+    : state.resumes.find(item => Number(item.id) === resumeId);
+  const drawerOpen = !element("jobDetailScrim").classList.contains("hidden")
+    && String(state.selectedJob?.id) === String(job.id);
+  const confirmButton = element("confirmManualApplied");
+  confirmButton.disabled = true;
+  if (control) control.disabled = true;
+  try {
+    await api(`/api/jobs/${job.id}/applied-manually`, {
+      method: "POST",
+      body: JSON.stringify({ resume_id: resumeId }),
+    });
     state.manualApplySignature = null;
     state.agentInputSignature = null;
     state.queueSignature = null;
-    showToast("Recorded as applied; the role now appears in Applications");
+    closeManualApplied();
+    showToast(resume
+      ? `Recorded as applied with ${resume.name}`
+      : "Recorded as applied without a saved resume");
     await refreshAll();
-    if (drawerOpen) await openJobDetail(jobId);
+    if (drawerOpen) await openJobDetail(job.id);
   } catch (error) {
     showToast(error.message, true);
-    button.disabled = false;
+    if (control) control.disabled = false;
+  } finally {
+    confirmButton.disabled = false;
   }
 }
 
@@ -1794,6 +1872,12 @@ element("jobDetailScrim").addEventListener("click", event => {
 });
 element("applyJobButton").addEventListener("click", event => requestJobApplication(event.currentTarget.dataset.jobId, event.currentTarget));
 element("markAppliedButton").addEventListener("click", event => markAppliedManually(event.currentTarget.dataset.jobId, event.currentTarget));
+element("closeManualApplied").addEventListener("click", closeManualApplied);
+element("cancelManualApplied").addEventListener("click", closeManualApplied);
+element("confirmManualApplied").addEventListener("click", confirmManualApplied);
+element("manualAppliedScrim").addEventListener("click", event => {
+  if (event.target === event.currentTarget) closeManualApplied();
+});
 element("closeDecision").addEventListener("click", closeDecision);
 element("decisionScrim").addEventListener("click", event => {
   if (event.target === event.currentTarget) closeDecision();
@@ -1862,7 +1946,7 @@ workerGrid.addEventListener("wheel", event => {
     delta_y: Math.max(-1200, Math.min(1200, event.deltaY)),
   });
 }, { passive: false });
-document.addEventListener("keydown", event => { if (event.key === "Escape") { closeJobDetail(); closeDecision(); closeWelcomeBack(); } });
+document.addEventListener("keydown", event => { if (event.key === "Escape") { closeJobDetail(); closeDecision(); closeManualApplied(); closeWelcomeBack(); } });
 element("runButton").addEventListener("click", async () => {
   try { await api("/api/service/run", { method: "POST" }); showToast("Repository check scheduled"); }
   catch (error) { showToast(error.message, true); }

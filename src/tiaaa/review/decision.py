@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -67,6 +68,18 @@ DECISION_SCHEMA: dict[str, Any] = {
     "required": ["company_summary", "decisions"],
     "additionalProperties": False,
 }
+
+
+def decision_schema_for_resumes(resume_names: list[str]) -> dict[str, Any]:
+    """Constrain Claude to an exact active resume name (or empty for a skip)."""
+
+    names = list(dict.fromkeys(name.strip() for name in resume_names if name.strip()))
+    schema = deepcopy(DECISION_SCHEMA)
+    resume_property = schema["properties"]["decisions"]["items"]["properties"][
+        "resume_name"
+    ]
+    resume_property["enum"] = ["", *names]
+    return schema
 
 SYSTEM_PROMPT = (
     "You are an internship application strategist working for one candidate. You decide, for "
@@ -344,7 +357,9 @@ only return decisions for the open listings included below.
 8. **Application cost.** Long essays, timed assessments, or portfolio requirements are only worth it
    for a strong match. Note this when the posting reveals it.
 9. **Which resume to send.** Pick the single best resume by name from the list below and say in one
-   sentence what makes it the right one. Use the exact resume name. Leave it empty only for `skip`.
+   sentence what makes it the right one. Use the exact resume name. For every `apply`, both the name
+   and reason are mandatory because the candidate sees this recommendation and application prep uses
+   it. Leave the resume fields empty only for `skip`.
 
 ## Output discipline
 - One entry per listing below, using its exact `job_id`. Do not invent ids.

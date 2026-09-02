@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from tiaaa.config import SOURCE_DOCUMENTS, AppPaths
-from tiaaa.database import get_connection, get_job, ingest_listings, init_db
+from tiaaa.database import add_resume_record, get_connection, get_job, ingest_listings, init_db
 from tiaaa.models import InternshipListing
 from tiaaa.review import reviewer as reviewer_module
 from tiaaa.review.decision import (
@@ -26,12 +26,15 @@ class RecordingClient:
     def __init__(self, responses: list[dict]) -> None:
         self.responses = list(responses)
         self.prompts: list[str] = []
+        self.schemas: list[dict] = []
         self.closed = False
 
     def decide(self, *, system: str, prompt: str, schema: dict) -> dict:
-        assert schema is DECISION_SCHEMA
+        assert schema is not DECISION_SCHEMA
+        assert schema["type"] == DECISION_SCHEMA["type"]
         assert "application strategist" in system
         self.prompts.append(prompt)
+        self.schemas.append(schema)
         return self.responses.pop(0)
 
     def close(self) -> None:
@@ -137,11 +140,109 @@ def test_review_stores_a_decision_its_reasoning_and_the_chosen_resume(
     assert job["apply_headline"] == "Decision for 1"
     assert job["posting_status"] == "ok"
     assert job["apply_resume_name"] == "Default resume"
+    assert client.schemas[0]["properties"]["decisions"]["items"]["properties"][
+        "resume_name"
+    ]["enum"] == ["", "Default resume"]
     rationale = json.loads(job["apply_rationale"])
     assert rationale["factors"][0]["label"] == "Qualifications"
     assert rationale["company_summary"] == "One clear match at Acme."
     # The client is caller-owned here, so the reviewer must not close it.
     assert client.closed is False
+
+
+def test_review_with_multiple_resumes_requires_and_records_an_exact_choice(
+    tmp_path, profile, settings
+) -> None:
+    paths = make_paths(tmp_path)
+    connection = seed(
+        paths, profile, settings, [("Acme", "Backend Intern", "https://jobs.test/acme")]
+    )
+    general_text = paths.resumes / "general.txt"
+    general_pdf = paths.resumes / "general.pdf"
+    general_text.write_text("General software projects and coursework.", encoding="utf-8")
+    general_pdf.write_bytes(b"%PDF-1.4")
+    add_resume_record(
+        connection,
+        name="General resume",
+        original_filename="general.pdf",
+        pdf_path=str(general_pdf),
+        text_path=str(general_text),
+        tags=["general"],
+    )
+    backend_text = paths.resumes / "backend.txt"
+    backend_pdf = paths.resumes / "backend.pdf"
+    backend_text.write_text("Python APIs, SQL, and distributed services.", encoding="utf-8")
+    backend_pdf.write_bytes(b"%PDF-1.4")
+    add_resume_record(
+        connection,
+        name="Backend resume",
+        original_filename="backend.pdf",
+        pdf_path=str(backend_pdf),
+        text_path=str(backend_text),
+        tags=["backend"],
+    )
+    client = RecordingClient(
+        [
+            {
+                "company_summary": "The backend resume is the stronger match.",
+                "decisions": [
+                    decision(
+                        1,
+                        "apply",
+                        resume_name="Backend resume",
+                        resume_reason="It demonstrates the required API and SQL work.",
+                    )
+                ],
+            }
+        ]
+    )
+
+    result = review_jobs(
+        paths=paths,
+        profile=profile,
+        settings=settings,
+        db_path=paths.database,
+        client=client,
+    )
+
+    assert result["apply"] == 1 and result["errors"] == 0
+    job = get_job(connection, 1)
+    assert job["apply_resume_name"] == "Backend resume"
+    assert "--- RESUME: Backend resume" in client.prompts[0]
+    allowed = client.schemas[0]["properties"]["decisions"]["items"]["properties"][
+        "resume_name"
+    ]["enum"]
+    assert set(allowed) == {"", "General resume", "Backend resume"}
+
+
+def test_apply_review_without_an_active_resume_choice_is_not_saved(
+    tmp_path, profile, settings
+) -> None:
+    paths = make_paths(tmp_path)
+    connection = seed(
+        paths, profile, settings, [("Acme", "Backend Intern", "https://jobs.test/acme")]
+    )
+    client = RecordingClient(
+        [
+            {
+                "company_summary": "Missing the required resume choice.",
+                "decisions": [decision(1, "apply", resume_name="", resume_reason="")],
+            }
+        ]
+    )
+
+    result = review_jobs(
+        paths=paths,
+        profile=profile,
+        settings=settings,
+        db_path=paths.database,
+        client=client,
+    )
+
+    assert result["reviewed"] == 0 and result["errors"] == 1
+    job = get_job(connection, 1)
+    assert job["apply_decision"] is None
+    assert "did not choose and explain an active resume" in job["review_error"]
 
 
 def test_one_call_covers_a_whole_company_and_states_the_remaining_budget(

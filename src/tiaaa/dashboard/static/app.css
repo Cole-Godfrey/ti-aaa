@@ -240,6 +240,7 @@ tbody tr:hover td { background: rgba(220,255,69,.16); }
 .row-detail { width: 100%; padding: 0; text-align: left; background: none; border: 0; }
 .decision-cell { min-width: 190px; }
 .decision-cell small { max-width: 250px; display: block; margin-top: 5px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+.decision-cell .resume-recommendation { color: var(--blue); font-family: var(--data); text-transform: uppercase; }
 .decision-mark {
   display: inline-flex; align-items: baseline; gap: 6px; padding: 5px 9px;
   color: inherit; background: var(--paper-2); border: 1px solid var(--rule); cursor: pointer;
@@ -271,6 +272,9 @@ tbody tr:hover td { background: rgba(220,255,69,.16); }
 .decision-modal > header h2 { margin: 4px 0 2px; font: 700 21px var(--slab); }
 .decision-modal > header p { margin: 0; color: var(--muted); font-size: 12px; }
 .decision-modal > header button { color: var(--ink); background: transparent; border: 0; font: 28px/1 var(--human); cursor: pointer; }
+.manual-applied-modal { width: min(500px, 100%); }
+.manual-applied-body > p:first-child { margin: 0 0 18px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.manual-applied-recommendation { min-height: 18px; margin: 14px 0 0; color: var(--blue); font-size: 11px; line-height: 1.5; }
 .decision-body { padding: 18px 22px; overflow-y: auto; }
 .decision-verdict { display: flex; align-items: baseline; gap: 10px; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--ink); }
 .decision-verdict b { font: 700 26px var(--slab); line-height: 1; }

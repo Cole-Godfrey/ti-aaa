@@ -4,6 +4,26 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-01
+
+### Added
+
+- an **Apply: Yes** filter in Latest jobs that shows only listings the review recommends applying to
+- the exact active resume recommended for every **Yes** decision, shown directly in Latest jobs and
+  in the listing's review details
+- a resume chooser when recording an application submitted manually, including the review's
+  recommendation and its reason for reference
+
+### Changed
+
+- the basic Docker install is now at the top of the README
+- an **Apply** review is stored only when Claude chooses and explains one of the active resumes
+
+### Fixed
+
+- manually recorded applications no longer silently inherit the resume prepared by the agent; the
+  submitted resume is the one the user chooses, or is explicitly left unrecorded
+
 ## [0.8.0] - 2026-09-01
 
 ### Added

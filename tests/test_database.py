@@ -831,10 +831,10 @@ def test_analytics_break_down_submitted_applications(
     connection.execute("UPDATE jobs SET base_resume_id = ? WHERE id = 2", (data["id"],))
     connection.commit()
 
-    update_tracker(connection, 1, pipeline_status="applied")
+    mark_applied_manually(connection, 1, resume_id=int(general["id"]))
     update_tracker(connection, 1, outcome_status="oa")
     update_tracker(connection, 1, outcome_status="oa")
-    update_tracker(connection, 2, pipeline_status="applied")
+    mark_applied_manually(connection, 2, resume_id=int(data["id"]))
     update_tracker(connection, 2, outcome_status="interview")
 
     analytics = get_analytics(connection)
@@ -1374,6 +1374,51 @@ def test_bot_blocked_listing_can_be_recorded_as_applied_by_the_candidate(
     assert [item["company"] for item in list_jobs(connection, applied_only=True)] == ["Acme"]
     with pytest.raises(ValueError, match="already recorded"):
         mark_applied_manually(connection, 1)
+    close_connection(path)
+
+
+def test_manual_application_records_the_chosen_resume_without_a_base_resume_fallback(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "manual-resume-choice.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    listings = [
+        make_listing(source, "Chosen", "Backend Intern", "https://jobs.test/chosen"),
+        make_listing(source, "Unrecorded", "Data Intern", "https://jobs.test/unrecorded"),
+        make_listing(source, "Tracker", "Frontend Intern", "https://jobs.test/tracker"),
+    ]
+    ingest_listings(connection, source, listings, profile=profile, settings=settings)
+    wrong = add_resume_record(
+        connection,
+        name="Wrong resume",
+        original_filename="wrong.pdf",
+        pdf_path=str(tmp_path / "wrong.pdf"),
+        text_path=str(tmp_path / "wrong.txt"),
+    )
+    chosen = add_resume_record(
+        connection,
+        name="Backend resume",
+        original_filename="backend.pdf",
+        pdf_path=str(tmp_path / "backend.pdf"),
+        text_path=str(tmp_path / "backend.txt"),
+    )
+    connection.execute("UPDATE jobs SET base_resume_id = ?", (wrong["id"],))
+    connection.commit()
+
+    with pytest.raises(ValueError, match="active resume"):
+        mark_applied_manually(connection, 1, resume_id=9999)
+    selected = mark_applied_manually(connection, 1, resume_id=int(chosen["id"]))
+    unrecorded = mark_applied_manually(connection, 2)
+    tracker = update_tracker(connection, 3, pipeline_status="applied")
+
+    assert selected["submitted_resume_id"] == chosen["id"]
+    assert selected["submitted_resume_name"] == "Backend resume"
+    assert selected["submitted_resume_path"] == chosen["pdf_path"]
+    assert unrecorded["base_resume_id"] == wrong["id"]
+    assert unrecorded["submitted_resume_id"] is None
+    assert tracker["base_resume_id"] == wrong["id"]
+    assert tracker["submitted_resume_id"] is None
     close_connection(path)
 
 

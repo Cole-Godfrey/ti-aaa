@@ -203,6 +203,12 @@ class TodayReviewRequest(BaseModel):
     timezone: str = Field(default="UTC", min_length=1, max_length=100)
 
 
+class ManualApplicationRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resume_id: int | None = Field(default=None, ge=1)
+
+
 class WebPushKeys(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -681,9 +687,13 @@ def create_app(
         }
 
     @app.post("/api/jobs/{job_id}/applied-manually")
-    def record_manual_application(job_id: int) -> dict[str, Any]:
+    def record_manual_application(
+        job_id: int, payload: ManualApplicationRecord | None = None
+    ) -> dict[str, Any]:
         try:
-            row = mark_applied_manually(connection(), job_id)
+            row = mark_applied_manually(
+                connection(), job_id, resume_id=payload.resume_id if payload else None
+            )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if row is None:

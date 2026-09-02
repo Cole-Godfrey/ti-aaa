@@ -2044,11 +2044,13 @@ def list_jobs(
                GROUP_CONCAT(DISTINCT js.source_label) AS source_labels,
                GROUP_CONCAT(DISTINCT js.source_repo_url) AS source_repo_urls,
                br.name AS base_resume_name,
-               sr.name AS submitted_resume_name
+               sr.name AS submitted_resume_name,
+               ar.name AS apply_resume_name
         FROM jobs j
         LEFT JOIN job_sources js ON js.job_id = j.id AND js.active = 1
         LEFT JOIN resumes br ON br.id = j.base_resume_id
         LEFT JOIN resumes sr ON sr.id = j.submitted_resume_id
+        LEFT JOIN resumes ar ON ar.id = j.apply_resume_id
         WHERE {' AND '.join(clauses)}
         GROUP BY j.id
         ORDER BY {ordering}
@@ -2330,9 +2332,6 @@ def update_tracker(
             # tracker row that reaches 'applied' without one was submitted by
             # the candidate outside TI-AAA.
             updates.append("apply_origin = 'self'")
-        if pipeline_status == "applied":
-            updates.append("submitted_resume_id = COALESCE(submitted_resume_id, base_resume_id)")
-            updates.append("submitted_resume_path = COALESCE(submitted_resume_path, resume_path)")
         if pipeline_status == "queued":
             updates.append("manual_requested = 1")
             updates.append("manual_requested_at = ?")
@@ -2715,6 +2714,7 @@ def mark_applied_manually(
     connection: sqlite3.Connection,
     job_id: int,
     *,
+    resume_id: int | None = None,
     detail: str | None = None,
 ) -> dict[str, Any] | None:
     """Record an application the candidate submitted outside the browser agent."""
@@ -2728,6 +2728,11 @@ def mark_applied_manually(
         raise ValueError(
             "The browser agent is applying to this listing right now; wait for it to finish"
         )
+    selected_resume = None
+    if resume_id is not None:
+        selected_resume = get_resume(connection, resume_id)
+        if selected_resume is None or not selected_resume.get("is_active"):
+            raise ValueError("Choose an active resume that is still on file")
     now = utc_now()
     cursor = connection.execute(
         """
@@ -2735,10 +2740,17 @@ def mark_applied_manually(
                         apply_origin = 'self', apply_error = NULL,
                         apply_reason_code = NULL, manual_requested = 0,
                         submission_requested = 0, human_control_returned = 0,
+                        submitted_resume_id = ?, submitted_resume_path = ?,
                         worker_id = NULL, updated_at = ?
         WHERE id = ? AND applied_at IS NULL AND pipeline_status != 'applying'
         """,
-        (now, now, job_id),
+        (
+            now,
+            int(selected_resume["id"]) if selected_resume is not None else None,
+            str(selected_resume["pdf_path"]) if selected_resume is not None else None,
+            now,
+            job_id,
+        ),
     )
     if not cursor.rowcount:
         connection.rollback()
@@ -2751,12 +2763,13 @@ def mark_applied_manually(
         "WHERE job_id = ? AND status = 'pending'",
         (now, job_id),
     )
-    add_event(
-        connection,
-        job_id,
-        "applied_manually",
-        detail or "Recorded as applied by the candidate outside the browser agent",
+    event_detail = detail or "Recorded as applied by the candidate outside the browser agent"
+    event_detail += (
+        f" · Resume: {selected_resume['name']}"
+        if selected_resume is not None
+        else " · Resume not recorded"
     )
+    add_event(connection, job_id, "applied_manually", event_detail)
     connection.commit()
     return get_job(connection, job_id)
 

@@ -35,11 +35,11 @@ from tiaaa.review.client import (
     get_review_client,
 )
 from tiaaa.review.decision import (
-    DECISION_SCHEMA,
     SYSTEM_PROMPT,
     ApplyDecision,
     CompanyReview,
     build_review_prompt,
+    decision_schema_for_resumes,
     parse_company_review,
 )
 from tiaaa.review.posting import fetch_posting
@@ -300,6 +300,9 @@ def review_company(
             "approved_entries": preserved_approvals,
         }
     resume_ids = {item["name"].casefold(): item["id"] for item in resumes}
+    response_schema = decision_schema_for_resumes(
+        [str(item["name"]) for item in resumes]
+    )
     reviews: list[CompanyReview] = []
     spent = int(history.get("used", 0)) + len(preserved_approvals)
     chosen_this_run: list[str] = []
@@ -329,13 +332,27 @@ def review_company(
         payload = client.decide(
             system=SYSTEM_PROMPT,
             prompt=prompt,
-            schema=DECISION_SCHEMA,
+            schema=response_schema,
         )
         review = parse_company_review(
             payload,
             company=company,
             allowed_job_ids={int(item["id"]) for item in batch},
         )
+        missing_resume = [
+            decision.job_id
+            for decision in review.decisions
+            if decision.should_apply
+            and (
+                decision.resume_name.casefold() not in resume_ids
+                or not decision.resume_reason.strip()
+            )
+        ]
+        if missing_resume:
+            raise ValueError(
+                "Claude did not choose and explain an active resume for Apply job(s): "
+                + ", ".join(str(job_id) for job_id in missing_resume)
+            )
         by_id = {int(item["id"]): item for item in batch}
         signature_ids = [int(item["id"]) for item in listings]
         approved = 0
