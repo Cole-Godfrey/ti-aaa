@@ -182,6 +182,65 @@ def test_config_api_stores_write_only_keys_and_web_onboarding_resume(
     assert client.delete("/api/resumes/1").status_code == 409
 
 
+def test_saving_auto_mode_off_stops_only_the_active_automatic_application(
+    tmp_path, profile, settings
+) -> None:
+    paths = AppPaths(tmp_path)
+    settings["automation"]["auto_apply_new"] = True
+    save_settings(settings, paths)
+    connection = init_db(paths.database)
+    source = SOURCE_DOCUMENTS[0]
+    ingest_listings(
+        connection,
+        source,
+        [
+            InternshipListing(
+                company="Auto",
+                role="Software Intern",
+                location="Remote",
+                application_url="https://jobs.test/auto-stop",
+                source_key=source.key,
+                source_label=source.label,
+                source_repo_url=source.repo_url,
+                source_path=source.path,
+            ),
+            InternshipListing(
+                company="Manual",
+                role="Data Intern",
+                location="Remote",
+                application_url="https://jobs.test/manual-continue",
+                source_key=source.key,
+                source_label=source.label,
+                source_repo_url=source.repo_url,
+                source_path=source.path,
+            ),
+        ],
+        profile=profile,
+        settings=settings,
+    )
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'applying', worker_id = 'worker-0', "
+        "apply_origin = 'auto' WHERE id = 1"
+    )
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'applying', worker_id = 'worker-1', "
+        "apply_origin = 'manual', manual_requested = 1 WHERE id = 2"
+    )
+    connection.commit()
+    client = TestClient(create_app(paths.database, paths=paths))
+    saved = client.get("/api/config").json()["settings"]
+    saved["automation"]["auto_apply_new"] = False
+
+    response = client.put("/api/config", json={"settings": saved})
+
+    assert response.status_code == 200
+    assert response.json()["settings"]["automation"]["auto_apply_new"] is False
+    assert response.json()["auto_applications_stopping"] == 1
+    assert get_job(connection, 1)["stop_requested"] == 1
+    assert get_job(connection, 2)["stop_requested"] == 0
+    assert get_job(connection, 2)["manual_requested"] == 1
+
+
 def test_dashboard_visit_reports_applications_since_the_prior_visit(
     tmp_path, profile, settings
 ) -> None:

@@ -50,6 +50,7 @@ from tiaaa.database import (
     resume_application_for_submission,
     retry_manual_application,
     reviewable_listings,
+    stop_active_auto_applications,
     store_agent_inputs,
     update_tracker,
     update_worker_state,
@@ -1307,6 +1308,54 @@ def test_stop_flags_a_running_agent_and_survives_a_service_restart(
     assert stopped["apply_reason_code"] == "cancelled"
     assert stopped["stop_requested"] == 0
     assert claimable_application_count(connection, max_attempts=3) == 0
+    close_connection(path)
+
+
+def test_disabling_auto_mode_stops_only_an_active_automatic_application(
+    tmp_path, profile, settings
+) -> None:
+    path = tmp_path / "stop-auto-running.db"
+    connection = init_db(path)
+    source = SOURCE_DOCUMENTS[0]
+    ingest_listings(
+        connection,
+        source,
+        [
+            make_listing(source, "Auto", "Software Intern", "https://jobs.test/auto"),
+            make_listing(source, "Manual", "Data Intern", "https://jobs.test/manual"),
+            make_listing(source, "Ready", "ML Intern", "https://jobs.test/ready"),
+        ],
+        profile=profile,
+        settings=settings,
+    )
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'applying', worker_id = 'worker-0', "
+        "apply_origin = 'auto' WHERE id = 1"
+    )
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'applying', worker_id = 'worker-1', "
+        "apply_origin = 'manual', manual_requested = 1 WHERE id = 2"
+    )
+    connection.execute(
+        "UPDATE jobs SET pipeline_status = 'ready', apply_origin = 'auto' WHERE id = 3"
+    )
+    connection.commit()
+
+    stopped = stop_active_auto_applications(connection)
+
+    assert stopped == 1
+    assert get_job(connection, 1)["stop_requested"] == 1
+    assert get_job(connection, 2)["stop_requested"] == 0
+    assert get_job(connection, 2)["manual_requested"] == 1
+    assert get_job(connection, 3)["pipeline_status"] == "ready"
+    assert get_job(connection, 3)["stop_requested"] == 0
+    event = connection.execute(
+        "SELECT event_type, detail FROM events WHERE job_id = 1 ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert (event["event_type"], event["detail"]) == (
+        "stop_requested",
+        "Auto mode turned off",
+    )
     close_connection(path)
 
 

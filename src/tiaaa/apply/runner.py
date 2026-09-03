@@ -27,7 +27,7 @@ from tiaaa.apply.prompt import (
     build_prompt,
     build_submission_prompt,
 )
-from tiaaa.config import AppPaths
+from tiaaa.config import AppPaths, load_settings
 from tiaaa.database import (
     agent_stop_requested,
     answered_agent_inputs,
@@ -1062,12 +1062,20 @@ def _wait_for_human_control_return(
         time.sleep(max(0.01, min(float(poll_interval), 1.0)))
 
 
-def _stop_check(connection: Any, job_id: int):
-    """Return a cheap poll the live session uses to notice a dashboard stop."""
+def _stop_check(
+    connection: Any,
+    job_id: int,
+    *,
+    paths: AppPaths | None = None,
+    unattended: bool = False,
+):
+    """Poll explicit stops and the durable authorization for unattended work."""
 
     def requested() -> bool:
         try:
-            return agent_stop_requested(connection, job_id)
+            return agent_stop_requested(connection, job_id) or bool(
+                unattended and paths is not None and not _saved_auto_mode_enabled(paths)
+            )
         except Exception:  # a transient database error must not kill the run
             log.debug("Stop check failed for job %s", job_id, exc_info=True)
             return False
@@ -1081,6 +1089,52 @@ def _agent_input_wait_timeout() -> int:
     except ValueError:
         configured = 1800
     return max(60, min(configured, 86400))
+
+
+def _saved_auto_mode_enabled(paths: AppPaths) -> bool:
+    """Read the durable switch so a running batch sees dashboard changes."""
+
+    try:
+        return bool(load_settings(paths).get("automation", {}).get("auto_apply_new", False))
+    except (OSError, TypeError, ValueError):
+        # Unattended submission fails closed if its authorization cannot be read.
+        return False
+
+
+def _claim_next_job_while_enabled(
+    connection: Any,
+    *,
+    paths: AppPaths,
+    unattended: bool,
+    worker_id: str,
+    max_attempts: int,
+    target_job_id: int | None,
+    profile: dict[str, Any],
+    use_preferences: bool,
+) -> dict[str, Any] | None:
+    """Claim a job only while the saved Auto mode switch still authorizes it."""
+
+    if unattended and not _saved_auto_mode_enabled(paths):
+        return None
+    job = claim_next_job(
+        connection,
+        worker_id=worker_id,
+        max_attempts=max_attempts,
+        target_job_id=target_job_id,
+        profile=profile,
+        use_preferences=use_preferences,
+    )
+    # Close the narrow race where the setting is saved after the first check but
+    # before the database claim. No employer page has been opened at this point.
+    if job is not None and unattended and not _saved_auto_mode_enabled(paths):
+        release_claim(
+            connection,
+            int(job["id"]),
+            "Auto mode turned off before browser work began",
+            clear_stop_requested=True,
+        )
+        return None
+    return job
 
 
 def _worker(
@@ -1143,8 +1197,10 @@ def _worker(
             screenshot_path=str(preview_path.resolve()),
         )
         for _ in range(quota):
-            job = claim_next_job(
+            job = _claim_next_job_while_enabled(
                 connection,
+                paths=paths,
+                unattended=unattended,
                 worker_id=worker_name,
                 max_attempts=int(automation.get("max_attempts", 3)),
                 target_job_id=target_job_id,
@@ -1164,7 +1220,12 @@ def _worker(
                 screenshot_path=str(preview_path.resolve()),
             )
             agent_session: _ApplicationAgentSession | None = None
-            stop_requested = _stop_check(connection, int(job["id"]))
+            stop_requested = _stop_check(
+                connection,
+                int(job["id"]),
+                paths=paths,
+                unattended=unattended,
+            )
             try:
                 agent_session = _ApplicationAgentSession(
                     job=job,

@@ -23,6 +23,8 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 - manually recorded applications no longer silently inherit the resume prepared by the agent; the
   submitted resume is the one the user chooses, or is explicitly left unrecorded
+- turning Auto mode off now stops an in-flight automatic application and prevents its already-running
+  batch from claiming another job; explicit manual Apply requests are left alone
 
 ## [0.8.0] - 2026-09-01
 

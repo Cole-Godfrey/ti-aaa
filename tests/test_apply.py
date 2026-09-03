@@ -763,6 +763,83 @@ def test_empty_application_queue_does_not_require_browser_tools(
     assert totals == {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
 
 
+def test_auto_worker_does_not_claim_when_saved_auto_mode_is_off(
+    tmp_path, profile, monkeypatch
+) -> None:
+    monkeypatch.setattr(runner, "_saved_auto_mode_enabled", lambda _paths: False)
+    monkeypatch.setattr(
+        runner,
+        "claim_next_job",
+        lambda *_args, **_kwargs: pytest.fail("a disabled auto worker claimed a job"),
+    )
+
+    job = runner._claim_next_job_while_enabled(
+        object(),
+        paths=AppPaths(tmp_path),
+        unattended=True,
+        worker_id="worker-0",
+        max_attempts=3,
+        target_job_id=None,
+        profile=profile,
+        use_preferences=False,
+    )
+
+    assert job is None
+
+
+def test_live_auto_stop_check_notices_when_the_saved_switch_turns_off(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(runner, "agent_stop_requested", lambda *_args: False)
+    monkeypatch.setattr(runner, "_saved_auto_mode_enabled", lambda _paths: False)
+
+    automatic = runner._stop_check(
+        object(), 42, paths=AppPaths(tmp_path), unattended=True
+    )
+    manual = runner._stop_check(
+        object(), 42, paths=AppPaths(tmp_path), unattended=False
+    )
+
+    assert automatic() is True
+    assert manual() is False
+
+
+def test_auto_worker_releases_a_claim_if_mode_turns_off_during_the_claim(
+    tmp_path, profile, monkeypatch
+) -> None:
+    saved_states = iter([True, False])
+    released: list[tuple[int, str, bool]] = []
+    monkeypatch.setattr(
+        runner,
+        "_saved_auto_mode_enabled",
+        lambda _paths: next(saved_states),
+    )
+    monkeypatch.setattr(
+        runner, "claim_next_job", lambda *_args, **_kwargs: {"id": 42}
+    )
+
+    def fake_release(
+        _connection, job_id, detail="released", *, clear_stop_requested=False
+    ) -> None:
+        released.append((job_id, detail, clear_stop_requested))
+
+    monkeypatch.setattr(runner, "release_claim", fake_release)
+
+    job = runner._claim_next_job_while_enabled(
+        object(),
+        paths=AppPaths(tmp_path),
+        unattended=True,
+        worker_id="worker-0",
+        max_attempts=3,
+        target_job_id=None,
+        profile=profile,
+        use_preferences=False,
+    )
+
+    assert job is None
+    assert released == [(42, "Auto mode turned off before browser work began", True)]
+
+
 def test_repository_batch_uses_one_serial_worker(
     tmp_path, profile, settings, monkeypatch
 ) -> None:

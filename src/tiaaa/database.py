@@ -2645,6 +2645,46 @@ def request_agent_stop(
     return get_job(connection, job_id)
 
 
+def stop_active_auto_applications(
+    connection: sqlite3.Connection,
+    *,
+    detail: str = "Auto mode turned off",
+) -> int:
+    """Ask only active unattended applications to stop.
+
+    Prepared automatic jobs remain ready in case Auto mode is enabled again.
+    Explicit manual requests are never touched by this setting change.
+    """
+
+    rows = connection.execute(
+        """
+        SELECT id FROM jobs
+        WHERE apply_origin = 'auto' AND pipeline_status = 'applying'
+          AND applied_at IS NULL
+        ORDER BY id
+        """
+    ).fetchall()
+    if not rows:
+        return 0
+    now = utc_now()
+    stopped = 0
+    for row in rows:
+        job_id = int(row["id"])
+        cursor = connection.execute(
+            """
+            UPDATE jobs SET stop_requested = 1, updated_at = ?
+            WHERE id = ? AND apply_origin = 'auto'
+              AND pipeline_status = 'applying' AND applied_at IS NULL
+            """,
+            (now, job_id),
+        )
+        if cursor.rowcount:
+            add_event(connection, job_id, "stop_requested", detail)
+            stopped += 1
+    connection.commit()
+    return stopped
+
+
 def agent_stop_requested(connection: sqlite3.Connection, job_id: int) -> bool:
     """Return whether the candidate asked this application attempt to stop."""
 
@@ -3386,14 +3426,22 @@ def close_live_checkpoint(
     connection.commit()
 
 
-def release_claim(connection: sqlite3.Connection, job_id: int, detail: str = "released") -> None:
+def release_claim(
+    connection: sqlite3.Connection,
+    job_id: int,
+    detail: str = "released",
+    *,
+    clear_stop_requested: bool = False,
+) -> None:
     connection.execute(
         """
         UPDATE jobs SET pipeline_status = 'ready', worker_id = NULL,
-                        human_control_returned = 0, updated_at = ?
+                        human_control_returned = 0,
+                        stop_requested = CASE WHEN ? THEN 0 ELSE stop_requested END,
+                        updated_at = ?
         WHERE id = ? AND pipeline_status = 'applying'
         """,
-        (utc_now(), job_id),
+        (int(clear_stop_requested), utc_now(), job_id),
     )
     add_event(connection, job_id, "claim_released", detail)
     connection.commit()

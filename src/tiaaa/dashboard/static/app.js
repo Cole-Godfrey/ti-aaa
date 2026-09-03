@@ -1510,6 +1510,8 @@ function handleAutoModeToggle() {
   renderAutoMode();
   if (checked("autoMode") && !wasEnabled) {
     showToast("Auto mode is on. Browser alerts are available below.");
+  } else if (!checked("autoMode") && wasEnabled) {
+    showToast("Save all settings to stop automatic applications.");
   }
 }
 
@@ -1665,9 +1667,12 @@ async function saveConfiguration(event) {
   if (button) button.disabled = true;
   try {
     const config = await api("/api/config", { method: "PUT", body: JSON.stringify(configurationPayload()) });
+    const stopping = Number(config.auto_applications_stopping || 0);
     populateConfiguration(config);
     await refreshClaudeAuth();
-    showToast("Settings saved; the background agent has been notified");
+    showToast(stopping
+      ? `Auto mode is off; stopping ${stopping} active automatic application${stopping === 1 ? "" : "s"}`
+      : "Settings saved; the background agent has been notified");
   } catch (error) { showToast(error.message, true); }
   finally { if (button) button.disabled = false; }
 }

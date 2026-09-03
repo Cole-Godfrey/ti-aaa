@@ -68,6 +68,7 @@ from tiaaa.database import (
     set_app_state,
     source_baseline_complete,
     source_status,
+    stop_active_auto_applications,
     update_tracker,
 )
 from tiaaa.resumes import MAX_RESUME_BYTES, store_resume
@@ -460,11 +461,18 @@ def create_app(
 
     @app.put("/api/config")
     def put_configuration(update: ConfigurationUpdate) -> dict[str, Any]:
+        auto_applications_stopping = 0
         try:
             if update.profile is not None:
                 save_profile(update.profile, paths)
             if update.settings is not None:
                 save_settings(update.settings, paths)
+                if not bool(
+                    load_settings(paths).get("automation", {}).get("auto_apply_new", False)
+                ):
+                    auto_applications_stopping = stop_active_auto_applications(
+                        connection()
+                    )
             if update.secrets or update.clear_secrets:
                 update_secrets(
                     update.secrets,
@@ -493,7 +501,9 @@ def create_app(
                 background_service.trigger()
             else:
                 background_service.nudge()
-        return configuration()
+        result = configuration()
+        result["auto_applications_stopping"] = auto_applications_stopping
+        return result
 
     @app.get("/api/stats")
     def stats() -> dict[str, Any]:

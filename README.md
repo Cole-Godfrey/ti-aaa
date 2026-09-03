@@ -101,6 +101,8 @@ were explicit in it; **low** means the employer blocked the read and only list m
 - Automatic apply considers only jobs that arrive after the baseline.
 - Auto mode applies only to listings the review answered **Apply**. It never applies to an unreviewed
   listing.
+- Saving Auto mode as off stops an automatic application already in progress and prevents the same
+  batch from claiming another job. Jobs you explicitly selected with **Apply** remain manual requests.
 - A manual **Apply** action ignores the decision, so you can always overrule a **No**.
 - Cheap hard gates run before the review, so an obviously ineligible listing never costs a model call.
   The degree gate reads both the job title and the source list's advanced-degree marker, so a
