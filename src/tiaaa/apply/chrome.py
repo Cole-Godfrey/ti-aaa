@@ -161,7 +161,6 @@ def launch_chrome(
         "--disable-session-crashed-bubble",
         "--disable-notifications",
         "--deny-permission-prompts",
-        "--disable-popup-blocking",
         "--window-size=1280,900",
         "about:blank",
     ]

@@ -47,9 +47,22 @@ automation:
   max_applications_per_cycle: 5
   max_applications_per_day: 25
   max_attempts: 3
+  provider: codex
+  codex_model: ""  # Uses the installed Codex default when empty.
+  claude_fallback: true
+  human_checkpoints: true
   claude_model: sonnet
   headless: false
   timeout_seconds: 600
+
+email_verification:
+  enabled: false
+  imap_host: imap.gmail.com
+  username: ""  # Defaults to the candidate profile email.
+  timeout_seconds: 90
+  # Optional explicit sender aliases keyed by the original application hostname.
+  # sender_domains: {careers.example.com: [mailer.example.org]}
+  sender_domains: {}
 
 dashboard:
   host: 127.0.0.1

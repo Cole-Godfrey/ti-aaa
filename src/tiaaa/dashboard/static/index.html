@@ -297,7 +297,9 @@
               <label>Per-cycle cap<input id="cycleCap" type="number" min="1" max="50"></label>
               <label>Maximum attempts<input id="maxAttempts" type="number" min="1" max="10"></label>
               <label>Worker timeout (seconds)<input id="workerTimeout" type="number" min="60" max="3600"></label>
-              <label>Claude model<input id="claudeModel" placeholder="sonnet"></label>
+              <label>Primary agent<select id="agentProvider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+              <label>Codex model<input id="codexModel" placeholder="Codex default"></label>
+              <label>Claude backup model<input id="claudeModel" placeholder="sonnet"></label>
             </div>
             <div class="toggle-list">
               <label class="manual-submit-toggle"><input id="manualAutoSubmit" type="checkbox"><span><b>Auto-submit manually selected applications</b><small>After you choose Apply, submit the completed form without a separate final confirmation. Questions and one-time codes still pause in Agent.</small></span></label>
@@ -305,6 +307,8 @@
               <label><input id="autoPrepare" type="checkbox"><span>Prepare new matching roles automatically</span></label>
               <label><input id="useLlm" type="checkbox"><span>Use an LLM for scores and cover letters</span></label>
               <label><input id="generateCoverLetters" type="checkbox"><span>Generate factual cover letters when LLM use is on</span></label>
+              <label><input id="claudeFallback" type="checkbox" checked><span>Use Claude when Codex reaches its usage limit</span></label>
+              <label><input id="humanCheckpoints" type="checkbox" checked><span>Keep blocked forms open for help in Agent (up to 30 minutes)</span></label>
               <label><input id="headless" type="checkbox"><span>Run browser windows headlessly</span></label>
             </div>
             <p class="fine-print">This setting affects only jobs you explicitly select. Auto mode has its own unattended submission behavior above.</p>
@@ -312,6 +316,7 @@
           <article class="panel settings-card">
             <p class="kicker">COMMON ANSWERS</p><h2>Screening defaults</h2>
             <div class="field-grid">
+              <label>Class standing<select id="currentYearMode"><option value="graduation">Update from graduation date</option><option value="manual">Use my current-year answer</option></select></label>
               <label>Available start date<input id="availableStartDate" placeholder="May 2027"></label>
               <label>How you heard<input id="howHeard"></label>
             </div>
@@ -331,7 +336,11 @@
             </div>
           </article>
           <article class="panel settings-card claude-card">
-            <p class="kicker">BROWSER AGENT</p><h2>Claude Code connection</h2>
+            <p class="kicker">BROWSER AGENT</p><h2>Codex connection</h2>
+            <p id="codexAuthState">Checking Codex connection…</p>
+            <p class="fine-print">Install Codex CLI and run <code>codex login</code> once. TI-AAA uses that login for applications and reviews.</p>
+            <button id="refreshCodex" type="button" class="button ghost">Refresh connection</button>
+            <h2>Claude backup connection</h2>
             <div class="auth-status-line"><span id="claudeAuthDot" class="auth-dot"></span><strong id="claudeAuthState">Checking connection…</strong></div>
             <p id="claudeAuthDetail" class="fine-print">Use the Claude account included with a Pro or Max subscription. No API key or separate API billing is required.</p>
             <p class="fine-print"><strong>Compatibility note:</strong> Anthropic may change or discontinue subscription login for this workflow. An Anthropic API key is the fallback.</p>
@@ -342,6 +351,16 @@
             <div id="claudeCodePanel" class="auth-code-panel hidden">
               <p><a id="claudeLoginLink" target="_blank" rel="noopener noreferrer">Open Claude sign-in</a>, finish signing in, then paste its one-time code here.</p>
               <div class="auth-code-row"><input id="claudeLoginCode" autocomplete="one-time-code" placeholder="Paste one-time code"><button id="completeClaude" class="button terracotta" type="button">Complete connection</button></div>
+            </div>
+          </article>
+          <article class="panel settings-card">
+            <h2>Email verification</h2>
+            <p class="fine-print">Read fresh application codes from your inbox. For Gmail, use an app password with two-step verification enabled. Saved locally; never sent to the browser agent.</p>
+            <div class="toggle-list"><label><input id="emailVerification" type="checkbox"><span>Retrieve email verification codes automatically</span></label></div>
+            <div class="field-grid">
+              <label>IMAP server<input id="emailImapHost" placeholder="imap.gmail.com"></label>
+              <label>Mailbox email<input id="emailUsername" type="email" placeholder="Uses profile email if empty"></label>
+              <label>App password<input id="emailAppPassword" type="password" autocomplete="new-password" placeholder="Leave empty to keep saved password"></label>
             </div>
           </article>
           <div class="settings-save"><p id="settingsNote">Changes affect the next background cycle.</p><button class="button terracotta" type="submit">Save all settings</button></div>
@@ -395,6 +414,8 @@
         <section class="onboard-step" data-step="3">
           <p class="kicker">STEP 3 OF 3</p><h2>Connect the browser agent</h2>
           <div class="onboard-auth">
+            <strong id="onboardCodexState">Checking Codex connection…</strong>
+            <p>Codex is the primary agent. Install Codex CLI and run <code>codex login</code> once. Claude below is an optional usage-limit backup.</p>
             <div class="auth-status-line"><span id="onboardClaudeAuthDot" class="auth-dot"></span><strong id="onboardClaudeAuthState">Claude account not connected</strong></div>
             <p id="onboardClaudeAuthDetail" class="fine-print">Recommended: sign in with the Claude Pro or Max account you already use for Claude Code. No Anthropic API key is needed.</p>
             <p class="fine-print"><strong>Compatibility note:</strong> Anthropic may change or discontinue subscription login for this workflow. An Anthropic API key is the fallback.</p>
@@ -405,7 +426,7 @@
             </div>
           </div>
           <div class="intake-note"><strong>Manual confirmation by default</strong><p>A manual application fills the form and keeps it open for final confirmation. You can enable auto-submit for explicitly selected jobs later in Settings. Auto mode also starts off.</p></div>
-          <p class="fine-print">Auto mode does not wait for answers. If a required personal fact is missing, it stops that application and reports the reason when you return.</p>
+          <p class="fine-print">Auto mode can retrieve configured email codes and keep blocked forms open in Agent. Missing required facts are reported for correction in Settings.</p>
           <div class="step-actions"><button class="button ghost prev-step" type="button">Back</button><button id="finishOnboarding" class="button terracotta" type="button">Finish setup</button></div>
         </section>
       </div>

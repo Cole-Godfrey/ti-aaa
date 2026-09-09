@@ -17,7 +17,12 @@ import platform
 import re
 import shutil
 import subprocess
+import tempfile
+import time
+from pathlib import Path
 from typing import Any, Protocol
+
+from tiaaa.codex import codex_command, codex_events, codex_final, codex_usage_limited, run_codex
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +134,7 @@ class ClaudeCodeReviewClient:
         self.timeout = timeout
         self.cwd = cwd
         self.environment = os.environ.copy()
+        self.environment.pop("TIAAA_EMAIL_APP_PASSWORD", None)
         self.environment.pop("CLAUDECODE", None)
         self.environment.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
@@ -184,10 +190,10 @@ class ClaudeCodeReviewClient:
             detail = (completed.stderr or completed.stdout or "").strip()[-300:]
             raise RuntimeError(f"Claude Code exited with status {completed.returncode}: {detail}")
         envelope = _json_object(completed.stdout)
+        if envelope.get("is_error") or str(envelope.get("api_error_status")) == "429":
+            raise RuntimeError(str(envelope.get("result") or "Claude Code reported an error")[:300])
         if isinstance(envelope.get("structured_output"), dict):
             return dict(envelope["structured_output"])
-        if envelope.get("is_error"):
-            raise RuntimeError(str(envelope.get("result") or "Claude Code reported an error")[:300])
         result = envelope.get("result")
         if isinstance(result, dict):
             return result
@@ -202,7 +208,70 @@ class ClaudeCodeReviewClient:
         return None
 
 
+class CodexReviewClient:
+    """Codex first, with a lazy Claude fallback only for provider usage limits."""
+
+    name = "codex"
+
+    def __init__(
+        self, *, model: str = "", claude_model: str = DEFAULT_MODEL, fallback: bool = True, timeout: int = 600
+    ) -> None:
+        if not shutil.which("codex"):
+            raise ReviewUnavailable("Install Codex CLI and run codex login before reviewing")
+        self.model = model
+        self.claude_model = claude_model
+        self.fallback = fallback
+        self.timeout = timeout
+        self.retry_at = 0.0
+        self.backup: ReviewClient | None = None
+
+    def decide(self, *, system: str, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+        if time.monotonic() >= self.retry_at:
+            with tempfile.TemporaryDirectory(prefix="tiaaa-review-") as directory:
+                root = Path(directory)
+                schema_path = root / "schema.json"
+                schema_path.write_text(json.dumps(schema), encoding="utf-8")
+                output, code = run_codex(
+                    codex_command(schema_path=schema_path, model=self.model),
+                    system + "\n\n" + prompt,
+                    cwd=root,
+                    timeout=self.timeout,
+                )
+            if codex_usage_limited(output) and self.fallback:
+                self.retry_at = time.monotonic() + 900
+            elif code or any(event.get("type") == "turn.failed" for event in codex_events(output)):
+                raise RuntimeError("Codex review failed; check Codex login and usage")
+            else:
+                return _json_object(codex_final(output))
+        if self.backup is None:
+            self.backup = _get_claude_review_client(model=self.claude_model, timeout=self.timeout)
+        return self.backup.decide(system=system, prompt=prompt, schema=schema)
+
+    def close(self) -> None:
+        if self.backup is not None:
+            self.backup.close()
+
+
 def get_review_client(
+    *,
+    model: str = DEFAULT_MODEL,
+    effort: str = "high",
+    timeout: int = 600,
+    cwd: str | None = None,
+    provider: str = "codex",
+    codex_model: str = "",
+    claude_fallback: bool = True,
+) -> ReviewClient:
+    if provider == "codex":
+        return CodexReviewClient(
+            model=codex_model, claude_model=model, fallback=claude_fallback, timeout=timeout
+        )
+    if provider != "claude":
+        raise ReviewUnavailable("Review provider must be codex or claude")
+    return _get_claude_review_client(model=model, effort=effort, timeout=timeout, cwd=cwd)
+
+
+def _get_claude_review_client(
     *,
     model: str = DEFAULT_MODEL,
     effort: str = "high",

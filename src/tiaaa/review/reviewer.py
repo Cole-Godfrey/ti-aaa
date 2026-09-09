@@ -27,6 +27,7 @@ from tiaaa.database import (
     record_review_error,
     reviewable_listings,
 )
+from tiaaa.education import education_facts
 from tiaaa.resumes import import_legacy_resume
 from tiaaa.review.client import (
     DEFAULT_MODEL,
@@ -121,6 +122,7 @@ def _load_resumes(connection: Any, *, limit: int = 6) -> list[dict[str, Any]]:
 def _profile_digest(profile: dict[str, Any]) -> dict[str, Any]:
     """Send the facts a hiring decision turns on, not the whole address book."""
 
+    profile = education_facts(profile)
     education = profile.get("education", {})
     authorization = profile.get("work_authorization", {})
     experience = profile.get("experience", {})
@@ -135,6 +137,8 @@ def _profile_digest(profile: dict[str, Any]) -> dict[str, Any]:
                 "major",
                 "minor",
                 "current_year",
+                "current_year_as_of",
+                "current_year_basis",
                 "graduation_date",
                 "expected_graduation",
                 "gpa",
@@ -147,6 +151,7 @@ def _profile_digest(profile: dict[str, Any]) -> dict[str, Any]:
                 "us_citizen",
                 "requires_sponsorship",
                 "work_authorized",
+                "legally_authorized_to_work_us",
                 "visa_status",
                 "security_clearance",
             )
@@ -178,9 +183,14 @@ def _signature(
 ) -> str:
     """Fingerprint every input a decision depended on, so staleness is detectable."""
 
+    stable_profile = dict(profile_digest)
+    stable_profile["education"] = {
+        key: value for key, value in profile_digest.get("education", {}).items()
+        if key != "current_year_as_of"
+    }
     payload = json.dumps(
         {
-            "profile": profile_digest,
+            "profile": stable_profile,
             "resumes": sorted(
                 (item["id"], hashlib.sha256(item["text"].encode()).hexdigest()[:16])
                 for item in resumes
@@ -451,7 +461,10 @@ def review_jobs(
     max_age_days = max(
         0, int(review_settings.get("max_listing_age_days", DEFAULT_MAX_LISTING_AGE_DAYS))
     )
-    model = str(review_settings.get("model") or DEFAULT_MODEL)
+    claude_model = str(review_settings.get("model") or DEFAULT_MODEL)
+    automation = settings.get("automation", {})
+    model = (f"codex:{automation.get('codex_model') or 'default'};backup:{claude_model}"
+             if automation.get("provider", "codex") == "codex" else claude_model)
     fetch_enabled = bool(review_settings.get("fetch_postings", True))
     timeout = float(review_settings.get("posting_timeout_seconds", 25))
 
@@ -552,7 +565,12 @@ def review_jobs(
 
     owned_client = client is None
     try:
-        client = client or get_review_client(model=model, cwd=str(paths.root))
+        client = client or get_review_client(
+            model=claude_model, cwd=str(paths.root),
+            provider=str(settings.get("automation", {}).get("provider", "codex")),
+            codex_model=str(settings.get("automation", {}).get("codex_model", "")),
+            claude_fallback=bool(settings.get("automation", {}).get("claude_fallback", True)),
+        )
     except ReviewUnavailable as exc:
         log.warning("Apply/skip review is unavailable: %s", exc)
         return {

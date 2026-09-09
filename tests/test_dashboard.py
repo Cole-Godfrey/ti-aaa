@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import io
 import threading
 
@@ -428,7 +429,14 @@ def test_captcha_checkpoint_relays_input_and_returns_the_same_browser_to_agent(
     preview_frame_hub.clear()
 
 
-def test_latest_jobs_detail_and_manual_apply_action(tmp_path, profile, settings) -> None:
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_latest_jobs_detail_and_manual_apply_action(
+    tmp_path, profile, settings, monkeypatch, provider
+) -> None:
+    settings["automation"]["provider"] = provider
+    save_settings(settings, AppPaths(tmp_path))
+    monkeypatch.setattr(importlib.import_module("tiaaa.dashboard.app"), "codex_status",
+                        lambda: {"installed": True, "logged_in": True})
     paths = AppPaths(tmp_path)
     connection = init_db(paths.database)
     source = SOURCE_DOCUMENTS[0]
@@ -677,9 +685,14 @@ def test_agent_page_confirms_submission_on_the_live_completed_form(
     assert get_job(connection, 1)["submission_requested"] == 1
 
 
+@pytest.mark.parametrize("provider", ["codex", "claude"])
 def test_applications_page_retries_a_confirm_in_agent_checkpoint(
-    tmp_path, profile, settings
+    tmp_path, profile, settings, monkeypatch, provider
 ) -> None:
+    settings["automation"]["provider"] = provider
+    save_settings(settings, AppPaths(tmp_path))
+    monkeypatch.setattr(importlib.import_module("tiaaa.dashboard.app"), "codex_status",
+                        lambda: {"installed": True, "logged_in": True})
     paths = AppPaths(tmp_path)
     connection = init_db(paths.database)
     source = SOURCE_DOCUMENTS[0]
@@ -1120,3 +1133,20 @@ def test_web_settings_retire_the_fit_limit_and_clamp_the_review_budget(tmp_path)
     assert response.json()["settings"]["automation"]["web_push_notifications"] is True
     assert "minimum_fit_score" not in response.json()["settings"]
     assert "notifications" not in response.json()["settings"]
+
+
+def test_codex_auth_status_and_new_settings(tmp_path, monkeypatch):
+    module = importlib.import_module('tiaaa.dashboard.app')
+    monkeypatch.setattr(module, 'codex_status', lambda: {'installed': True, 'logged_in': True})
+    paths = AppPaths(tmp_path)
+    client = TestClient(create_app(paths.database, paths=paths))
+    assert client.get('/api/codex-auth').json() == {'installed': True, 'logged_in': True}
+    config = client.get('/api/config').json()
+    assert config['settings']['automation']['provider'] == 'codex'
+    assert config['settings']['automation']['claude_fallback'] is True
+    assert config['settings']['email_verification']['enabled'] is False
+    response = client.put('/api/config', json={'settings': {'automation': {'provider': 'unsupported'}}})
+    assert response.status_code == 422
+    html = client.get('/').text
+    for control in ('agentProvider', 'codexModel', 'claudeFallback', 'emailAppPassword', 'currentYearMode'):
+        assert f'id="{control}"' in html

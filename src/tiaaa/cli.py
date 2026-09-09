@@ -703,8 +703,10 @@ def doctor() -> None:
             "3 repositories / 5 active documents",
         )
     )
+    codex = shutil.which("codex")
+    checks.append(("Codex", codex is not None, codex or "run codex login after installing Codex CLI"))
     claude = shutil.which("claude")
-    checks.append(("Claude Code", claude is not None, claude or "optional: needed for auto-apply"))
+    checks.append(("Claude Code", claude is not None, claude or "optional: Codex usage-limit backup"))
     npx = shutil.which("npx")
     checks.append(("Node.js / npx", npx is not None, npx or "optional: needed for Playwright MCP"))
     try:

@@ -84,9 +84,20 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "max_applications_per_cycle": 5,
         "max_applications_per_day": 25,
         "max_attempts": 3,
+        "provider": "codex",
+        "codex_model": "",
+        "claude_fallback": True,
+        "human_checkpoints": True,
         "claude_model": "sonnet",
         "headless": False,
         "timeout_seconds": 600,
+    },
+    "email_verification": {
+        "enabled": False,
+        "imap_host": "imap.gmail.com",
+        "username": "",
+        "timeout_seconds": 90,
+        "sender_domains": {},
     },
     "dashboard": {"host": "127.0.0.1", "port": 8787},
 }
@@ -292,6 +303,14 @@ def save_settings(settings: dict[str, Any], paths: AppPaths | None = None) -> Pa
     automation["manual_auto_submit"] = bool(
         automation.get("manual_auto_submit", False)
     )
+    if automation.get("provider") not in {"codex", "claude"}:
+        raise ValueError("automation.provider must be codex or claude")
+    for flag in ("claude_fallback", "human_checkpoints"):
+        automation[flag] = bool(automation.get(flag, True))
+    verification = merged["email_verification"]
+    verification["timeout_seconds"] = max(1, min(180, int(verification.get("timeout_seconds", 90))))
+    if not isinstance(verification.get("sender_domains"), dict):
+        raise ValueError("email_verification.sender_domains must map portal hosts to sender domain lists")
     automation["workers"] = max(1, min(8, int(automation.get("workers", 1))))
     automation["max_applications_per_cycle"] = max(
         1, min(50, int(automation.get("max_applications_per_cycle", 5)))
@@ -316,6 +335,7 @@ SECRET_NAMES = (
     "GEMINI_API_KEY",
     "OPENAI_API_KEY",
     "GITHUB_TOKEN",
+    "TIAAA_EMAIL_APP_PASSWORD",
 )
 
 

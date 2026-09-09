@@ -1,5 +1,6 @@
 FROM node:22-bookworm-slim
 
+ARG CODEX_VERSION=0.153.4
 ARG CLAUDE_CODE_VERSION=2.1.226
 ARG PLAYWRIGHT_MCP_VERSION=0.0.79
 
@@ -24,6 +25,7 @@ RUN apt-get update \
         python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global \
+        "@openai/codex@${CODEX_VERSION}" \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
         "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}"
 

@@ -303,7 +303,7 @@ def test_stream_error_and_permission_denial_are_actionable() -> None:
     )
 
     assert _failure_detail(api_error, returncode=0) == (
-        "Claude ended with error during execution (API status 429)"
+        "Model usage limit reached; application receipt was not confirmed"
     )
     assert _failure_detail(denied, returncode=0) == (
         "Claude was denied required browser tool access: browser_navigate"
@@ -441,7 +441,7 @@ def test_prompt_is_truth_constrained_and_stops_before_submit(
     assert "DO NOT click the final Submit button" in prompt
     assert "do not search LinkedIn, Indeed" in prompt
     assert "Always finish with the required structured result object" in prompt
-    assert "Use ToolSearch to load the Playwright browser tools" in prompt
+    assert "If ToolSearch is available" in prompt
     assert "browser_navigation_unavailable" in prompt
     assert "Candidate-supplied answers from an earlier pause" in prompt
     assert '"answer": "Platform"' in prompt
@@ -615,7 +615,7 @@ def test_unattended_prompt_never_requests_input_and_handles_judgment_questions(
     assert "expected compensation" in prompt
     assert "Negotiable or Market rate" in prompt
     assert "return an empty `questions` array" in prompt
-    assert "Never wait for a code in unattended Auto mode" in prompt
+    assert "TI-AAA will try configured email retrieval" in prompt
 
 
 def test_manual_auto_submit_authorizes_only_a_selected_job(

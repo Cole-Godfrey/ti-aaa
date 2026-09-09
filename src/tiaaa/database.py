@@ -76,6 +76,7 @@ _AUTO_TERMINAL_REASON_CODES = {
     "missing_input",
     "sensitive_information",
     "verification_required",
+    "submission_uncertain",
 }
 
 
@@ -3134,7 +3135,7 @@ def mark_apply_result(
         availability_checked_at = now
     elif access_blocked:
         status = "manual_review" if manual_handoff else "failed"
-        availability_status = "manual_only"
+        availability_status = "unknown" if retain_worker else "manual_only"
         availability_detail = detail or "Employer blocks the automated browser"
         availability_checked_at = now
     elif result in {"applied", "review_ready"}:
@@ -3248,7 +3249,9 @@ def live_human_interaction_checkpoint(
         WHERE j.id = ? AND j.pipeline_status = 'manual_review'
           AND j.worker_id = ? AND j.availability_status != 'manual_only'
           AND (w.status = 'captcha'
-               OR (w.status = 'needs_review' AND j.apply_reason_code = 'captcha'))
+               OR (w.status = 'needs_review'
+                   AND j.apply_reason_code IN ('captcha', 'access_blocked', 'verification_required',
+                                               'submission_uncertain')))
           AND NOT EXISTS (
               SELECT 1 FROM agent_inputs ai
               WHERE ai.job_id = j.id AND ai.status = 'pending'

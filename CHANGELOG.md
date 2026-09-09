@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Use Codex for applications and posting reviews, with Claude fallback on model usage limits.
+- Preserve Chrome forms through provider switches, email verification, CAPTCHA, and access-block handoffs.
+- Add opt-in read-only IMAP code retrieval with recipient, sender, age, ambiguity, and reuse checks.
+- Compute class standing from graduation date, respect relocation intent, and avoid exact-major over-filtering.
+- Support employer password-length limits without replacing existing generated credentials.
+- Reject error envelopes that claim success and prevent duplicate submissions after uncertain provider failures.
+- Add Codex and mailbox settings, regression tests, and a local browser integration test.
+- Require patched PDF and test HTTP dependencies; dependency audit passes.
+
+
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]

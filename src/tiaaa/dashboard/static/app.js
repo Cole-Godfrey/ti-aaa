@@ -14,6 +14,7 @@ const state = {
   manualApplicationControl: null,
   onboardingStep: 0,
   claudeAuth: null,
+  codexAuth: null,
   agentInputSignature: null,
   workerSignature: null,
   queueSignature: null,
@@ -126,22 +127,34 @@ function showToast(message, error = false) {
   showToast.timer = setTimeout(() => { toast.className = "toast"; }, 3200);
 }
 
+function agentConnected(provider = state.config?.settings?.automation?.provider || "codex") {
+  return provider === "codex" ? Boolean(state.codexAuth?.logged_in) : Boolean(state.claudeAuth?.logged_in);
+}
+
+async function refreshCodexAuth() {
+  state.codexAuth = await api("/api/codex-auth");
+  const message = state.codexAuth.logged_in
+    ? "Codex connected" : "Run codex login in a terminal, then refresh connection";
+  element("codexAuthState").textContent = message;
+  element("onboardCodexState").textContent = message;
+}
+
 function renderClaudeAuth(auth) {
   state.claudeAuth = auth;
   const connected = Boolean(auth?.logged_in);
   const pending = Boolean(auth?.login_pending);
   const apiKey = auth?.auth_method === "api_key";
   let title = "Claude account not connected";
-  let detail = "Connect a Claude Pro or Max account for browser form filling. You do not need an Anthropic API key.";
+  let detail = "Connect Claude as the optional backup for Codex. You do not need an Anthropic API key.";
   if (!auth?.installed) {
     title = "Claude Code is not installed";
-    detail = "Docker includes Claude Code. Native installs need the Claude Code CLI before browser automation can run.";
+    detail = "Docker includes Claude Code. Native installs need Claude Code only when using the Claude provider or backup.";
   } else if (connected && apiKey) {
     title = "Connected with an API key";
     detail = "Browser automation will use separate Anthropic API billing. Remove ANTHROPIC_API_KEY from the local environment to use your Claude subscription instead.";
   } else if (connected) {
     title = "Claude account connected";
-    detail = "Browser automation will use your saved Claude Code account login; no API key is required.";
+    detail = "When selected, Claude uses your saved account login; no API key is required.";
   } else if (pending) {
     title = "Waiting for your one-time code";
     detail = "Complete the Claude sign-in page, then paste the one-time code below.";
@@ -348,9 +361,9 @@ function renderJobs(jobs) {
 }
 
 async function retryJobApplication(jobId, button) {
-  if (!state.claudeAuth?.logged_in) {
+  if (!agentConnected()) {
     setView("settings");
-    showToast("Connect Claude Code in Settings before retrying the agent", true);
+    showToast("Connect your selected agent in Settings before retrying the agent", true);
     return;
   }
   if (!window.confirm("Retry this application from the beginning?\n\nAny form currently open in Agent will close, and pending checkpoint answers will be cleared.")) return;
@@ -554,9 +567,9 @@ async function loadLatestJobs() {
 }
 
 async function retryTodaysReviews(button) {
-  if (!state.claudeAuth?.logged_in) {
+  if (!agentConnected()) {
     setView("settings");
-    showToast("Connect Claude Code in Settings before retrying reviews", true);
+    showToast("Connect your selected agent in Settings before retrying reviews", true);
     return;
   }
   if (!window.confirm(
@@ -753,11 +766,11 @@ async function requestJobApplication(jobId, button) {
     window.open(selected.application_url, "_blank", "noopener,noreferrer");
     return;
   }
-  if (!state.claudeAuth?.logged_in) {
+  if (!agentConnected()) {
     closeJobDetail();
     closeDecision();
     setView("settings");
-    showToast("Connect Claude Code in Settings before starting the agent", true);
+    showToast("Connect your selected agent in Settings before starting the agent", true);
     return;
   }
   const manualAutoSubmit = Boolean(state.config?.settings?.automation?.manual_auto_submit);
@@ -1555,6 +1568,14 @@ function populateConfiguration(config) {
   setChecked("webPushNotifications", automation.web_push_notifications);
   setValue("dayCap", automation.max_applications_per_day);
   setValue("cycleCap", automation.max_applications_per_cycle); setValue("claudeModel", automation.claude_model);
+  setValue("agentProvider", automation.provider || "codex");
+  setValue("codexModel", automation.codex_model || "");
+  setChecked("claudeFallback", automation.claude_fallback !== false);
+  setChecked("humanCheckpoints", automation.human_checkpoints !== false);
+  setChecked("emailVerification", settings.email_verification?.enabled);
+  setValue("emailImapHost", settings.email_verification?.imap_host || "imap.gmail.com");
+  setValue("emailUsername", settings.email_verification?.username || "");
+  setValue("currentYearMode", education.current_year_mode || "graduation");
   setValue("maxAttempts", automation.max_attempts); setValue("workerTimeout", automation.timeout_seconds);
   setChecked("serviceEnabled", service.enabled); setChecked("autoPrepare", service.auto_prepare);
   setChecked("useLlm", preparation.use_llm);
@@ -1594,7 +1615,7 @@ function configurationPayload() {
   profile.education = profile.education || {};
   Object.assign(profile.education, {
     school: value("school"), degree: value("degree"), major: value("major"),
-    graduation_date: value("graduation"), current_year: value("currentYear"), gpa: value("gpa"),
+    graduation_date: value("graduation"), current_year: value("currentYear"), current_year_mode: value("currentYearMode"), gpa: value("gpa"),
   });
   profile.work_authorization = profile.work_authorization || {};
   Object.assign(profile.work_authorization, {
@@ -1646,6 +1667,8 @@ function configurationPayload() {
   delete settings.automation.auto_apply_eligible_only;
   delete settings.automation.auto_apply_minimum_fit_score;
   Object.assign(settings.automation, {
+    provider: value("agentProvider"), codex_model: value("codexModel"),
+    claude_fallback: checked("claudeFallback"), human_checkpoints: checked("humanCheckpoints"),
     auto_apply_new: checked("autoMode"), headless: checked("headless"),
     manual_auto_submit: checked("manualAutoSubmit"),
     auto_apply_use_preferences: checked("autoModeUsePreferences"),
@@ -1654,14 +1677,18 @@ function configurationPayload() {
     max_applications_per_cycle: Number(value("cycleCap")) || 5, max_attempts: Number(value("maxAttempts")) || 3,
     timeout_seconds: Number(value("workerTimeout")) || 600, claude_model: value("claudeModel") || "sonnet",
   });
-  return { profile, settings };
+  settings.email_verification = { ...(settings.email_verification || {}),
+    enabled: checked("emailVerification"), imap_host: value("emailImapHost"), username: value("emailUsername"),
+  };
+  const secrets = value("emailAppPassword") ? { TIAAA_EMAIL_APP_PASSWORD: value("emailAppPassword") } : {};
+  return { profile, settings, secrets };
 }
 
 async function saveConfiguration(event) {
   event.preventDefault();
   const button = event.submitter;
-  if (checked("autoMode") && !state.claudeAuth?.logged_in) {
-    showToast("Connect Claude Code or turn off browser automation", true);
+  if (checked("autoMode") && !agentConnected(value("agentProvider"))) {
+    showToast("Connect your selected agent or turn off browser automation", true);
     return;
   }
   if (button) button.disabled = true;
@@ -1669,7 +1696,8 @@ async function saveConfiguration(event) {
     const config = await api("/api/config", { method: "PUT", body: JSON.stringify(configurationPayload()) });
     const stopping = Number(config.auto_applications_stopping || 0);
     populateConfiguration(config);
-    await refreshClaudeAuth();
+    setValue("emailAppPassword", "");
+    await Promise.all([refreshClaudeAuth(), refreshCodexAuth()]);
     showToast(stopping
       ? `Auto mode is off; stopping ${stopping} active automatic application${stopping === 1 ? "" : "s"}`
       : "Settings saved; the background agent has been notified");
@@ -1735,7 +1763,8 @@ async function finishOnboarding() {
       method: "PUT", body: JSON.stringify({ profile, settings, onboarding_complete: true }),
     });
     populateConfiguration(config);
-    await refreshClaudeAuth();
+    setValue("emailAppPassword", "");
+    await Promise.all([refreshClaudeAuth(), refreshCodexAuth()]);
     element("onboarding").classList.add("hidden");
     await api("/api/dashboard/visit", { method: "POST" });
     showToast("Setup complete. Browse Latest jobs whenever you are ready.");
@@ -1808,6 +1837,7 @@ async function initialize() {
     populateConfiguration(config);
     await refreshWebPushState();
     renderClaudeAuth(claudeAuth);
+    await refreshCodexAuth();
     state.onboarding = onboarding;
     renderResumes(resumes.items);
     if (!onboarding.complete) {
@@ -1973,3 +2003,5 @@ setInterval(() => {
 setInterval(() => {
   if (state.activeView === "live") refreshEvents().catch(() => {});
 }, 2500);
+
+element("refreshCodex").addEventListener("click", () => refreshCodexAuth().catch(error => showToast(error.message, true)));

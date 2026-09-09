@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import shutil
 from contextlib import suppress
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from tiaaa.config import AppPaths
 from tiaaa.credentials import application_account_password
+from tiaaa.education import education_facts
 from tiaaa.resumes import candidate_resume_filename
 
 
@@ -149,6 +151,7 @@ def build_prompt(
     unattended: bool = False,
     application_answers: dict[str, dict[str, Any]] | None = None,
 ) -> str:
+    profile = education_facts(profile)
     resume_pdf = _copy_resume(job, profile, worker_dir)
     fact_path_value = job.get("base_resume_text_path")
     fact_path = Path(str(fact_path_value)) if fact_path_value else paths.resume_text
@@ -208,27 +211,20 @@ def build_prompt(
         )
     )
     verification_rule = (
-        "If the application site sends a one-time verification code to the candidate's configured "
-        "email address or phone, return NEEDS_REVIEW with `reason_code` set to "
-        "`verification_required`, explain where the code was sent, and return an empty `questions` "
-        "array. Never wait for a code in unattended Auto mode."
-        if unattended
-        else (
-            "If the application site sends a one-time verification code to the candidate's "
-            "configured email address or phone, keep the code page open and return NEEDS_REVIEW "
-            "with `reason_code` set to `verification_required`. Add exactly one required `questions` "
-            "item with a stable key such as `email_verification_code`, the site's human-readable "
-            "label, `input_type` set to `verification_code`, and an empty `options` array. Never "
-            "guess a code. When the candidate supplies it, enter it only in that same open code "
-            "field. If verification instead requires an approval link, another device, or an "
-            "identity document, return NEEDS_REVIEW with an empty `questions` array."
-        )
+        "If the site sends an email or SMS verification code, keep the code page open and return "
+        "NEEDS_REVIEW with reason_code verification_required. Add one required questions item "
+        "with key email_verification_code (or sms_verification_code), "
+        "`input_type` set to `verification_code`, "
+        "the exact field label, and empty options. TI-AAA will try configured email retrieval or "
+        "offer a live dashboard checkpoint. Enter supplied codes only in the same open code field. "
+        "Never guess a code or access a mailbox yourself. "
+        "For links, another device, or identity documents, return an empty questions array."
     )
     run_mode = (
         (
             "UNATTENDED AUTO MODE — no person is monitoring this application. Complete and audit "
             "the form in this turn without final submission; a separate authorized submission turn "
-            "will follow. Never request or wait for user input."
+            "will follow. Return a structured checkpoint when blocked; TI-AAA manages any human wait."
             if not submit
             else "UNATTENDED AUTO MODE — complete and submit only after a clean final audit."
         )
@@ -240,10 +236,11 @@ def build_prompt(
     )
     return f"""You are operating a browser to complete ONE technology internship application for the
 candidate named below. Use only the Playwright browser tools.
-Use ToolSearch to load the Playwright browser tools before your first browser action. The candidate
+If ToolSearch is available, use it to load the browser tools; otherwise call them directly. The candidate
 explicitly requested this application workflow. Be accurate, conservative, and efficient.
 
 INTERNSHIP
+Current date: {date.today().isoformat()}
 Company: {job['company']}
 Role: {job['role']}
 Location from community list: {job.get('location') or 'not listed'}
@@ -265,6 +262,9 @@ Candidate profile JSON:
 REQUIRED EMPLOYER-ACCOUNT CREDENTIAL
 Email: {account_email}
 Unique password for this careers portal: {account_password}
+For a NEW account only, if the site explicitly rejects that length, use the longest accepted prefix
+of this password (at least 12 characters). On subsequent sign-in, if a visible maxlength is shorter,
+use the same prefix. Do not arbitrarily change an existing account password or try repeated guesses.
 This password is secret data. Use it only in password and password-confirmation fields while creating
 or signing into the ordinary account required for this exact application. Never repeat it in a result,
 question, ordinary form field, or page outside this application flow.
@@ -323,7 +323,13 @@ WORKFLOW
    do not search LinkedIn, Indeed, or any other job board and do not discover additional roles.
 2. Read the page and confirm it is the internship above and still accepts applications. Before entering
    candidate data, compare explicit degree, prior-company-intern, work-authorization, location, and
-   graduation requirements with the supplied facts. If a hard requirement is not met, return
+   graduation requirements with the supplied facts. Use the date-aware profile current_year rather
+   than an older class-year label in resume prose. Distinguish current standing from standing at the
+   internship start. Relocation willingness can satisfy a requirement to live near the office by the
+   start date; it does not satisfy an explicit current-residency requirement. A related-field degree
+   clause is not an exact-major exclusion. Do not invent graduation-year restrictions from a program
+   year. Reject only an explicit requirement that demonstrably conflicts with supplied facts.
+   If a hard requirement is not met, return
    NEEDS_REVIEW with `reason_code` set to `eligibility_conflict` and state the exact requirement.
 3. Click Apply and complete all required fields on each page. Upload the provided resume PDF. Paste the
    prepared cover letter only when requested. Correct bad resume-parser autofill using the profile and
@@ -353,8 +359,8 @@ Always finish with the required structured result object. Set `status` to exactl
 {success_status}, EXPIRED, CAPTCHA, NEEDS_REVIEW, or FAILED. Set `detail` to a brief reason, or an
 empty string for success. Set `reason_code` to exactly one of: none, missing_input, access_blocked,
 login_required, captcha, sensitive_information, eligibility_conflict, assessment_required,
-verification_required, or unknown. Set `questions` to an empty array unless ordinary candidate input
-or a one-time verification code would let the interactive application continue.
+verification_required, submission_uncertain, or unknown. Set `questions` to an empty array unless
+ordinary candidate input or a one-time verification code would let the application continue.
 
 Do not report APPLIED unless the site visibly confirmed receipt. Do not report REVIEW_READY until
 every required answer that can be completed from the sources has been filled and reviewed.

@@ -21,7 +21,8 @@
     "major": "Computer Science",
     "graduation_date": "May 2028",
     "gpa": "",
-    "current_year": "sophomore"
+    "current_year": "",
+    "current_year_mode": "graduation"
   },
   "work_authorization": {
     "legally_authorized_to_work_us": true,

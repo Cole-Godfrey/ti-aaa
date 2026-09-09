@@ -15,6 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
@@ -26,6 +27,14 @@ from tiaaa.apply.prompt import (
     build_human_control_prompt,
     build_prompt,
     build_submission_prompt,
+)
+from tiaaa.apply.verification import EmailVerification
+from tiaaa.codex import (
+    CodexStopped,
+    codex_command,
+    codex_final,
+    codex_usage_limited,
+    run_codex,
 )
 from tiaaa.config import AppPaths, load_settings
 from tiaaa.database import (
@@ -85,6 +94,7 @@ _RESULT_SCHEMA = {
                 "eligibility_conflict",
                 "assessment_required",
                 "verification_required",
+                "submission_uncertain",
                 "unknown",
             ],
         },
@@ -126,6 +136,7 @@ _RESULT_SCHEMA = {
     "additionalProperties": False,
 }
 _MISSING_RESULT = "agent returned no result code"
+_CODEX_RETRY_AT = 0.0
 BASE_MCP_PORT = 9430
 _PLAYWRIGHT_SERVER_NAME = "tiaaa_browser"
 _PLAYWRIGHT_TOOL_PREFIX = f"mcp__{_PLAYWRIGHT_SERVER_NAME}__"
@@ -221,31 +232,32 @@ def _wait_for_mcp_bridge(
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(
-                "Playwright browser bridge exited before opening "
-                f"its local port ({process.returncode})"
+                f"Playwright browser bridge exited before opening its local port ({process.returncode})"
             )
         if _port_is_open(port):
             return
         time.sleep(0.1)
-    raise TimeoutError(
-        f"Playwright browser bridge did not open local port {port} within {timeout:g}s"
-    )
+    raise TimeoutError(f"Playwright browser bridge did not open local port {port} within {timeout:g}s")
 
 
 def _launch_mcp_bridge(
     *,
     cdp_port: int,
     mcp_port: int,
+    cwd: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     if _port_is_open(mcp_port):
         raise RuntimeError(
-            f"Browser bridge port {mcp_port} is already in use; stop that process "
-            "or use fewer workers"
+            f"Browser bridge port {mcp_port} is already in use; stop that process or use fewer workers"
         )
     command = _mcp_server_command(cdp_port, mcp_port)
+    environment = os.environ.copy()
+    environment.pop("TIAAA_EMAIL_APP_PASSWORD", None)
     kwargs: dict[str, Any] = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
+        "cwd": cwd,
+        "env": environment,
     }
     if platform.system() == "Windows":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -269,13 +281,15 @@ def _extract_agent_text(output: str) -> str:
         except json.JSONDecodeError:
             plain_parts.append(line)
             continue
+        if not isinstance(message, dict):
+            continue
         if message.get("type") == "result":
             result = message.get("result")
             if isinstance(message.get("structured_output"), dict):
                 result_parts.append(json.dumps(message["structured_output"]))
             elif result:
                 result_parts.append(str(result))
-    return "\n".join(result_parts or plain_parts)
+    return "\n".join(result_parts) if result_parts else codex_final(output) or "\n".join(plain_parts)
 
 
 def _stream_summary(output: str, *, returncode: int) -> dict[str, Any]:
@@ -300,7 +314,19 @@ def _stream_summary(output: str, *, returncode: int) -> dict[str, Any]:
             message = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(message, dict):
+            continue
         message_type = message.get("type")
+        if message_type == "turn.failed":
+            summary["is_error"] = True
+            summary["result_subtype"] = "execution_error"
+        if message_type == "item.completed" and isinstance(message.get("item"), dict):
+            item = message["item"]
+            if item.get("type") == "mcp_tool_call" and item.get("server") == _PLAYWRIGHT_SERVER_NAME:
+                summary["browser_actions"].append(f"browser:{item.get('tool', '')}"[:120])
+                summary["browser_action_count"] += 1
+            if item.get("type") == "agent_message":
+                summary["has_final_text"] = bool(item.get("text"))
         if message_type == "system" and message.get("subtype") == "init":
             summary["mcp_servers"] = [
                 {
@@ -335,9 +361,7 @@ def _stream_summary(output: str, *, returncode: int) -> dict[str, Any]:
             )
             summary["num_turns"] = message.get("num_turns")
             summary["has_final_text"] = bool(message.get("result"))
-            summary["has_structured_output"] = isinstance(
-                message.get("structured_output"), dict
-            )
+            summary["has_structured_output"] = isinstance(message.get("structured_output"), dict)
             summary["permission_denials"] = [
                 str(item.get("tool_name") or item.get("name") or "unknown")[:120]
                 for item in message.get("permission_denials", [])
@@ -349,22 +373,22 @@ def _stream_summary(output: str, *, returncode: int) -> dict[str, Any]:
 
 def _bridge_needs_retry(summary: dict[str, Any]) -> bool:
     return not summary["browser_actions"] and any(
-        server["name"] == _PLAYWRIGHT_SERVER_NAME
-        and server["status"].casefold() == "pending"
+        server["name"] == _PLAYWRIGHT_SERVER_NAME and server["status"].casefold() == "pending"
         for server in summary["mcp_servers"]
     )
 
 
 def _bridge_is_unavailable(summary: dict[str, Any]) -> bool:
     return not summary["browser_actions"] and any(
-        server["name"] == _PLAYWRIGHT_SERVER_NAME
-        and server["status"].casefold() != "connected"
+        server["name"] == _PLAYWRIGHT_SERVER_NAME and server["status"].casefold() != "connected"
         for server in summary["mcp_servers"]
     )
 
 
 def _failure_detail(output: str, *, returncode: int) -> str:
     summary = _stream_summary(output, returncode=returncode)
+    if summary["api_error_status"] == "429" or codex_usage_limited(output):
+        return "Model usage limit reached; application receipt was not confirmed"
     if returncode != 0:
         return f"Claude exited with status {returncode}"
     if summary["permission_denials"]:
@@ -376,9 +400,7 @@ def _failure_detail(output: str, *, returncode: int) -> str:
         suffix = f" (API status {api_status})" if api_status else ""
         return f"Claude ended with {subtype}{suffix}"
     disconnected = [
-        server["name"]
-        for server in summary["mcp_servers"]
-        if server["status"].casefold() != "connected"
+        server["name"] for server in summary["mcp_servers"] if server["status"].casefold() != "connected"
     ]
     if disconnected:
         return f"Browser bridge did not connect: {', '.join(disconnected)}"
@@ -400,8 +422,7 @@ def _write_safe_diagnostic(
 
     attempt = max(1, int(job.get("apply_attempts") or 1))
     diagnostic_path = (
-        paths.logs
-        / f"agent-job-{job['id']}-attempt-{attempt}-worker-{worker_id}-diagnostic.json"
+        paths.logs / f"agent-job-{job['id']}-attempt-{attempt}-worker-{worker_id}-diagnostic.json"
     )
     diagnostic_path.write_text(
         json.dumps(_stream_summary(output, returncode=returncode), indent=2) + "\n",
@@ -555,9 +576,7 @@ class _ClaudeProcess:
                 # instead of waiting out the whole agent timeout.
                 item = self._lines.get(
                     timeout=(
-                        min(remaining, self._STOP_POLL_SECONDS)
-                        if should_stop is not None
-                        else remaining
+                        min(remaining, self._STOP_POLL_SECONDS) if should_stop is not None else remaining
                     )
                 )
             except Empty as exc:
@@ -608,10 +627,7 @@ def _timeout_output(error: subprocess.TimeoutExpired) -> str:
 
 def _infer_reason_code(detail: str | None) -> str:
     lowered = (detail or "").casefold()
-    if any(
-        marker in lowered
-        for marker in ("http 403", "403 forbidden", "access denied", "access blocked")
-    ):
+    if any(marker in lowered for marker in ("http 403", "403 forbidden", "access denied", "access blocked")):
         return "access_blocked"
     if "captcha" in lowered:
         return "captcha"
@@ -628,11 +644,14 @@ def _unattended_result(result: AgentResult) -> AgentResult:
     if result.result not in {"review_ready", "needs_review", "captcha"}:
         return result
     reason_code = "captcha" if result.result == "captcha" else result.reason_code
-    detail = result.detail or {
-        "review_ready": "agent stopped before confirmed submission",
-        "needs_review": "a required candidate fact was unavailable",
-        "captcha": "a CAPTCHA blocked the application",
-    }[result.result]
+    detail = (
+        result.detail
+        or {
+            "review_ready": "agent stopped before confirmed submission",
+            "needs_review": "a required candidate fact was unavailable",
+            "captcha": "a CAPTCHA blocked the application",
+        }[result.result]
+    )
     return AgentResult(
         "failed",
         f"Auto mode stopped without user input: {detail}",
@@ -682,9 +701,10 @@ def _verification_code_fallback(result: AgentResult) -> list[dict[str, Any]]:
 def _human_interaction_result(result: AgentResult) -> AgentResult:
     """Normalize visible and likely invisible CAPTCHA stalls into a live checkpoint."""
 
+    if result.result == "failed" and result.reason_code in {"access_blocked", "verification_required"}:
+        return AgentResult("needs_review", result.detail, result.reason_code, result.questions)
     if result.result == "captcha" or (
-        result.reason_code == "captcha"
-        and result.result in {"failed", "needs_review", "review_ready"}
+        result.reason_code == "captcha" and result.result in {"failed", "needs_review", "review_ready"}
     ):
         return AgentResult("captcha", result.detail, "captcha", [])
     detail = (result.detail or "").casefold()
@@ -773,9 +793,7 @@ def _run_agent_turn(
     """Run one turn without closing the live Claude or browser session."""
 
     try:
-        output, returncode = process.turn(
-            prompt, timeout=timeout, should_stop=should_stop
-        )
+        output, returncode = process.turn(prompt, timeout=timeout, should_stop=should_stop)
     except AgentSessionStopped:
         return (
             AgentResult("cancelled", "Stopped in the dashboard", "cancelled"),
@@ -790,12 +808,8 @@ def _run_agent_turn(
             output=partial_output,
             returncode=124,
         )
-        action_count = int(
-            _stream_summary(partial_output, returncode=124)["browser_action_count"]
-        )
-        progress = (
-            f" ({action_count} browser actions completed)" if action_count else ""
-        )
+        action_count = int(_stream_summary(partial_output, returncode=124)["browser_action_count"])
+        progress = f" ({action_count} browser actions completed)" if action_count else ""
         return (
             AgentResult("failed", f"agent timed out after {timeout}s{progress}"),
             _stream_summary(partial_output, returncode=124),
@@ -805,12 +819,8 @@ def _run_agent_turn(
     agent_text = _extract_agent_text(output)
     if os.environ.get("TIAAA_DEBUG_AGENT_OUTPUT") == "1":
         attempt = max(1, int(job.get("apply_attempts") or 1))
-        debug_path = (
-            paths.logs
-            / (
-                f"agent-job-{job['id']}-attempt-{attempt}-worker-{worker_id}"
-                f"-turn-{turn_number}.log"
-            )
+        debug_path = paths.logs / (
+            f"agent-job-{job['id']}-attempt-{attempt}-worker-{worker_id}-turn-{turn_number}.log"
         )
         debug_path.write_text(output, encoding="utf-8")
         with suppress(OSError):
@@ -818,6 +828,9 @@ def _run_agent_turn(
     parsed = _parse_agent_result(agent_text, submit=submit)
     if (
         returncode != 0
+        or summary["is_error"]
+        or summary["api_error_status"] == "429"
+        or codex_usage_limited(output)
         or parsed.detail == _MISSING_RESULT
         or _bridge_is_unavailable(summary)
     ):
@@ -834,6 +847,49 @@ def _run_agent_turn(
             returncode=returncode,
         )
     return parsed, summary
+
+
+class _CodexProcess:
+    """Keep browser state across isolated, ephemeral Codex turns."""
+
+    def __init__(self, command: list[str], *, cwd: Path, environment: dict[str, str]) -> None:
+        self.command = command
+        self.cwd = cwd
+        self.environment = environment
+        self.alive = True
+        self.context = ""
+
+    def turn(self, prompt: str, *, timeout: float, should_stop: Any = None) -> tuple[str, int]:
+        if not self.alive:
+            return "", 1
+        if not self.context:
+            self.context = prompt
+            full_prompt = prompt
+        else:
+            full_prompt = (
+                self.context
+                + (
+                    "\n\nCONTINUATION: The original navigation instructions above are historical. "
+                    "Inspect the current tab first, preserve completed fields, and follow ONLY the "
+                    "current turn's submission authorization below.\n\n"
+                )
+                + prompt
+            )
+        try:
+            return run_codex(
+                self.command,
+                full_prompt,
+                cwd=self.cwd,
+                timeout=timeout,
+                environment=self.environment,
+                should_stop=should_stop,
+            )
+        except CodexStopped as exc:
+            raise AgentSessionStopped() from exc
+
+    def close(self) -> None:
+        self.alive = False
+        self.context = ""
 
 
 class _ApplicationAgentSession:
@@ -853,6 +909,9 @@ class _ApplicationAgentSession:
         unattended: bool,
         application_answers: dict[str, dict[str, Any]] | None = None,
         should_stop: Any = None,
+        provider: str = "codex",
+        codex_model: str = "",
+        claude_fallback: bool = True,
     ) -> None:
         self.job = job
         self.paths = paths
@@ -864,7 +923,9 @@ class _ApplicationAgentSession:
         self.submission_authorized = submit
         self.submission_started = False
         self.turn_number = 0
-        self.process: _ClaudeProcess | None = None
+        self.provider = provider
+        self.claude_fallback = claude_fallback
+        self.process: _ClaudeProcess | _CodexProcess | None = None
         self.worker_dir = paths.workers / f"worker-{worker_id}"
         self.worker_dir.mkdir(parents=True, exist_ok=True)
         with suppress(OSError):
@@ -883,13 +944,26 @@ class _ApplicationAgentSession:
         with suppress(OSError):
             config_path.chmod(0o600)
         self.command = _claude_command(model=model, config_path=config_path)
+        schema_path = self.worker_dir / "result-schema.json"
+        schema_path.write_text(json.dumps(_RESULT_SCHEMA), encoding="utf-8")
+        self.codex_command = codex_command(
+            schema_path=schema_path,
+            model=codex_model,
+            port=port,
+            browser_tools=tuple(tool.removeprefix(_PLAYWRIGHT_TOOL_PREFIX) for tool in _PLAYWRIGHT_TOOLS),
+        )
         self.environment = os.environ.copy()
+        self.environment.pop("TIAAA_EMAIL_APP_PASSWORD", None)
         self.environment.pop("CLAUDECODE", None)
         self.environment.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
     def _start_process(self) -> None:
-        self.process = _ClaudeProcess(
-            self.command,
+        if (self.provider == "codex" and self.claude_fallback
+                and time.monotonic() < _CODEX_RETRY_AT and shutil.which("claude")):
+            self.provider = "claude"
+        factory = _CodexProcess if self.provider == "codex" else _ClaudeProcess
+        self.process = factory(
+            self.codex_command if self.provider == "codex" else self.command,
             cwd=self.worker_dir,
             environment=self.environment,
         )
@@ -906,7 +980,8 @@ class _ApplicationAgentSession:
                 "mcp_servers": [],
             }
         self.turn_number += 1
-        return _run_agent_turn(
+        self.last_turn_started = datetime.now(UTC).replace(microsecond=0)
+        result, summary = _run_agent_turn(
             process=self.process,
             prompt=prompt,
             job=self.job,
@@ -917,6 +992,40 @@ class _ApplicationAgentSession:
             turn_number=self.turn_number,
             should_stop=self.should_stop,
         )
+        # Switch once, preserving the live browser and stage. Never restart the Apply URL.
+        if (
+            self.provider == "codex"
+            and self.claude_fallback
+            and result.detail == "Model usage limit reached; application receipt was not confirmed"
+            and shutil.which("claude")
+        ):
+            global _CODEX_RETRY_AT
+            _CODEX_RETRY_AT = time.monotonic() + 900
+            self.close()
+            self.provider = "claude"
+            self._start_process()
+            recovery = (
+                "\n\nPROVIDER HANDOFF: Codex reached its usage limit. The browser is still open. "
+                "The original navigation steps are historical: first inspect the current tab. "
+                "Do not navigate, reload, re-upload, or overwrite completed fields. "
+                "If no application has been opened (only about:blank), navigate to the supplied URL. "
+                "Check for a receipt before any action; never duplicate an application. "
+            )
+            if self.submission_started:
+                recovery += (
+                    "A submission may already have been sent. Return APPLIED only for a visible receipt. "
+                    "Otherwise return NEEDS_REVIEW with reason_code submission_uncertain; "
+                    "do not click Submit again."
+                )
+            else:
+                recovery += "Complete and audit the form without submission; return REVIEW_READY."
+            started = self.last_turn_started
+            result, summary = self._turn(self.initial_prompt + recovery, submit=self.submission_started)
+            self.last_turn_started = started
+            return result, summary
+        if self.submission_started and result.result == "failed":
+            result = AgentResult("needs_review", result.detail, "submission_uncertain")
+        return result, summary
 
     def start(self) -> AgentResult:
         for agent_launch in range(2):
@@ -936,11 +1045,7 @@ class _ApplicationAgentSession:
     def _submit_if_ready(self, result: AgentResult) -> AgentResult:
         """Start a separate final-action turn only after form completion is reported."""
 
-        if (
-            result.result == "review_ready"
-            and self.submission_authorized
-            and not self.submission_started
-        ):
+        if result.result == "review_ready" and self.submission_authorized and not self.submission_started:
             return self.submit_after_confirmation()
         return result
 
@@ -1151,6 +1256,7 @@ def _worker(
     interactive_review: bool,
 ) -> dict[str, int]:
     automation = settings.get("automation", {})
+    human_checkpoints = not unattended or bool(automation.get("human_checkpoints", True))
     connection = get_connection(db_path)
     chrome_process = None
     mcp_process = None
@@ -1170,8 +1276,7 @@ def _worker(
             worker_id=worker_id,
             paths=paths,
             headless=(
-                bool(automation.get("headless", False))
-                or os.environ.get("TIAAA_FORCE_HEADLESS") == "1"
+                bool(automation.get("headless", False)) or os.environ.get("TIAAA_FORCE_HEADLESS") == "1"
             ),
         )
         mcp_port = BASE_MCP_PORT + worker_id
@@ -1182,7 +1287,9 @@ def _worker(
             message="Connecting the browser controls",
             screenshot_path=str(preview_path.resolve()),
         )
-        mcp_process = _launch_mcp_bridge(cdp_port=port, mcp_port=mcp_port)
+        worker_dir = paths.workers / worker_name
+        worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        mcp_process = _launch_mcp_bridge(cdp_port=port, mcp_port=mcp_port, cwd=worker_dir)
         preview = PreviewCapture(
             port=port,
             output_path=preview_path,
@@ -1205,9 +1312,7 @@ def _worker(
                 max_attempts=int(automation.get("max_attempts", 3)),
                 target_job_id=target_job_id,
                 profile=profile,
-                use_preferences=bool(
-                    automation.get("auto_apply_use_preferences", False)
-                ),
+                use_preferences=bool(automation.get("auto_apply_use_preferences", False)),
             )
             if job is None:
                 break
@@ -1226,6 +1331,12 @@ def _worker(
                 paths=paths,
                 unattended=unattended,
             )
+            email_verification = EmailVerification(
+                settings=settings.get("email_verification", {}),
+                recipient=str(profile.get("personal", {}).get("email", "")),
+                application_url=str(job["application_url"]),
+            )
+            verification_attempts = 0
             try:
                 agent_session = _ApplicationAgentSession(
                     job=job,
@@ -1237,10 +1348,11 @@ def _worker(
                     timeout=int(automation.get("timeout_seconds", 600)),
                     submit=submit,
                     unattended=unattended,
-                    application_answers=answered_agent_inputs(
-                        connection, int(job["id"])
-                    ),
+                    application_answers=answered_agent_inputs(connection, int(job["id"])),
                     should_stop=stop_requested,
+                    provider=str(automation.get("provider", "codex")),
+                    codex_model=str(automation.get("codex_model", "")),
+                    claude_fallback=bool(automation.get("claude_fallback", True)),
                 )
                 try:
                     agent_result = agent_session.start()
@@ -1248,20 +1360,50 @@ def _worker(
                     clear_ephemeral_agent_inputs(connection, int(job["id"]))
                 while True:
                     agent_result = _human_interaction_result(agent_result)
-                    if unattended:
+                    questions = agent_result.questions or _verification_code_fallback(agent_result)
+                    email_question = next(
+                        (
+                            q
+                            for q in questions
+                            if q.get("input_type") == "verification_code"
+                            and q.get("key") == "email_verification_code"
+                        ),
+                        None,
+                    )
+                    if (
+                        agent_result.reason_code == "verification_required"
+                        and email_question
+                        and email_verification.enabled
+                        and verification_attempts < 2
+                    ):
+                        verification_attempts += 1
+                        update_worker_state(
+                            connection,
+                            worker_name,
+                            status="applying",
+                            job=job,
+                            message="Waiting for the application email verification code",
+                        )
+                        code = email_verification.poll(
+                            since=agent_session.last_turn_started, should_stop=stop_requested
+                        )
+                        if code:
+                            agent_result = agent_session.continue_with(
+                                {
+                                    email_question["key"]: {
+                                        "question": email_question["label"],
+                                        "answer": code,
+                                    }
+                                }
+                            )
+                            continue
+                    if unattended and not human_checkpoints:
                         agent_result = _unattended_result(agent_result)
                     result = agent_result.result
                     detail = agent_result.detail
                     saved_questions: list[dict[str, Any]] = []
-                    checkpoint_questions = (
-                        agent_result.questions
-                        or _verification_code_fallback(agent_result)
-                    )
-                    if (
-                        not unattended
-                        and result == "needs_review"
-                        and checkpoint_questions
-                    ):
+                    checkpoint_questions = agent_result.questions or _verification_code_fallback(agent_result)
+                    if human_checkpoints and result == "needs_review" and checkpoint_questions:
                         saved_questions = store_agent_inputs(
                             connection,
                             int(job["id"]),
@@ -1271,13 +1413,19 @@ def _worker(
                         resolve_agent_inputs(connection, int(job["id"]))
                     waiting_for_input = result == "needs_review" and bool(saved_questions)
                     waiting_for_human = (
-                        not unattended
+                        human_checkpoints
                         and not waiting_for_input
                         and (
                             result == "captcha"
                             or (
                                 result == "needs_review"
-                                and agent_result.reason_code == "captcha"
+                                and agent_result.reason_code
+                                in {
+                                    "captcha",
+                                    "access_blocked",
+                                    "verification_required",
+                                    "submission_uncertain",
+                                }
                             )
                         )
                     )
@@ -1291,15 +1439,9 @@ def _worker(
                         int(job["id"]),
                         result,
                         detail,
-                        reason_code=(
-                            "captcha" if waiting_for_human else agent_result.reason_code
-                        ),
-                        retain_worker=(
-                            waiting_for_input
-                            or waiting_for_human
-                            or waiting_for_submission
-                        ),
-                        manual_handoff=not unattended,
+                        reason_code=(agent_result.reason_code),
+                        retain_worker=(waiting_for_input or waiting_for_human or waiting_for_submission),
+                        manual_handoff=human_checkpoints,
                     )
                     result_message = {
                         "applied": "Application submitted",
@@ -1327,7 +1469,9 @@ def _worker(
                         status=(
                             "complete"
                             if result == "applied"
-                            else "stopped" if result == "cancelled" else result
+                            else "stopped"
+                            if result == "cancelled"
+                            else result
                         ),
                         job=job,
                         message=f"{result_message}{f': {detail}' if detail else ''}",
@@ -1357,9 +1501,7 @@ def _worker(
                             try:
                                 agent_result = agent_session.continue_with(answers)
                             finally:
-                                clear_ephemeral_agent_inputs(
-                                    connection, int(job["id"])
-                                )
+                                clear_ephemeral_agent_inputs(connection, int(job["id"]))
                             continue
                         close_live_checkpoint(
                             connection,
@@ -1468,7 +1610,7 @@ def _worker(
                     int(job["id"]),
                     "failed",
                     str(exc),
-                    manual_handoff=not unattended,
+                    manual_handoff=human_checkpoints,
                 )
                 update_worker_state(
                     connection,
@@ -1577,15 +1719,16 @@ def run_applications(
             max_attempts=int(automation.get("max_attempts", 3)),
             target_job_id=target_job_id,
             profile=profile,
-            use_preferences=bool(
-                automation.get("auto_apply_use_preferences", False)
-            ),
+            use_preferences=bool(automation.get("auto_apply_use_preferences", False)),
         ),
     )
     if requested <= 0:
         return {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
-    if shutil.which("claude") is None:
-        raise FileNotFoundError("Claude Code CLI was not found on PATH")
+    provider = str(automation.get("provider", "codex"))
+    if provider not in {"codex", "claude"}:
+        raise ValueError("automation.provider must be codex or claude")
+    if shutil.which(provider) is None:
+        raise FileNotFoundError(f"{provider.title()} CLI was not found on PATH")
     if not os.environ.get("TIAAA_PLAYWRIGHT_MCP_COMMAND") and shutil.which("npx") is None:
         raise FileNotFoundError("npx was not found on PATH; Node.js is required for Playwright MCP")
 

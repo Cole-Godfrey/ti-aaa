@@ -61,9 +61,7 @@ def test_cli_requests_a_text_only_turn_with_the_schema(cli, monkeypatch) -> None
     ],
 )
 def test_cli_reads_every_shape_claude_code_returns(cli, monkeypatch, stdout) -> None:
-    monkeypatch.setattr(
-        client_module.subprocess, "run", lambda *_a, **_k: completed(stdout)
-    )
+    monkeypatch.setattr(client_module.subprocess, "run", lambda *_a, **_k: completed(stdout))
 
     assert cli.decide(system="s", prompt="p", schema={}) == PAYLOAD
 
@@ -104,14 +102,14 @@ def test_the_api_is_preferred_when_a_key_is_configured(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setattr(client_module.shutil, "which", lambda _name: "/usr/bin/claude")
 
-    assert get_review_client().name == "anthropic-api"
+    assert get_review_client(provider="claude").name == "anthropic-api"
 
 
 def test_a_connected_claude_account_is_enough_without_an_api_key(monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(client_module.shutil, "which", lambda _name: "/usr/bin/claude")
 
-    assert get_review_client().name == "claude-code"
+    assert get_review_client(provider="claude").name == "claude-code"
 
 
 def test_no_credentials_explains_both_options(monkeypatch) -> None:
@@ -119,7 +117,62 @@ def test_no_credentials_explains_both_options(monkeypatch) -> None:
     monkeypatch.setattr(client_module.shutil, "which", lambda _name: None)
 
     with pytest.raises(ReviewUnavailable) as error:
-        get_review_client()
+        get_review_client(provider="claude")
 
     assert "Connect a Claude account" in str(error.value)
     assert "ANTHROPIC_API_KEY" in str(error.value)
+
+
+def test_codex_is_default_and_quota_falls_back_only_once(monkeypatch):
+    monkeypatch.setattr(client_module.shutil, "which", lambda _name: "/bin/tool")
+    calls = []
+    monkeypatch.setattr(
+        client_module,
+        "run_codex",
+        lambda *_a, **_k: (
+            calls.append("codex") or json.dumps({"type": "turn.failed", "error": {"message": "usage limit"}}),
+            1,
+        ),
+    )
+
+    class Backup:
+        def decide(self, **kwargs):
+            calls.append("claude")
+            return PAYLOAD
+
+        def close(self):
+            calls.append("closed")
+
+    monkeypatch.setattr(client_module, "_get_claude_review_client", lambda **kwargs: Backup())
+    client = get_review_client()
+    assert client.name == "codex"
+    assert client.decide(system="s", prompt="p", schema={}) == PAYLOAD
+    assert client.decide(system="s", prompt="p", schema={}) == PAYLOAD
+    client.close()
+    assert calls == ["codex", "claude", "claude", "closed"]
+
+
+def test_codex_auth_failure_does_not_use_quota_backup(monkeypatch):
+    monkeypatch.setattr(client_module.shutil, "which", lambda _name: "/bin/tool")
+    monkeypatch.setattr(
+        client_module,
+        "run_codex",
+        lambda *_a, **_k: (json.dumps({"type": "turn.failed", "error": {"message": "Please log in"}}), 1),
+    )
+    monkeypatch.setattr(
+        client_module, "_get_claude_review_client", lambda **kwargs: pytest.fail("unexpected fallback")
+    )
+    with pytest.raises(RuntimeError, match="Codex review failed"):
+        get_review_client().decide(system="s", prompt="p", schema={})
+
+
+def test_claude_error_envelope_never_accepts_structured_success(cli, monkeypatch):
+    monkeypatch.setattr(
+        client_module.subprocess,
+        "run",
+        lambda *_a, **_k: completed(
+            json.dumps({"structured_output": PAYLOAD, "is_error": True, "api_error_status": 429})
+        ),
+    )
+    with pytest.raises(RuntimeError):
+        cli.decide(system="s", prompt="p", schema={})

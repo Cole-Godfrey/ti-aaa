@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from tiaaa import __version__
 from tiaaa.apply.preview import browser_control_hub, preview_frame_hub
 from tiaaa.claude_auth import ClaudeAuthManager
+from tiaaa.codex import codex_status
 from tiaaa.config import (
     SOURCE_DOCUMENTS,
     AppPaths,
@@ -71,6 +72,7 @@ from tiaaa.database import (
     stop_active_auto_applications,
     update_tracker,
 )
+from tiaaa.education import education_facts
 from tiaaa.resumes import MAX_RESUME_BYTES, store_resume
 from tiaaa.service import AutomationService, service_for
 from tiaaa.web_push import (
@@ -381,6 +383,7 @@ def create_app(
             ),
             "secrets": secret_status(paths),
             "tools": {
+                "codex": bool(shutil.which("codex")),
                 "claude": bool(shutil.which("claude")),
                 "npx": bool(shutil.which("npx")),
                 "chrome": bool(chrome),
@@ -390,7 +393,7 @@ def create_app(
     @app.get("/api/config")
     def configuration() -> dict[str, Any]:
         return {
-            "profile": load_profile(paths),
+            "profile": education_facts(load_profile(paths)),
             "settings": load_settings(paths),
             "secrets": secret_status(paths),
         }
@@ -431,6 +434,16 @@ def create_app(
     def unsubscribe_from_push(payload: WebPushRemoval) -> dict[str, Any]:
         remove_push_subscription(connection(), payload.endpoint.strip())
         return push_status()
+
+    @app.get("/api/codex-auth")
+    def codex_auth_status() -> dict[str, Any]:
+        return codex_status()
+
+    def browser_agent_connected() -> bool:
+        provider = load_settings(paths).get("automation", {}).get("provider", "codex")
+        if provider == "codex":
+            return bool(codex_status().get("logged_in"))
+        return bool(app.state.claude_auth.status().get("logged_in"))
 
     @app.get("/api/claude-auth")
     def claude_auth_status() -> dict[str, Any]:
@@ -613,10 +626,10 @@ def create_app(
             raise HTTPException(status_code=409, detail="Finish onboarding before applying")
         if not list_resumes(connection()):
             raise HTTPException(status_code=409, detail="Upload a resume before applying")
-        if not bool(app.state.claude_auth.status().get("logged_in")):
+        if not browser_agent_connected():
             raise HTTPException(
                 status_code=409,
-                detail="Connect Claude Code in Settings before starting the browser agent",
+                detail="Connect the selected browser agent in Settings before starting the browser agent",
             )
         service = require_service()
         try:
@@ -647,10 +660,10 @@ def create_app(
 
     @app.post("/api/jobs/{job_id}/retry", status_code=202)
     def retry_job_application(job_id: int) -> dict[str, Any]:
-        if not bool(app.state.claude_auth.status().get("logged_in")):
+        if not browser_agent_connected():
             raise HTTPException(
                 status_code=409,
-                detail="Connect Claude Code in Settings before retrying the browser agent",
+                detail="Connect the selected browser agent in Settings before retrying the browser agent",
             )
         service = require_service()
         try:

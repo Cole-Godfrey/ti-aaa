@@ -38,7 +38,7 @@ docker compose up -d --build
 ```
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787), enter your profile, upload a PDF resume,
-and connect your Claude account. See [Detailed Docker setup](#detailed-docker-setup) for the remaining
+and connect Codex (with optional Claude backup). See [Detailed Docker setup](#detailed-docker-setup) for the remaining
 settings and operating instructions.
 
 ## Job sources
@@ -59,13 +59,13 @@ spend a model call on a repository's whole backlog — postings that old are usu
 Older rows stay in the table and say why they were skipped; **Re-check this listing** decides any one
 of them on demand. Change the window, or set it to 0 to review everything, in **Settings**.
 
-If a review run fails because Claude was unavailable, use **Retry today's reviews** in **Latest
+If a review run fails because the review provider was unavailable, use **Retry today's reviews** in **Latest
 jobs**. It selects only reviewable internships first discovered during your browser's current day
 that still have no **Yes/No** answer. Existing decisions are preserved and are not sent through the
 reviewer again; existing **Yes** answers still count toward the per-company application budget.
 
 The decision is made from the employer's own job posting, not from the one-line summary in a GitHub
-list. TI-AAA opens the direct application link, extracts the description, and asks Claude to decide.
+list. TI-AAA opens the direct application link, extracts the description, and asks the selected agent to decide.
 It weighs:
 
 - **The posting's real requirements** — required degree, graduation-date window, class year,
@@ -117,7 +117,7 @@ were explicit in it; **low** means the employer blocked the read and only list m
 - **Stop session** ends a running attempt at any point. The listing is recorded as stopped, leaves the queue, and is never claimed again automatically.
 - By default, a manual application stops on the completed form for confirmation in **Agent**. You can opt into auto-submit for jobs you explicitly select.
 - The agent completes and audits the form before TI-AAA starts a separate final-submission turn. It does not use the final Submit control to discover missing fields.
-- Auto mode does not wait for user input. It submits safe applications and records why it stops others.
+- Auto mode retrieves configured email codes and pauses blocked forms in Agent when live handoffs are enabled.
 - Optional Web Push alerts report new Auto-mode jobs. They require Auto mode and browser permission.
 - TI-AAA does not rewrite a resume. It submits an unchanged copy named `First_Last_Resume.pdf`.
 - The service continues to work when the dashboard is closed.
@@ -157,7 +157,7 @@ were explicit in it; **low** means the employer blocked the read and only list m
 
 ## Detailed Docker setup
 
-Docker is the recommended setup. It includes Python, Chromium, Node.js, Claude Code, and the browser bridge.
+Docker is the recommended setup. It includes Python, Chromium, Node.js, Codex, Claude Code, and the browser bridge.
 
 ### 1. Install Docker
 
@@ -183,7 +183,7 @@ Complete these setup tasks:
 
 1. Enter your profile and education facts.
 2. Upload at least one PDF resume.
-3. Connect your Claude account if you want browser automation.
+3. Connect Codex for browser automation, and optionally Claude as a usage-limit backup.
 
 Use **Connect Claude account** with a Claude Pro or Max account. You do not need an Anthropic API key for this method. An Anthropic API key is an optional alternative.
 
@@ -212,7 +212,7 @@ Open **Settings**. Use these controls:
 - **Per-cycle cap** limits one poll cycle.
 
 Auto mode submits only the roles the review answered **Apply** for, up to the per-company budget. It
-does not ask for user input. If the employer page later reveals an unmet hard requirement, the agent
+can pause at verification and blocked-page checkpoints. If the employer page later reveals an unmet hard requirement, the agent
 records that reason and the job is excluded from Auto mode. If a required personal fact is not
 available, it stops the application and adds the reason to the next welcome-back summary. Manual
 **Apply** actions ignore the decision.
@@ -236,7 +236,7 @@ If the employer presents a CAPTCHA—or Submit stays disabled on **Submitting…
 
 If a challenge keeps returning, or you finish the form yourself, you do not have to keep answering the
 agent. **Stop session** on the worker card and on every Agent checkpoint ends that attempt: TI-AAA
-closes the Claude turn and its browser, releases the listing, and records it as stopped instead of
+closes the agent turn and its browser, releases the listing, and records it as stopped instead of
 queueing it again. A running turn stops within about a second; nothing waits for the agent timeout.
 
 If an employer blocks the automated browser, or you stopped a session, that role moves to **Roles you apply to yourself** in **Agent**. Open the listing, complete the application in your own browser, then select **I applied manually**. TI-AAA asks which uploaded resume you actually submitted, with the review recommendation shown for reference; it does not preselect or infer one from the prepared application. TI-AAA records the submission with today's date, counts it in **Applications** and **Analytics**, and never queues that role for the browser agent again. The same action appears on the live-browser and employer-access-block checkpoint cards.
@@ -286,7 +286,7 @@ You need:
 - Python 3.11 or later
 - Chrome or Chromium
 - Node.js 22 or later
-- Claude Code for browser automation
+- Codex CLI for browser automation; Claude Code for the optional backup
 
 Create an environment and install TI-AAA:
 
@@ -304,10 +304,11 @@ On Windows PowerShell, use this activation command:
 .venv\Scripts\Activate.ps1
 ```
 
-Install Claude Code if you want browser automation:
+Install Codex and the optional Claude backup for browser automation:
 
 ```bash
-npm install -g @anthropic-ai/claude-code@2.1.226
+npm install -g @openai/codex@0.153.4 @anthropic-ai/claude-code@2.1.226
+codex login
 ```
 
 Start the website and background service:
@@ -317,6 +318,63 @@ tiaaa serve
 ```
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). The native app stores its data in `~/.tiaaa`.
+
+## Reliable browser applications
+
+Applications and posting reviews use **Codex first**. Install the CLI and sign in once:
+
+```bash
+npm install -g @openai/codex@0.153.4
+codex login
+```
+
+For Docker, sign in inside the container with `docker compose exec tiaaa codex login --device-auth`.
+The existing data volume retains the login. Choose Codex in Settings and refresh its connection.
+Connect Claude as an optional backup. When Codex reports a usage limit, the worker switches to Claude
+in the **same Chrome tab**, preserving the form. New jobs use the backup for 15 minutes before trying
+Codex again. Authentication, browser, and ordinary site failures do not trigger quota fallback.
+If a submission may already have been sent, the worker asks for review instead of submitting again.
+
+Chrome uses a persistent local profile; native, visible Chrome is the default. Docker still uses
+headless Chromium. A real browser cannot guarantee acceptance by every employer. CAPTCHA and 403
+checkpoints keep the current form available in **Agent** for up to 30 minutes, then park it for review.
+Resolve the blocker and press **Continue agent**. Disable **Keep blocked forms open** to stop and move
+on immediately. `TIAAA_AGENT_INPUT_TIMEOUT_SECONDS` adjusts this wait (60–86400 seconds).
+
+Enable **Email verification** in Settings and save a mailbox app password there. For Gmail, enable
+Google two-step verification and create an app password. This uses read-only IMAP over TLS; mailbox
+credentials and email bodies are never given to either model. Only fresh codes addressed to the
+profile email and sent by the application portal are accepted. Codes are used once and not stored
+in the application database. Missing credentials, ambiguous messages, and timeouts fall back to the
+live dashboard code field. SMS and approval links still require your input.
+
+For a portal that sends from a different domain, explicitly configure its sender mapping in
+`settings.yaml`, for example:
+
+```yaml
+email_verification:
+  enabled: true
+  imap_host: imap.gmail.com
+  username: "" # defaults to profile email
+  timeout_seconds: 90
+  sender_domains:
+    careers.example.com: [mailer.example.org]
+```
+
+Class standing updates from the graduation date for bachelor's degree cohorts: May 2028 is junior
+in September 2026. Select **Use my current-year answer** for credit-based or nonstandard standing.
+A complete mailing address remains necessary for employers that require it; the agent never invents one.
+New-account passwords may use a stable shorter prefix when an employer explicitly limits length;
+existing generated passwords remain unchanged.
+
+The Codex adapter uses [non-interactive structured output](https://developers.openai.com/codex/noninteractive)
+and [restricted MCP tool configuration](https://developers.openai.com/codex/config-reference).
+
+To run the opt-in integration test using your Codex login and Chrome against a local fake employer:
+
+```bash
+TIAAA_LIVE_BROWSER_TEST=1 pytest tests/test_live_application.py -v
+```
 
 ## Terminal use
 
@@ -455,8 +513,8 @@ For a native install, add the same values to `~/.tiaaa/.env` and restart `tiaaa 
 
 These secrets are optional:
 
-- `ANTHROPIC_API_KEY` for API-based Claude access. The posting review uses it when it is set and
-  otherwise uses your connected Claude account, so a Claude Pro or Max subscription is enough.
+- `ANTHROPIC_API_KEY` for API-based Claude access. When Claude is selected or used as the quota backup, the posting review uses this key if present,
+  otherwise your connected Claude account.
 - `GITHUB_TOKEN` for a higher GitHub request limit
 - `OPENAI_API_KEY` or `GEMINI_API_KEY` for optional cover letters
 
@@ -467,13 +525,13 @@ These secrets are optional:
 - TI-AAA has no developer-operated server and sends no product telemetry.
 - Repository sync sends requests to GitHub. A configured `GITHUB_TOKEN` is sent only to GitHub.
 - The posting review requests the direct application link for each listing and sends the resulting
-  description, your resumes, and your profile facts to Claude. It does not enumerate employer job
+  description, your resumes, and your profile facts to the selected provider. It does not enumerate employer job
   catalogs and it rejects links that resolve to local or private-network addresses. Turn it off with
   **Review new listings automatically**, or keep decisions metadata-only by turning off the posting
   read.
-- Claude browser automation receives the selected resume text, candidate profile, prepared answers, job metadata, and the generated per-portal account password. It interacts with the employer site, which receives the fields, files, and account credential entered for that application.
+- Browser automation receives the selected resume text, candidate profile, prepared answers, job metadata, and the generated per-portal account password. It interacts with the employer site, which receives the fields, files, and account credential entered for that application.
 - During a manual CAPTCHA checkpoint, dashboard mouse and keyboard actions travel only through the local same-origin WebSocket to the retained Chromium tab. TI-AAA does not expose a remote navigation command or send the application URL to another browser.
-- A one-time code entered in **Agent** passes through the active Claude browser session to the employer's code field. TI-AAA clears the stored local answer after that browser turn.
+- A one-time code entered in **Agent** passes through the active browser agent session to the employer's code field. TI-AAA clears the stored local answer after that browser turn.
 - Optional OpenAI, Gemini, or custom LLM preparation sends resume text and job metadata to the provider you configure.
 - Optional Web Push sends the company and role in an encrypted notification through your browser vendor's push service.
 - The dashboard binds to `127.0.0.1` by default.
