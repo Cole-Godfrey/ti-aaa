@@ -11,6 +11,7 @@ import pytest
 from reportlab.pdfgen import canvas
 
 from tiaaa.apply.chrome import launch_chrome, stop_chrome, stop_process_tree
+from tiaaa.apply.desktop import DesktopBridge
 from tiaaa.apply.runner import _ApplicationAgentSession, _launch_mcp_bridge
 from tiaaa.config import AppPaths, ensure_dirs
 
@@ -76,12 +77,19 @@ def test_real_browser_fills_uploads_then_continues_after_email_verification(tmp_
     pdf = canvas.Canvas(str(paths.resume_pdf))
     pdf.drawString(50, 750, paths.resume_text.read_text())
     pdf.save()
-    chrome = bridge = session = None
+    chrome = bridge = session = native = None
+    backend = os.environ.get("TIAAA_LIVE_BROWSER_BACKEND", "playwright")
+    assert backend in {"desktop", "playwright"}
     try:
-        chrome, port = launch_chrome(worker_id=7, paths=paths, headless=False)
         worker_dir = paths.workers / "worker-7"
         worker_dir.mkdir()
-        bridge = _launch_mcp_bridge(cdp_port=port, mcp_port=9437, cwd=worker_dir)
+        if backend == "desktop":
+            native = DesktopBridge(port=9437, worker_dir=worker_dir, worker_id="worker-7",
+                                   output_path=paths.previews / "worker-7.jpg")
+            native.start()
+        else:
+            chrome, port = launch_chrome(worker_id=7, paths=paths, headless=False)
+            bridge = _launch_mcp_bridge(cdp_port=port, mcp_port=9437, cwd=worker_dir)
         session = _ApplicationAgentSession(
             job={
                 "id": 1,
@@ -102,6 +110,9 @@ def test_real_browser_fills_uploads_then_continues_after_email_verification(tmp_
             unattended=True,
             provider="codex",
             claude_fallback=False,
+            browser_backend=backend,
+            browser_token=native.token if native else "",
+            prepare_browser=native.resume if native else None,
         )
         result = session.start()
         assert result.reason_code == "verification_required", result
@@ -118,6 +129,8 @@ def test_real_browser_fills_uploads_then_continues_after_email_verification(tmp_
     finally:
         if session:
             session.close()
+        if native:
+            native.stop()
         stop_process_tree(bridge)
         stop_chrome(chrome)
         server.shutdown()

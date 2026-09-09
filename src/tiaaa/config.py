@@ -90,6 +90,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "human_checkpoints": True,
         "claude_model": "sonnet",
         "headless": False,
+        "browser_backend": "playwright",
         "timeout_seconds": 600,
     },
     "email_verification": {
@@ -305,6 +306,10 @@ def save_settings(settings: dict[str, Any], paths: AppPaths | None = None) -> Pa
     )
     if automation.get("provider") not in {"codex", "claude"}:
         raise ValueError("automation.provider must be codex or claude")
+    if automation.get("browser_backend") not in {"playwright", "desktop"}:
+        raise ValueError("automation.browser_backend must be playwright or desktop")
+    if automation.get("browser_backend") == "desktop" and automation.get("headless"):
+        raise ValueError("Desktop Chrome requires headless mode to be turned off")
     for flag in ("claude_fallback", "human_checkpoints"):
         automation[flag] = bool(automation.get(flag, True))
     verification = merged["email_verification"]

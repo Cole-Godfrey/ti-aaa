@@ -14,12 +14,14 @@ from tiaaa.database import (
 from tiaaa.models import InternshipListing
 
 
+@pytest.mark.parametrize("backend", ["playwright", "desktop"])
 @pytest.mark.parametrize("blocker", ["captcha", "access_blocked", "verification_required", "email"])
 def test_auto_worker_keeps_checkpoints_and_resumes_same_session(
-    tmp_path, profile, settings, monkeypatch, blocker
+    tmp_path, profile, settings, monkeypatch, blocker, backend
 ):
     paths = ensure_dirs(AppPaths(tmp_path))
     settings["automation"]["auto_apply_new"] = True
+    settings["automation"]["browser_backend"] = backend
     save_settings(settings, paths)
     db = init_db(paths.database)
     source = SOURCE_DOCUMENTS[0]
@@ -40,6 +42,11 @@ def test_auto_worker_keeps_checkpoints_and_resumes_same_session(
     resumed = []
 
     class Preview:
+        token = "test-desktop-token"
+
+        def resume(self):
+            pass
+
         def __init__(self, **kwargs):
             pass
 
@@ -95,6 +102,8 @@ def test_auto_worker_keeps_checkpoints_and_resumes_same_session(
 
     monkeypatch.setattr(runner, "_ApplicationAgentSession", Session)
     monkeypatch.setattr(runner, "PreviewCapture", Preview)
+    monkeypatch.setattr(runner, "DesktopBridge", Preview)
+    monkeypatch.setattr(runner, "validate_desktop", lambda **kwargs: None)
     monkeypatch.setattr(runner, "launch_chrome", lambda **kwargs: (None, 9330))
     monkeypatch.setattr(runner, "_launch_mcp_bridge", lambda **kwargs: None)
     monkeypatch.setattr(runner, "_wait_for_human_control_return", handoff)

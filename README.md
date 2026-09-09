@@ -376,6 +376,44 @@ To run the opt-in integration test using your Codex login and Chrome against a l
 TIAAA_LIVE_BROWSER_TEST=1 pytest tests/test_live_application.py -v
 ```
 
+### Ordinary Chrome through desktop control (macOS, experimental)
+
+Choose **Settings → Browser → Desktop Chrome** to let Codex operate ordinary Chrome using window
+screenshots and OS mouse/keyboard input. This opens a dedicated window in your normal Chrome profile;
+it does not launch Chrome with remote debugging or attach Playwright. Existing sign-ins remain available.
+Claude's usage-limit fallback keeps the same window.
+
+Run TI-AAA directly on your Mac for this mode; a Docker container cannot control the host desktop.
+From a native checkout:
+
+```bash
+source .venv/bin/activate
+pip install -e '.[desktop]'
+tiaaa doctor
+tiaaa serve
+```
+
+In **System Settings → Privacy & Security**, grant **Accessibility** and **Screen Recording** to the
+application running TI-AAA (for example, Terminal or PyCharm), then restart that application. Permissions
+for the Codex desktop app do not grant permissions to a separately launched TI-AAA process. Select
+Desktop Chrome and disable headless mode. Native installs use `~/.tiaaa` or `TIAAA_HOME`; they do not
+implicitly share a Docker volume. Keep only one application worker active across installations.
+
+This mode occupies your mouse and keyboard. Keep the dedicated Chrome window visible. If you change
+windows during an action, the agent pauses instead of typing into another application. Complete any
+manual checkpoint in that Chrome window and select **Continue agent** in TI-AAA. The agent restores its
+owned window without navigating back to the job URL. Stopping TI-AAA leaves Chrome open.
+
+A previously failing AMD job URL loaded in ordinary Chrome during development. That is evidence for
+trying this mode, not proof that every 403 or submission spam check is resolved. Persistent access
+blocks and CAPTCHAs still pause for you. The desktop integration has automated transport, input,
+checkpoint and provider tests; its physical form/upload flow still requires a live permission-enabled
+test on macOS. Run the local fake-employer test (never submits a real application) with:
+
+```bash
+TIAAA_LIVE_BROWSER_TEST=1 TIAAA_LIVE_BROWSER_BACKEND=desktop pytest tests/test_live_application.py
+```
+
 ## Terminal use
 
 Create the local files:

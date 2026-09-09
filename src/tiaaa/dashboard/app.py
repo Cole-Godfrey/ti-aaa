@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from tiaaa import __version__
+from tiaaa.apply.desktop import desktop_worker_active
 from tiaaa.apply.preview import browser_control_hub, preview_frame_hub
 from tiaaa.claude_auth import ClaudeAuthManager
 from tiaaa.codex import codex_status
@@ -848,6 +849,7 @@ def create_app(
         for item in items:
             screenshot = item.pop("screenshot_path", None)
             item["browser_interactive"] = False
+            item["desktop_handoff"] = False
             item["preview_available"] = bool(screenshot and Path(screenshot).is_file())
             item["preview_url"] = (
                 f"/api/workers/{item['worker_id']}/preview" if item["preview_available"] else None
@@ -884,6 +886,13 @@ def create_app(
                     and item.get("status") == "review_ready"
                     and not item["questions"]
                     and job_row.get("availability_status") != "manual_only"
+                )
+                item["desktop_handoff"] = bool(
+                    desktop_worker_active(str(item["worker_id"]))
+                    and not job_row.get("human_control_returned")
+                    and live_human_interaction_checkpoint(
+                        database, int(item["job_id"]), str(item["worker_id"]),
+                    )
                 )
                 item["browser_interactive"] = bool(
                     browser_control_hub.is_available(str(item["worker_id"]))

@@ -715,6 +715,19 @@ def doctor() -> None:
     except FileNotFoundError as exc:
         checks.append(("Chrome", False, f"optional: {exc}"))
 
+    if load_settings(paths).get("automation", {}).get("browser_backend") == "desktop":
+        try:
+            from tiaaa.apply.desktop import _accessibility_trusted, validate_desktop
+            validate_desktop()
+            import Quartz
+            for label, granted in (
+                ("Accessibility", _accessibility_trusted()),
+                ("Screen Recording", Quartz.CGPreflightScreenCaptureAccess()),
+            ):
+                checks.append((label, bool(granted), "Desktop Chrome: System Settings > Privacy & Security"))
+        except (ValueError, RuntimeError, ImportError) as exc:
+            checks.append(("Desktop Chrome", False, str(exc)))
+
     table = Table(title="TI-AAA doctor", header_style="bold cyan")
     table.add_column("Check")
     table.add_column("Status")

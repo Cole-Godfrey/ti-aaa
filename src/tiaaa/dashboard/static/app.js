@@ -985,6 +985,7 @@ function renderWorkers(items) {
     preview_available: worker.preview_available,
     stream_active: worker.stream_active,
     browser_interactive: worker.browser_interactive,
+    desktop_handoff: worker.desktop_handoff,
     stoppable: worker.stoppable,
     stop_requested: worker.stop_requested,
     updated_at: worker.updated_at,
@@ -1000,6 +1001,7 @@ function renderWorkers(items) {
           <canvas data-preview-canvas="${escapeHtml(worker.worker_id)}"${interactive ? ` data-browser-control="${escapeHtml(worker.worker_id)}" tabindex="0"` : ""} aria-label="${interactive ? "Interactive" : "Live"} local browser view for ${escapeHtml(worker.worker_id)}"></canvas>
           <p class="preview-empty">The live browser view appears here when a worker starts.</p>
         </div>
+        ${worker.desktop_handoff ? `<div class="browser-control-bar"><div><strong>CONTINUE IN DESKTOP CHROME</strong><span>Use the dedicated Chrome window to clear the checkpoint. Continue agent restores that same window.</span></div><button class="button ink return-browser-control" type="button" data-return-browser-control="${worker.job_id}">Continue agent</button></div>` : ""}
         ${interactive ? `<div class="browser-control-bar"><div><strong>YOU HAVE CONTROL OF THIS BROWSER</strong><span>Click the page, type or paste into the focused field, and scroll here. This is the agent's exact retained tab—not a new job link.</span></div><button class="button ink return-browser-control" type="button" data-return-browser-control="${worker.job_id}">Continue agent</button></div>` : ""}
         <p class="worker-message">${escapeHtml(worker.message || "Waiting for the next cycle")}</p>
         ${worker.stoppable ? `<div class="worker-actions" data-stop-job="${worker.job_id}"><span>${worker.stop_requested ? "Stopping this session…" : "Stuck, or did you finish this one yourself?"}</span><button class="button ghost stop-agent" type="button"${worker.stop_requested ? " disabled" : ""}>${worker.stop_requested ? "Stopping…" : "Stop session"}</button></div>` : ""}</article>`;
@@ -1260,6 +1262,7 @@ function renderAgentInputs(workers) {
     questions: worker.questions,
     submission_ready: worker.submission_ready,
     browser_interactive: worker.browser_interactive,
+    desktop_handoff: worker.desktop_handoff,
   })));
   if (signature === state.agentInputSignature) return;
   state.agentInputSignature = signature;
@@ -1271,10 +1274,10 @@ function renderAgentInputs(workers) {
   panel.innerHTML = actionable.map(worker => {
     const questions = worker.questions || [];
     const resumeName = worker.submitted_resume_name || worker.base_resume_name || "Prepared resume";
-    if (worker.browser_interactive) {
+    if (worker.browser_interactive || worker.desktop_handoff) {
       return `<article class="agent-checkpoint human-checkpoint" data-manual-job="${worker.job_id}" data-stop-job="${worker.job_id}">
         <header><div><p class="kicker">LIVE BROWSER CONTROL</p><h3>${escapeHtml(worker.company)} · ${escapeHtml(worker.role)}</h3></div><span>Same session</span></header>
-        <p class="checkpoint-note">Use the interactive browser above to complete the CAPTCHA or inspect the stalled submission. Click Continue agent only after the challenge is cleared or a receipt is visible. If the challenge keeps coming back, stop the session—and record it if you finished the application yourself.</p>
+        <p class="checkpoint-note">${worker.desktop_handoff ? "Use the dedicated desktop Chrome window" : "Use the interactive browser above"} to complete the CAPTCHA or inspect the stalled submission. Click Continue agent only after the challenge is cleared or a receipt is visible. If the challenge keeps coming back, stop the session—and record it if you finished the application yourself.</p>
         <div class="checkpoint-actions"><span>Resume: ${escapeHtml(resumeName)}</span><div><button class="button ghost stop-agent" type="button">Stop session</button><button class="button ink mark-applied-manually" type="button">I applied manually</button></div></div>
       </article>`;
     }
@@ -1581,6 +1584,7 @@ function populateConfiguration(config) {
   setChecked("useLlm", preparation.use_llm);
   setChecked("generateCoverLetters", preparation.generate_cover_letters);
   setChecked("headless", automation.headless);
+  setValue("browserBackend", automation.browser_backend || "playwright");
   setChecked("reviewEnabled", review.enabled ?? true);
   setChecked("reviewFetchPostings", review.fetch_postings ?? true);
   setValue("reviewBudget", review.max_applications_per_company ?? 2);
@@ -1670,6 +1674,7 @@ function configurationPayload() {
     provider: value("agentProvider"), codex_model: value("codexModel"),
     claude_fallback: checked("claudeFallback"), human_checkpoints: checked("humanCheckpoints"),
     auto_apply_new: checked("autoMode"), headless: checked("headless"),
+    browser_backend: value("browserBackend"),
     manual_auto_submit: checked("manualAutoSubmit"),
     auto_apply_use_preferences: checked("autoModeUsePreferences"),
     web_push_notifications: checked("autoMode") && checked("webPushNotifications"),

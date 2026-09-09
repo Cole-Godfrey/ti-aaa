@@ -21,6 +21,7 @@ from queue import Empty, Queue
 from typing import Any
 
 from tiaaa.apply.chrome import launch_chrome, stop_chrome, stop_process_tree
+from tiaaa.apply.desktop import DESKTOP_TOOLS, DesktopBridge, validate_desktop
 from tiaaa.apply.preview import PreviewCapture
 from tiaaa.apply.prompt import (
     build_continuation_prompt,
@@ -202,13 +203,14 @@ def _mcp_server_command(
     ]
 
 
-def _mcp_config(port: int) -> dict[str, Any]:
+def _mcp_config(port: int, token: str = "") -> dict[str, Any]:
     """Point Claude at a bridge that is already listening before Claude starts."""
 
     return {
         "mcpServers": {
             _PLAYWRIGHT_SERVER_NAME: {
                 "type": "http",
+                **({"headers": {"Authorization": f"Bearer {token}"}} if token else {}),
                 "url": f"http://127.0.0.1:{port}/mcp",
             }
         }
@@ -432,7 +434,9 @@ def _write_safe_diagnostic(
         diagnostic_path.chmod(0o600)
 
 
-def _claude_command(*, model: str, config_path: Path) -> list[str]:
+def _claude_command(
+    *, model: str, config_path: Path, browser_tools: tuple[str, ...] = _PLAYWRIGHT_TOOLS
+) -> list[str]:
     """Expose only the browser interaction tools required by the application agent."""
 
     return [
@@ -452,7 +456,7 @@ def _claude_command(*, model: str, config_path: Path) -> list[str]:
         "--tools",
         "ToolSearch",
         "--allowedTools",
-        ",".join(("ToolSearch", *_PLAYWRIGHT_TOOLS)),
+        ",".join(("ToolSearch", *browser_tools)),
         "--permission-mode",
         "dontAsk",
         "--no-session-persistence",
@@ -912,6 +916,9 @@ class _ApplicationAgentSession:
         provider: str = "codex",
         codex_model: str = "",
         claude_fallback: bool = True,
+        browser_backend: str = "playwright",
+        browser_token: str = "",
+        prepare_browser: Any = None,
     ) -> None:
         self.job = job
         self.paths = paths
@@ -925,6 +932,7 @@ class _ApplicationAgentSession:
         self.turn_number = 0
         self.provider = provider
         self.claude_fallback = claude_fallback
+        self.prepare_browser = prepare_browser
         self.process: _ClaudeProcess | _CodexProcess | None = None
         self.worker_dir = paths.workers / f"worker-{worker_id}"
         self.worker_dir.mkdir(parents=True, exist_ok=True)
@@ -939,18 +947,26 @@ class _ApplicationAgentSession:
             unattended=unattended,
             application_answers=application_answers,
         )
+        if browser_backend == "desktop":
+            from tiaaa.apply.prompt import desktop_prompt
+            self.initial_prompt = desktop_prompt(self.initial_prompt)
+        browser_tools = (
+            tuple(_PLAYWRIGHT_TOOL_PREFIX + name for name in DESKTOP_TOOLS)
+            if browser_backend == "desktop" else _PLAYWRIGHT_TOOLS
+        )
         config_path = self.worker_dir / "playwright-mcp.json"
-        config_path.write_text(json.dumps(_mcp_config(port), indent=2), encoding="utf-8")
+        config_path.write_text(json.dumps(_mcp_config(port, browser_token), indent=2), encoding="utf-8")
         with suppress(OSError):
             config_path.chmod(0o600)
-        self.command = _claude_command(model=model, config_path=config_path)
+        self.command = _claude_command(model=model, config_path=config_path, browser_tools=browser_tools)
         schema_path = self.worker_dir / "result-schema.json"
         schema_path.write_text(json.dumps(_RESULT_SCHEMA), encoding="utf-8")
         self.codex_command = codex_command(
             schema_path=schema_path,
             model=codex_model,
             port=port,
-            browser_tools=tuple(tool.removeprefix(_PLAYWRIGHT_TOOL_PREFIX) for tool in _PLAYWRIGHT_TOOLS),
+            browser_tools=tuple(tool.removeprefix(_PLAYWRIGHT_TOOL_PREFIX) for tool in browser_tools),
+            browser_token=browser_token,
         )
         self.environment = os.environ.copy()
         self.environment.pop("TIAAA_EMAIL_APP_PASSWORD", None)
@@ -979,6 +995,13 @@ class _ApplicationAgentSession:
                 "browser_actions": [],
                 "mcp_servers": [],
             }
+        if self.prepare_browser and not (self.should_stop and self.should_stop()):
+            try:
+                self.prepare_browser()
+            except Exception as exc:
+                return AgentResult("needs_review", str(exc)[:500], "access_blocked"), {
+                    "browser_actions": [], "mcp_servers": [],
+                }
         self.turn_number += 1
         self.last_turn_started = datetime.now(UTC).replace(microsecond=0)
         result, summary = _run_agent_turn(
@@ -1260,7 +1283,8 @@ def _worker(
     connection = get_connection(db_path)
     chrome_process = None
     mcp_process = None
-    preview: PreviewCapture | None = None
+    preview: PreviewCapture | DesktopBridge | None = None
+    desktop = automation.get("browser_backend", "playwright") == "desktop"
     worker_name = f"worker-{worker_id}"
     preview_path = paths.previews / f"{worker_name}.jpg"
     totals = {"applied": 0, "review": 0, "failed": 0, "expired": 0, "stopped": 0}
@@ -1268,17 +1292,10 @@ def _worker(
         connection,
         worker_name,
         status="starting",
-        message="Launching an isolated browser",
+        message="Opening ordinary desktop Chrome" if desktop else "Launching an isolated browser",
         screenshot_path=str(preview_path.resolve()),
     )
     try:
-        chrome_process, port = launch_chrome(
-            worker_id=worker_id,
-            paths=paths,
-            headless=(
-                bool(automation.get("headless", False)) or os.environ.get("TIAAA_FORCE_HEADLESS") == "1"
-            ),
-        )
         mcp_port = BASE_MCP_PORT + worker_id
         update_worker_state(
             connection,
@@ -1289,12 +1306,19 @@ def _worker(
         )
         worker_dir = paths.workers / worker_name
         worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        mcp_process = _launch_mcp_bridge(cdp_port=port, mcp_port=mcp_port, cwd=worker_dir)
-        preview = PreviewCapture(
-            port=port,
-            output_path=preview_path,
-            worker_id=worker_name,
-        )
+        if desktop:
+            validate_desktop(headless=bool(automation.get("headless", False)))
+            preview = DesktopBridge(
+                port=mcp_port, worker_dir=worker_dir, worker_id=worker_name, output_path=preview_path,
+            )
+        else:
+            chrome_process, port = launch_chrome(
+                worker_id=worker_id, paths=paths,
+                headless=(bool(automation.get("headless", False))
+                          or os.environ.get("TIAAA_FORCE_HEADLESS") == "1"),
+            )
+            mcp_process = _launch_mcp_bridge(cdp_port=port, mcp_port=mcp_port, cwd=worker_dir)
+            preview = PreviewCapture(port=port, output_path=preview_path, worker_id=worker_name)
         preview.start()
         update_worker_state(
             connection,
@@ -1353,6 +1377,9 @@ def _worker(
                     provider=str(automation.get("provider", "codex")),
                     codex_model=str(automation.get("codex_model", "")),
                     claude_fallback=bool(automation.get("claude_fallback", True)),
+                    browser_backend="desktop" if desktop else "playwright",
+                    browser_token=preview.token if desktop else "",
+                    prepare_browser=preview.resume if desktop else None,
                 )
                 try:
                     agent_result = agent_session.start()
@@ -1729,7 +1756,12 @@ def run_applications(
         raise ValueError("automation.provider must be codex or claude")
     if shutil.which(provider) is None:
         raise FileNotFoundError(f"{provider.title()} CLI was not found on PATH")
-    if not os.environ.get("TIAAA_PLAYWRIGHT_MCP_COMMAND") and shutil.which("npx") is None:
+    backend = automation.get("browser_backend", "playwright")
+    if backend not in {"playwright", "desktop"}:
+        raise ValueError("automation.browser_backend must be playwright or desktop")
+    if backend == "desktop":
+        validate_desktop(headless=bool(automation.get("headless", False)))
+    elif not os.environ.get("TIAAA_PLAYWRIGHT_MCP_COMMAND") and shutil.which("npx") is None:
         raise FileNotFoundError("npx was not found on PATH; Node.js is required for Playwright MCP")
 
     base, extra = divmod(requested, workers)

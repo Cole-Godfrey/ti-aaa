@@ -299,6 +299,7 @@
               <label>Worker timeout (seconds)<input id="workerTimeout" type="number" min="60" max="3600"></label>
               <label>Primary agent<select id="agentProvider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
               <label>Codex model<input id="codexModel" placeholder="Codex default"></label>
+              <label>Browser<select id="browserBackend"><option value="playwright">Isolated Chrome</option><option value="desktop">Desktop Chrome (macOS, experimental)</option></select><small>Desktop mode runs outside Docker and uses your mouse and keyboard. Keep its Chrome window in front.</small></label>
               <label>Claude backup model<input id="claudeModel" placeholder="sonnet"></label>
             </div>
             <div class="toggle-list">

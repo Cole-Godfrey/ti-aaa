@@ -110,6 +110,7 @@ def test_usage_fallback_keeps_form_and_never_retries_uncertain_submission(
     session = object.__new__(runner._ApplicationAgentSession)
     session.provider = "codex"
     session.claude_fallback = True
+    session.prepare_browser = None
     session.submission_started = submission_started
     session.initial_prompt = "Original facts"
     session.submit = True

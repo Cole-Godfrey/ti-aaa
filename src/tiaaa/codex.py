@@ -35,7 +35,8 @@ def codex_status() -> dict[str, Any]:
 
 
 def codex_command(
-    *, schema_path: Path, model: str = "", port: int | None = None, browser_tools: tuple[str, ...] = ()
+    *, schema_path: Path, model: str = "", port: int | None = None, browser_tools: tuple[str, ...] = (),
+    browser_token: str = "",
 ) -> list[str]:
     command = [
         "codex",
@@ -68,6 +69,8 @@ def codex_command(
                 "mcp_servers.tiaaa_browser.default_tools_approval_mode": "approve",
             }
         )
+    if browser_token and port is not None:
+        config["mcp_servers.tiaaa_browser.http_headers.Authorization"] = f"Bearer {browser_token}"
     for key, value in config.items():
         command.extend(["-c", f"{key}={json.dumps(value)}"])
     if model:

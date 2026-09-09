@@ -365,3 +365,28 @@ ordinary candidate input or a one-time verification code would let the applicati
 Do not report APPLIED unless the site visibly confirmed receipt. Do not report REVIEW_READY until
 every required answer that can be completed from the sources has been filled and reviewed.
 """
+
+
+def desktop_prompt(prompt: str) -> str:
+    """Replace DOM instructions while preserving the exact application facts and submission rules."""
+    prompt = prompt.replace(
+        "Use only the Playwright browser tools.", "Use only the desktop Chrome browser tools.",
+    )
+    start = prompt.index("EFFICIENT BROWSER CONTROL\n")
+    end = prompt.index("\nWORKFLOW\n", start)
+    return prompt[:start] + """DESKTOP BROWSER CONTROL
+1. You operate one ordinary Chrome window using screenshots and real OS mouse/keyboard input.
+   No DOM, element references, Playwright selectors, JavaScript or browser_fill_form tools exist.
+2. Each action returns a new screenshot. Inspect it before choosing the next action. Click coordinates
+   are fractions of the full screenshot: x=0.5,y=0.5 means its center. Never guess hidden targets.
+3. Click a visible field, then browser_type(text=...,replace=true) to replace its contents. Use Tab or
+   Shift+Tab for adjacent fields. Open dropdowns and choose visible options with clicks or arrow keys.
+4. Scroll with browser_scroll(direction="down",amount=4). Inspect every required section. To upload,
+   click the form's file chooser first, then browser_file_upload(path=<supplied absolute document path>).
+5. Restrict interaction to this application window and employer application. Do not inspect other tabs,
+   personal browser accounts, saved passwords or browser settings. Do not change networks or protections.
+6. If desktop control reports lost focus or its corner fail-safe, return NEEDS_REVIEW/access_blocked
+   with no questions, explaining how to bring the dedicated Chrome window back. Do not repeat inputs.
+7. Never wait more than 5 seconds per browser_wait_for(time_seconds=...) or retry a failed action more
+   than twice. A persistent 403 remains a human checkpoint; a new browser does not guarantee access.
+""" + prompt[end:]

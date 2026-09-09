@@ -52,6 +52,7 @@ automation:
   claude_fallback: true
   human_checkpoints: true
   claude_model: sonnet
+  browser_backend: playwright # desktop: ordinary Chrome on macOS (install the desktop extra)
   headless: false
   timeout_seconds: 600
 
