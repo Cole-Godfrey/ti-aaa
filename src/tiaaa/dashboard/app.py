@@ -340,6 +340,8 @@ def create_app(
             f"script-src {script_sources}; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
             "img-src 'self' data:; connect-src 'self'; form-action 'self'"
         )
+        if request.url.path in {"/", "/static/app.js", "/static/styles.css"}:
+            response.headers["Cache-Control"] = "no-cache"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"

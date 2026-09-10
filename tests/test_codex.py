@@ -172,3 +172,39 @@ def test_error_envelope_cannot_claim_success(tmp_path):
     )
     assert parsed.result == "failed"
     assert "usage limit" in parsed.detail
+
+
+@pytest.mark.parametrize("docker", [False, True])
+@pytest.mark.parametrize("outcome", ["connected", "signed_out", "missing", "timeout", "error"])
+def test_login_status_has_bounded_errors_and_runtime_specific_instructions(monkeypatch, docker, outcome):
+    from unittest.mock import Mock
+
+    import tiaaa.codex as codex
+    monkeypatch.setenv("TIAAA_DOCKER", "1" if docker else "0")
+    monkeypatch.setattr(codex.shutil, "which", lambda _: None if outcome == "missing" else "/bin/codex")
+    run = Mock(return_value=subprocess.CompletedProcess([], 0 if outcome == "connected" else 1))
+    if outcome == "timeout":
+        run.side_effect = subprocess.TimeoutExpired("codex", 10)
+    elif outcome == "error":
+        run.side_effect = OSError("sensitive system detail")
+    monkeypatch.setattr(codex.subprocess, "run", run)
+    result = codex.codex_status()
+    assert result["logged_in"] == (outcome == "connected")
+    assert result["installed"] == (outcome != "missing")
+    assert ("docker exec" in result["login_command"]) == docker
+    if outcome in {"timeout", "error"}:
+        assert result["error"] and "sensitive" not in result["error"]
+    if outcome != "missing":
+        assert run.call_args.kwargs["timeout"] == 10
+
+
+def test_codex_connection_ui_failure_and_timeout_recovery():
+    import shutil
+    from pathlib import Path
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for browser JavaScript tests")
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run([node, "--test", "tests/test_codex_auth_ui.cjs"], cwd=root,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -338,8 +338,8 @@
           </article>
           <article class="panel settings-card claude-card">
             <p class="kicker">BROWSER AGENT</p><h2>Codex connection</h2>
-            <p id="codexAuthState">Checking Codex connection…</p>
-            <p class="fine-print">Install Codex CLI and run <code>codex login</code> once. TI-AAA uses that login for applications and reviews.</p>
+            <p id="codexAuthState">Codex connection not checked</p>
+            <p class="fine-print">Sign in where TI-AAA runs. Docker has a separate Codex login from your Mac; the connection check shows the correct command.</p>
             <button id="refreshCodex" type="button" class="button ghost">Refresh connection</button>
             <h2>Claude backup connection</h2>
             <div class="auth-status-line"><span id="claudeAuthDot" class="auth-dot"></span><strong id="claudeAuthState">Checking connection…</strong></div>
@@ -415,7 +415,7 @@
         <section class="onboard-step" data-step="3">
           <p class="kicker">STEP 3 OF 3</p><h2>Connect the browser agent</h2>
           <div class="onboard-auth">
-            <strong id="onboardCodexState">Checking Codex connection…</strong>
+            <strong id="onboardCodexState">Codex connection not checked</strong>
             <p>Codex is the primary agent. Install Codex CLI and run <code>codex login</code> once. Claude below is an optional usage-limit backup.</p>
             <div class="auth-status-line"><span id="onboardClaudeAuthDot" class="auth-dot"></span><strong id="onboardClaudeAuthState">Claude account not connected</strong></div>
             <p id="onboardClaudeAuthDetail" class="fine-print">Recommended: sign in with the Claude Pro or Max account you already use for Claude Code. No Anthropic API key is needed.</p>

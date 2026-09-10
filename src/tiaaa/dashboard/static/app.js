@@ -132,11 +132,33 @@ function agentConnected(provider = state.config?.settings?.automation?.provider 
 }
 
 async function refreshCodexAuth() {
-  state.codexAuth = await api("/api/codex-auth");
-  const message = state.codexAuth.logged_in
-    ? "Codex connected" : "Run codex login in a terminal, then refresh connection";
-  element("codexAuthState").textContent = message;
-  element("onboardCodexState").textContent = message;
+  const button = element("refreshCodex");
+  if (button.disabled) return;
+  const display = message => {
+    ["codexAuthState", "onboardCodexState"].forEach(id => { element(id).textContent = message; });
+  };
+  button.disabled = true;
+  display("Checking Codex connection…");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const auth = await api("/api/codex-auth", { signal: controller.signal, cache: "no-store" });
+    if (!auth || typeof auth.installed !== "boolean" || typeof auth.logged_in !== "boolean") {
+      throw new Error("Invalid Codex status response");
+    }
+    state.codexAuth = auth;
+    display(auth.error || (auth.logged_in ? "Codex connected" : !auth.installed
+      ? "Codex CLI is not installed where TI-AAA is running. Install it, then refresh."
+      : `Codex is not signed in. Run ${auth.login_command || "codex login"}, then refresh connection.`));
+  } catch (error) {
+    state.codexAuth = { installed: false, logged_in: false };
+    display(error.name === "AbortError"
+      ? "Codex connection check timed out. Check that TI-AAA is running, then refresh."
+      : "Could not check Codex connection. Reload the page and try Refresh connection again.");
+  } finally {
+    clearTimeout(timer);
+    button.disabled = false;
+  }
 }
 
 function renderClaudeAuth(auth) {
@@ -1837,12 +1859,13 @@ async function refreshAll() {
 }
 
 async function initialize() {
+  const codexCheck = refreshCodexAuth();
   try {
     const [config, onboarding, resumes, claudeAuth] = await Promise.all([api("/api/config"), api("/api/onboarding"), api("/api/resumes"), api("/api/claude-auth")]);
     populateConfiguration(config);
     await refreshWebPushState();
     renderClaudeAuth(claudeAuth);
-    await refreshCodexAuth();
+    await codexCheck;
     state.onboarding = onboarding;
     renderResumes(resumes.items);
     if (!onboarding.complete) {

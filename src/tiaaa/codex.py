@@ -18,9 +18,17 @@ class CodexStopped(Exception):
 
 
 def codex_status() -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "installed": False, "logged_in": False,
+        "login_command": (
+            "docker exec -it tiaaa codex login --device-auth"
+            if os.environ.get("TIAAA_DOCKER") == "1" else "codex login"
+        ),
+    }
     executable = shutil.which("codex")
     if not executable:
-        return {"installed": False, "logged_in": False}
+        return status
+    status["installed"] = True
     try:
         result = subprocess.run(
             [executable, "login", "status"],
@@ -28,10 +36,12 @@ def codex_status() -> dict[str, Any]:
             text=True,
             timeout=10,
         )
-        logged_in = result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        logged_in = False
-    return {"installed": True, "logged_in": logged_in}
+        status["logged_in"] = result.returncode == 0
+    except subprocess.TimeoutExpired:
+        status["error"] = "Codex status check timed out. Try refreshing again."
+    except OSError:
+        status["error"] = "Could not run Codex. Check its installation and refresh again."
+    return status
 
 
 def codex_command(
