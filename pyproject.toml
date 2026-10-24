@@ -42,7 +42,7 @@ desktop = [
   "mcp>=1.28,<2",
   "pyautogui>=0.9.54,<1; sys_platform == 'darwin'",
   "pyobjc-framework-Quartz>=11,<13; sys_platform == 'darwin'",
-  "pillow>=12,<13",
+  "pillow>=12,<14",
 ]
 dev = [
   "mcp>=1.28,<2",
